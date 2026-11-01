@@ -1,0 +1,460 @@
+"""여러 MCP 서버에 동시에 연결하고, 각 서버의 tool 을 LLM function 으로 노출하는 허브.
+
+- mcp 파이썬 SDK 1.x / 2.x 모두 지원합니다.
+- 서버마다 전용 asyncio Task 가 연결(context manager)을 소유하므로, 서버가 죽어도
+  해당 서버만 재연결합니다.
+- 웹 컨트롤(브라우저 자동화) 서버는 동시 호출에 취약하므로 서버 단위로 호출을 직렬화합니다.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import logging
+import re
+from contextlib import AsyncExitStack
+from dataclasses import dataclass, field
+from fnmatch import fnmatch
+from pathlib import Path
+from typing import Any, Awaitable, Callable
+
+from .config import MCPServerConfig
+
+log = logging.getLogger(__name__)
+
+NAME_SEP = "__"
+_NAME_OK = re.compile(r"[^a-zA-Z0-9_-]")
+
+
+# ---------------------------------------------------------------------------
+# 공통 유틸
+# ---------------------------------------------------------------------------
+
+
+def _dump(obj: Any) -> Any:
+    """pydantic 모델 → camelCase(alias) dict. (SDK 1.x/2.x 필드명 차이 흡수)"""
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump(by_alias=True, exclude_none=True, mode="json")
+    return obj
+
+
+def make_function_name(server: str, tool: str, used: set[str]) -> str:
+    """OpenAI function 이름 규칙(^[a-zA-Z0-9_-]{1,64}$)에 맞는 고유 이름 생성."""
+    base = _NAME_OK.sub("_", f"{server}{NAME_SEP}{tool}")
+    name = base[:64]
+    if name in used or len(base) > 64:
+        digest = hashlib.sha1(f"{server}/{tool}".encode()).hexdigest()[:8]
+        name = f"{base[:55]}_{digest}"
+    used.add(name)
+    return name
+
+
+def normalize_schema(schema: dict[str, Any] | None) -> dict[str, Any]:
+    schema = dict(schema or {})
+    schema.pop("$schema", None)
+    if schema.get("type") != "object":
+        schema = {"type": "object", "properties": schema.get("properties", {}), **{k: v for k, v in schema.items() if k not in ("type", "properties")}}
+    schema.setdefault("properties", {})
+    return schema
+
+
+def describe_exception(e: BaseException) -> str:
+    """ExceptionGroup(anyio TaskGroup) 안의 실제 원인을 꺼내 사람이 읽을 수 있게."""
+    while getattr(e, "exceptions", None):
+        e = e.exceptions[0]
+    return f"{type(e).__name__}: {e}"
+
+
+def tool_result_to_text(result: Any) -> tuple[str, bool]:
+    """CallToolResult → (LLM 에 줄 텍스트, is_error)."""
+    data = _dump(result)
+    if not isinstance(data, dict):
+        return str(data), False
+    is_error = bool(data.get("isError"))
+    parts: list[str] = []
+    for item in data.get("content") or []:
+        typ = item.get("type")
+        if typ == "text":
+            parts.append(item.get("text", ""))
+        elif typ == "image":
+            size = len(item.get("data", "")) * 3 // 4
+            parts.append(f"[이미지 {item.get('mimeType', '')} 약 {size} bytes - 텍스트로 전달되지 않음]")
+        elif typ == "audio":
+            parts.append(f"[오디오 {item.get('mimeType', '')} - 텍스트로 전달되지 않음]")
+        elif typ == "resource":
+            res = item.get("resource") or {}
+            if "text" in res:
+                parts.append(f"[리소스 {res.get('uri', '')}]\n{res['text']}")
+            else:
+                parts.append(f"[바이너리 리소스 {res.get('uri', '')} {res.get('mimeType', '')}]")
+        elif typ == "resource_link":
+            parts.append(f"[리소스 링크] {item.get('name', '')} {item.get('uri', '')}")
+        else:
+            parts.append(json.dumps(item, ensure_ascii=False))
+    structured = data.get("structuredContent")
+    if structured is not None and not parts:
+        parts.append(json.dumps(structured, ensure_ascii=False, indent=2))
+    text = "\n".join(p for p in parts if p) or ("(빈 결과)" if not is_error else "(오류 - 상세 내용 없음)")
+    return text, is_error
+
+
+# ---------------------------------------------------------------------------
+# 트랜스포트 (SDK 버전 호환)
+# ---------------------------------------------------------------------------
+
+
+async def _open_transport(stack: AsyncExitStack, cfg: MCPServerConfig, errlog: Any) -> tuple[Any, Any]:
+    if cfg.transport == "stdio":
+        from mcp.client.stdio import StdioServerParameters, stdio_client
+
+        params = StdioServerParameters(
+            command=cfg.command or "",
+            args=cfg.args,
+            env=cfg.env or None,
+            cwd=cfg.cwd,
+        )
+        streams = await stack.enter_async_context(stdio_client(params, errlog=errlog))
+        return streams[0], streams[1]
+
+    if cfg.transport == "sse":
+        from mcp.client.sse import sse_client
+
+        streams = await stack.enter_async_context(
+            sse_client(cfg.url or "", headers=cfg.headers or None, sse_read_timeout=cfg.tool_timeout + 60)
+        )
+        return streams[0], streams[1]
+
+    # streamable http
+    try:  # mcp >= 2
+        from mcp.client.streamable_http import streamable_http_client
+        from mcp.shared._httpx_utils import create_mcp_http_client
+
+        http_client = create_mcp_http_client(headers=cfg.headers or None)
+        await stack.enter_async_context(http_client)
+        streams = await stack.enter_async_context(streamable_http_client(cfg.url or "", http_client=http_client))
+    except ImportError:  # mcp 1.x
+        from mcp.client.streamable_http import streamablehttp_client
+
+        streams = await stack.enter_async_context(
+            streamablehttp_client(cfg.url or "", headers=cfg.headers or None, sse_read_timeout=cfg.tool_timeout + 60)
+        )
+    return streams[0], streams[1]
+
+
+# ---------------------------------------------------------------------------
+# 서버 연결
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ToolInfo:
+    server: str
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+    function_name: str = ""
+
+
+class ServerConnection:
+    def __init__(self, cfg: MCPServerConfig, log_dir: Path | None = None):
+        self.cfg = cfg
+        self.log_dir = log_dir
+        self.session: Any = None
+        self.tools: list[ToolInfo] = []
+        self.instructions: str = ""
+        self._task: asyncio.Task[None] | None = None
+        self._stop: asyncio.Event | None = None
+        self._lock = asyncio.Lock()  # 서버 단위 호출 직렬화
+        self._conn_lock = asyncio.Lock()
+        self.last_error: str | None = None
+
+    @property
+    def name(self) -> str:
+        return self.cfg.name
+
+    @property
+    def connected(self) -> bool:
+        return self.session is not None and self._task is not None and not self._task.done()
+
+    async def start(self) -> None:
+        async with self._conn_lock:
+            if self.connected:
+                return
+            await self._start_locked()
+
+    async def _start_locked(self) -> None:
+        loop = asyncio.get_running_loop()
+        ready: asyncio.Future[None] = loop.create_future()
+        self._stop = asyncio.Event()
+        self._task = asyncio.create_task(self._runner(ready, self._stop), name=f"mcp:{self.name}")
+        try:
+            await asyncio.wait_for(asyncio.shield(ready), timeout=self.cfg.connect_timeout)
+        except BaseException as e:
+            self._stop.set()
+            if not isinstance(e, asyncio.TimeoutError):
+                self.last_error = describe_exception(e)
+                raise RuntimeError(self.last_error) from e
+            self.last_error = f"연결 시간 초과({self.cfg.connect_timeout}s)"
+            self._task.cancel()
+            raise TimeoutError(f"MCP 서버 '{self.name}' {self.last_error}") from None
+        await self._refresh_tools()
+        self.last_error = None
+        log.info("MCP 서버 '%s' 연결됨 (tool %d개)", self.name, len(self.tools))
+
+    async def _runner(self, ready: asyncio.Future[None], stop: asyncio.Event) -> None:
+        from mcp import ClientSession
+
+        errlog: Any = None
+        try:
+            async with AsyncExitStack() as stack:
+                if self.cfg.transport == "stdio":
+                    if self.log_dir is not None:
+                        self.log_dir.mkdir(parents=True, exist_ok=True)
+                        errlog = open(self.log_dir / f"mcp_{self.name}.log", "a", encoding="utf-8")  # noqa: SIM115
+                        stack.callback(errlog.close)
+                    else:
+                        import sys
+
+                        errlog = sys.stderr
+                read, write = await _open_transport(stack, self.cfg, errlog)
+                session = await stack.enter_async_context(ClientSession(read, write))
+                init = await session.initialize()
+                self.instructions = getattr(init, "instructions", None) or ""
+                self.session = session
+                if not ready.done():
+                    ready.set_result(None)
+                await stop.wait()
+        except BaseException as e:  # noqa: BLE001
+            if not ready.done():
+                ready.set_exception(e if isinstance(e, Exception) else RuntimeError(str(e)))
+            elif not isinstance(e, asyncio.CancelledError):
+                self.last_error = describe_exception(e)
+                log.warning("MCP 서버 '%s' 연결이 끊어졌습니다: %s", self.name, self.last_error)
+            if isinstance(e, asyncio.CancelledError):
+                raise
+        finally:
+            self.session = None
+
+    async def _refresh_tools(self) -> None:
+        tools: list[ToolInfo] = []
+        cursor: str | None = None
+        while True:
+            if cursor is None:
+                res = await self.session.list_tools()
+            else:
+                from mcp import types
+
+                res = await self.session.list_tools(params=types.PaginatedRequestParams(cursor=cursor))
+            data = _dump(res)
+            for t in data.get("tools", []):
+                name = t["name"]
+                if self.cfg.include_tools and not any(fnmatch(name, p) for p in self.cfg.include_tools):
+                    continue
+                if any(fnmatch(name, p) for p in self.cfg.exclude_tools):
+                    continue
+                tools.append(
+                    ToolInfo(
+                        server=self.name,
+                        name=name,
+                        description=t.get("description") or t.get("title") or "",
+                        input_schema=normalize_schema(t.get("inputSchema")),
+                    )
+                )
+            cursor = data.get("nextCursor")
+            if not cursor:
+                break
+        self.tools = tools
+
+    async def stop(self) -> None:
+        async with self._conn_lock:
+            await self._stop_locked()
+
+    async def _stop_locked(self) -> None:
+        if self._stop is not None:
+            self._stop.set()
+        if self._task is not None:
+            try:
+                await asyncio.wait_for(self._task, timeout=10)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                self._task.cancel()
+            except Exception:  # noqa: BLE001
+                pass
+        self._task = None
+        self.session = None
+
+    async def restart(self) -> None:
+        async with self._conn_lock:
+            await self._stop_locked()
+            await self._start_locked()
+
+    async def call(self, tool: str, arguments: dict[str, Any]) -> tuple[str, bool]:
+        async with self._lock:
+            attempts = 2 if self.cfg.retry_on_failure else 1
+            last_exc: Exception | None = None
+            for attempt in range(attempts):
+                try:
+                    if not self.connected:
+                        await self.start()
+                    result = await asyncio.wait_for(
+                        self.session.call_tool(tool, arguments), timeout=self.cfg.tool_timeout
+                    )
+                    return tool_result_to_text(result)
+                except asyncio.TimeoutError:
+                    return f"오류: tool '{tool}' 실행이 {self.cfg.tool_timeout}초 내에 끝나지 않았습니다.", True
+                except Exception as e:  # noqa: BLE001
+                    last_exc = e
+                    log.warning("MCP '%s.%s' 호출 실패(%d/%d): %s", self.name, tool, attempt + 1, attempts, e)
+                    if attempt + 1 < attempts:
+                        try:
+                            await self.restart()
+                        except Exception as re_e:  # noqa: BLE001
+                            return f"오류: MCP 서버 '{self.name}' 재연결 실패: {re_e}", True
+            return f"오류: {describe_exception(last_exc) if last_exc else '알 수 없음'}", True
+
+
+# ---------------------------------------------------------------------------
+# 내장 tool (MCP 서버 없이 에이전트가 직접 제공)
+# ---------------------------------------------------------------------------
+
+BuiltinHandler = Callable[[dict[str, Any]], Awaitable[str]]
+
+
+@dataclass
+class BuiltinTool:
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+    handler: BuiltinHandler
+
+
+@dataclass
+class _Route:
+    server: str
+    tool: str
+    builtin: BuiltinTool | None = None
+
+
+@dataclass
+class MCPHub:
+    servers: dict[str, MCPServerConfig]
+    log_dir: Path | None = None
+    builtins: list[BuiltinTool] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.connections: dict[str, ServerConnection] = {
+            name: ServerConnection(cfg, self.log_dir) for name, cfg in self.servers.items() if cfg.enabled
+        }
+        self._routes: dict[str, _Route] = {}
+        self._functions: list[tuple[str, dict[str, Any]]] = []  # (server, openai tool spec)
+
+    async def __aenter__(self) -> "MCPHub":
+        await self.start()
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        await self.close()
+
+    async def start(self, only: list[str] | None = None) -> dict[str, str | None]:
+        """모든(또는 지정한) 서버에 병렬 연결. 실패한 서버는 건너뛰고 오류를 반환."""
+        targets = [c for n, c in self.connections.items() if only is None or n in only]
+
+        async def _one(c: ServerConnection) -> tuple[str, str | None]:
+            try:
+                await c.start()
+                return c.name, None
+            except Exception as e:  # noqa: BLE001
+                msg = c.last_error or describe_exception(e)
+                log.error("MCP 서버 '%s' 연결 실패: %s", c.name, msg)
+                return c.name, msg
+
+        results = dict(await asyncio.gather(*(_one(c) for c in targets)))
+        self._rebuild()
+        return results
+
+    async def reconnect(self, name: str) -> ServerConnection:
+        conn = self.connections[name]
+        await conn.restart()
+        self._rebuild()
+        return conn
+
+    async def close(self) -> None:
+        await asyncio.gather(*(c.stop() for c in self.connections.values()), return_exceptions=True)
+
+    def _rebuild(self) -> None:
+        used: set[str] = set()
+        routes: dict[str, _Route] = {}
+        funcs: list[tuple[str, dict[str, Any]]] = []
+        for b in self.builtins:
+            used.add(b.name)
+            routes[b.name] = _Route("builtin", b.name, b)
+            funcs.append(("builtin", _spec(b.name, b.description, b.input_schema)))
+        for conn in self.connections.values():
+            for t in conn.tools:
+                fn = make_function_name(conn.name, t.name, used)
+                t.function_name = fn
+                routes[fn] = _Route(conn.name, t.name)
+                desc = t.description
+                prefix = f"[{conn.name}" + (f": {conn.cfg.description}" if conn.cfg.description else "") + "] "
+                funcs.append((conn.name, _spec(fn, (prefix + desc)[:1024], t.input_schema)))
+        self._routes = routes
+        self._functions = funcs
+
+    def openai_tools(self, servers: list[str] | None = None) -> list[dict[str, Any]]:
+        """LLM 에 전달할 tools 목록. servers 를 주면 해당 서버(+builtin)만."""
+        return [spec for srv, spec in self._functions if servers is None or srv in servers or srv == "builtin"]
+
+    def server_status(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": c.name,
+                "transport": c.cfg.transport,
+                "description": c.cfg.description,
+                "connected": c.connected,
+                "tools": [t.name for t in c.tools],
+                "error": c.last_error,
+            }
+            for c in self.connections.values()
+        ]
+
+    def describe_servers(self, servers: list[str] | None = None) -> str:
+        lines = []
+        for c in self.connections.values():
+            if servers is not None and c.name not in servers:
+                continue
+            state = "연결됨" if c.connected else f"연결 안 됨({c.last_error or '미연결'})"
+            line = f"- {c.name}: {c.cfg.description or '(설명 없음)'} [{state}, tool {len(c.tools)}개]"
+            if c.instructions:
+                line += f"\n  서버 안내: {c.instructions.strip()[:500]}"
+            lines.append(line)
+        return "\n".join(lines) or "- (연결된 MCP 서버 없음)"
+
+    async def call(self, function_name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
+        route = self._routes.get(function_name)
+        if route is None:
+            return f"오류: 알 수 없는 tool '{function_name}'", True
+        if route.builtin is not None:
+            try:
+                return await route.builtin.handler(arguments), False
+            except Exception as e:  # noqa: BLE001
+                return f"오류: {type(e).__name__}: {e}", True
+        return await self.connections[route.server].call(route.tool, arguments)
+
+    def route_of(self, function_name: str) -> tuple[str, str] | None:
+        r = self._routes.get(function_name)
+        return (r.server, r.tool) if r else None
+
+
+def _spec(name: str, description: str, schema: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "function", "function": {"name": name, "description": description, "parameters": schema}}
+
+
+__all__ = [
+    "MCPHub",
+    "BuiltinTool",
+    "ServerConnection",
+    "ToolInfo",
+    "make_function_name",
+    "normalize_schema",
+    "tool_result_to_text",
+]

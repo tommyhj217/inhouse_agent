@@ -1,0 +1,11 @@
+openai>=1.54
+mcp>=1.9
+apscheduler>=3.10,<4
+pyyaml>=6
+python-dotenv>=1.0
+tzdata; platform_system == 'Windows'
+# 웹/API 서버 (serve 명령)
+fastapi>=0.110
+uvicorn>=0.29
+# Entra ID(AAD) 인증을 쓰는 경우
+# azure-identity>=1.15

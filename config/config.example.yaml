@@ -1,0 +1,106 @@
+# =====================================================================
+# 사내 자료수집 에이전트 설정
+#   1) 이 파일을 config/config.yaml 로 복사
+#   2) .env.example 을 .env 로 복사 후 Azure 정보 입력
+#   3) mcp_servers 에 기존에 만들어 둔 MCP 서버들을 등록
+#   ${변수} / ${변수:-기본값} 은 환경변수(.env)로 치환됩니다.
+# =====================================================================
+
+llm:
+  # --- Azure OpenAI ---
+  endpoint: ${AZURE_OPENAI_ENDPOINT}
+  base_url: ${AZURE_OPENAI_BASE_URL:-}          # APIM 게이트웨이 사용 시에만
+  deployment: ${AZURE_OPENAI_DEPLOYMENT}         # Azure 에 배포한 모델의 "배포 이름"
+  api_version: ${AZURE_OPENAI_API_VERSION:-2024-10-21}
+  auth: api_key                                   # api_key | entra_id(azure-identity 필요)
+  api_key: ${AZURE_OPENAI_API_KEY}
+
+  # 최신(추론형) 모델은 max_completion_tokens 를 사용하고 temperature 를 지원하지 않습니다.
+  # 구형 모델/구형 api_version 이면 max_tokens_param: max_tokens 로 바꾸세요.
+  max_output_tokens: 8192
+  max_tokens_param: max_completion_tokens
+  temperature:                                    # 비우면 전송 안 함
+  reasoning_effort:                               # low | medium | high (추론 모델만, 비우면 전송 안 함)
+  timeout: 180
+  max_retries: 3
+  extra_headers:
+    # Ocp-Apim-Subscription-Key: ${APIM_SUBSCRIPTION_KEY:-}
+
+agent:
+  timezone: Asia/Seoul
+  max_iterations: 25            # 1회 요청에서 LLM↔tool 왕복 최대 횟수
+  max_tool_result_chars: 30000  # tool 결과가 길면 잘라서 LLM 에 전달
+  max_history_messages: 60      # 대화형 모드에서 유지할 메시지 수
+  parallel_tool_calls: true     # 서로 다른 서버는 병렬, 같은 서버는 자동으로 순차 실행
+  output_dir: outputs
+  log_dir: logs
+  # system_prompt: |            # 비우면 기본 프롬프트 사용 (src/inhouse_agent/agent.py)
+  #   ...
+
+# ---------------------------------------------------------------------
+# MCP 서버 (기존에 만들어 둔 사이트별 웹컨트롤 MCP)
+#   transport: stdio  → command/args 로 프로세스를 직접 띄움
+#   transport: http   → 이미 떠 있는 Streamable HTTP MCP 서버 (url)
+#   transport: sse    → 구형 SSE MCP 서버 (url)
+#   description 은 LLM 이 어느 사이트를 쓸지 판단하는 데 쓰이므로 구체적으로 적으세요.
+# ---------------------------------------------------------------------
+mcp_servers:
+  demo:
+    description: "데모용 샘플 서버 (공지사항/매출 가짜 데이터)"
+    transport: stdio
+    command: python
+    args: ["examples/sample_mcp_server.py"]
+    enabled: true
+
+  # groupware:
+  #   description: "그룹웨어 - 공지사항, 결재 문서, 일정 조회"
+  #   transport: stdio
+  #   command: python
+  #   args: ["C:/mcp/groupware_mcp/server.py"]
+  #   cwd: "C:/mcp/groupware_mcp"
+  #   env:
+  #     GW_USER: ${GW_USER}
+  #     GW_PASSWORD: ${GW_PASSWORD}
+  #   connect_timeout: 90       # 브라우저 기동이 느리면 늘리세요
+  #   tool_timeout: 300         # tool 1회 호출 제한 시간(초)
+  #   retry_on_failure: true    # 호출 중 서버가 죽으면 재시작 후 1회 재시도
+  #   include_tools: []         # 노출할 tool 이름 패턴 (비우면 전체) 예: ["get_*", "search_*"]
+  #   exclude_tools: []         # 숨길 tool 이름 패턴 예: ["delete_*"]
+
+  # erp:
+  #   description: "ERP - 매출/재고/발주 현황"
+  #   transport: http
+  #   url: http://127.0.0.1:8001/mcp
+  #   headers:
+  #     Authorization: Bearer ${ERP_MCP_TOKEN}
+
+# ---------------------------------------------------------------------
+# 예약작업
+#   cron: "분 시 일 월 요일"  (요일: 0=일 ... 6=토, 또는 mon-fri)
+#   prompt 에서 사용 가능한 변수:
+#     {today} {yesterday} {tomorrow} {now} {weekday}
+#     {this_month} {last_month} {week_start} {week_end} {last_week_start} {last_week_end}
+#   servers: 이 작업에서 사용할 MCP 서버 제한 (생략 시 전체)
+#   결과: outputs/<name>/<시각>.md (+ latest.md, _trace/ 상세 기록)
+# ---------------------------------------------------------------------
+schedules:
+  - name: daily_notice
+    description: "매일 아침 전날 공지사항 요약"
+    cron: "30 8 * * mon-fri"
+    servers: [demo]
+    enabled: true
+    output_format: md            # md | txt | json
+    # webhook_url: ${TEAMS_WEBHOOK_URL:-}   # 결과를 Teams/Slack 웹훅으로 전송
+    prompt: |
+      {yesterday} 에 등록된 공지사항을 모두 가져와서
+      제목/작성부서/핵심 내용 표로 정리하고, 업무에 영향이 큰 항목을 맨 위에 요약해줘.
+      정리한 표는 save_file 로 notices/{yesterday}.md 에 저장해줘.
+
+  - name: weekly_sales
+    description: "매주 월요일 지난주 매출 집계"
+    cron: "0 9 * * mon"
+    servers: [demo]
+    enabled: false
+    prompt: |
+      {last_week_start} ~ {last_week_end} 기간의 일별 매출을 가져와서
+      합계와 전주 대비 특이사항을 정리하고 CSV 로 sales/{last_week_start}.csv 에 저장해줘.
