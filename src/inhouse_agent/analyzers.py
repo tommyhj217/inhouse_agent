@@ -105,6 +105,11 @@ def _to_num(v: Any) -> float | None:
         return None
 
 
+def to_number(v: Any) -> float | None:
+    """'1,234원', '(500)', '12%' 같은 값을 숫자로 (안 되면 None). 동적 도구 코드에서 사용."""
+    return _to_num(v)
+
+
 class _HTMLTables(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -165,7 +170,8 @@ def _read_text_file(path: Path) -> tuple[str, str]:
     return data.decode("latin-1", errors="replace"), "latin-1"
 
 
-def load_tables(path: Path, kind: str | None = None) -> list[Table]:
+def load_tables(path: Path | str, kind: str | None = None) -> list[Table]:
+    path = Path(path)
     kind = kind or sniff_type(path)
     ext = path.suffix.lower()
     if kind == "xlsx":
@@ -281,7 +287,8 @@ def _md_table(cols: list[str], rows: list[list[Any]], max_cols: int = 15) -> str
 # ---------------------------------------------------------------------------
 
 
-def extract_text(path: Path, kind: str | None = None, max_pages: int = 50) -> tuple[str, dict[str, Any]]:
+def extract_text(path: Path | str, kind: str | None = None, max_pages: int = 50) -> tuple[str, dict[str, Any]]:
+    path = Path(path)
     kind = kind or sniff_type(path)
     meta: dict[str, Any] = {"type": kind}
     if kind == "pdf":
@@ -359,7 +366,8 @@ def _unescape(s: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def analyze(path: Path, sheet: str | None = None, sample_rows: int = 10, max_chars: int = 6000) -> str:
+def analyze(path: Path | str, sheet: str | None = None, sample_rows: int = 10, max_chars: int = 6000) -> str:
+    path = Path(path)
     kind = sniff_type(path)
     head = f"## 파일 분석: {path.name}\n- 실제 형식: {kind}\n- 크기: {path.stat().st_size:,} bytes"
     ext = path.suffix.lower()
@@ -407,7 +415,8 @@ def analyze(path: Path, sheet: str | None = None, sample_rows: int = 10, max_cha
     return "\n".join(out)
 
 
-def read_text_range(path: Path, start: int = 0, max_chars: int = 8000) -> str:
+def read_text_range(path: Path | str, start: int = 0, max_chars: int = 8000) -> str:
+    path = Path(path)
     kind = sniff_type(path)
     if kind in ("xlsx", "ole"):
         blocks = []
@@ -437,6 +446,7 @@ def query_table(
     limit: int = 50,
     offset: int = 0,
 ) -> str:
+    path = Path(path)
     tables = load_tables(path)
     if not tables:
         return "표 형식 데이터를 찾지 못했습니다."
@@ -532,7 +542,9 @@ def _match(cell: Any, op: str, val: Any) -> bool:
         return False
 
 
-def extract_zip(path: Path, dest: Path) -> list[Path]:
+def extract_zip(path: Path | str, dest: Path | str) -> list[Path]:
+    path = Path(path)
+    dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
     out: list[Path] = []
     with zipfile.ZipFile(path) as z:
@@ -557,4 +569,4 @@ def extract_zip(path: Path, dest: Path) -> list[Path]:
     return out
 
 
-__all__ = ["analyze", "read_text_range", "query_table", "extract_zip", "load_tables", "extract_text"]
+__all__ = ["to_number", "analyze", "read_text_range", "query_table", "extract_zip", "load_tables", "extract_text"]

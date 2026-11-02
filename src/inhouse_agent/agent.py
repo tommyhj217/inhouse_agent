@@ -39,10 +39,25 @@ DEFAULT_SYSTEM_PROMPT = """당신은 사내 업무 자료 수집·분석 에이�
    숫자를 추측하거나 샘플 행만 보고 합계를 내지 마세요.
 7. 결과 보고에는 사용한 파일의 경로와 상태(정상/문제)를 함께 적으세요.
 
+다운로드 링크 규칙:
+8. MCP 결과에 파일 다운로드 URL 이 있으면([다운로드 링크 감지]) download_url 로 받으세요.
+   받은 파일이 로그인/오류 HTML 이면 MCP 쪽에 쿠키/세션 정보를 주는 tool 이 있는지 찾아 cookies 인자로 다시 받거나,
+   MCP 의 브라우저 다운로드 기능을 쓰세요.
+
+도구가 없을 때 (동적 도구):
+9. 필요한 기능을 하는 tool 이 없으면 포기하지 말고 직접 만드세요.
+   - 일회성 계산/변환/파일 가공 → run_python
+   - 반복해서 쓸 기능(특정 형식 파싱, 여러 MCP 호출 반복·조합, 사내 REST API 호출 등) → create_tool 로 등록 후 custom__<이름> 으로 호출
+   - 코드는 표준 라이브러리 위주로 작성하고, 파일은 ctx.workspace / ctx.download_dir 아래에서 다루세요.
+   - 기존 tool 은 ctx.call_tool_data("tool이름", {...}) 로 호출하면 dict/list 로 받습니다 (텍스트는 ctx.call_tool).
+     파일을 받는 tool 은 ctx.call_tool_files("download_url", {"url": ...}) 로 받은 파일 경로/상태를 얻으세요.
+   - create_tool 에는 반드시 test_args 를 넣어 실제로 돌려 보고, 실패하면 오류(traceback)를 보고 고쳐서 다시 만드세요.
+   - 같은 기능의 custom__ 도구가 이미 있으면 새로 만들지 말고 그것을 쓰세요.
+
 스킬/대화 규칙:
-8. 요청이 아래 '등록된 스킬' 설명과 맞으면 먼저 use_skill 로 지침을 불러와 그 절차를 따르세요.
-9. 조건이 애매하거나 여러 선택지 중 골라야 하면 ask_user 로 확인하세요. 단, 꼭 필요할 때만 쓰세요.
-10. 최종 답변은 한국어로, 핵심 요약 → 상세 자료(표/목록) → 출처(사이트/tool/파일) 순서로 작성하세요.
+10. 요청이 아래 '등록된 스킬' 설명과 맞으면 먼저 use_skill 로 지침을 불러와 그 절차를 따르세요.
+11. 조건이 애매하거나 여러 선택지 중 골라야 하면 ask_user 로 확인하세요. 단, 꼭 필요할 때만 쓰세요.
+12. 최종 답변은 한국어로, 핵심 요약 → 상세 자료(표/목록) → 출처(사이트/tool/파일) 순서로 작성하세요.
 """
 
 
@@ -186,6 +201,7 @@ class Agent:
             while iteration < self.cfg.max_iterations:
                 iteration += 1
                 await emit("llm_start", {"iteration": iteration})
+                tools = self.hub.openai_tools(servers)  # 실행 중 만든 동적 도구도 바로 반영
                 resp = await self.llm.chat(
                     messages,
                     tools or None,

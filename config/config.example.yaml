@@ -53,6 +53,40 @@ files:
   auto_detect: true            # MCP tool 호출 전후 다운로드 폴더를 비교해 새 파일 자동 점검
 
 # ---------------------------------------------------------------------
+# 다운로드 URL (MCP 가 파일 대신 링크를 줄 때 download_url tool 로 받기)
+#   사내 프록시는 HTTP(S)_PROXY / NO_PROXY 환경변수를 그대로 씁니다.
+# ---------------------------------------------------------------------
+downloads:
+  allowed_hosts: ["*"]          # 받을 수 있는 호스트 패턴. 운영에서는 사내 도메인으로 제한 권장: ["*.company.com", "10.*"]
+  blocked_hosts: []
+  verify: true                  # true | false | 사내 CA 인증서 경로 (예: C:/certs/company-ca.pem)
+  timeout: 120
+  max_mb: 500
+  retries: 2
+  auto_download: false          # true 면 MCP 결과의 다운로드 링크를 자동으로 받아 상태 점검
+  sites: []                     # 사이트별 고정 헤더/쿠키 (토큰은 .env 로)
+  #  - match: "erp.company.com"
+  #    headers: { Authorization: "Bearer ${ERP_TOKEN:-}" }
+  #  - match: "*.groupware.company.com"
+  #    cookies: { JSESSIONID: "${GW_SESSION:-}" }
+
+# ---------------------------------------------------------------------
+# 동적 도구: 필요한 tool 이 없으면 에이전트가 파이썬 코드로 tool 을 만들어 바로 실행
+#   mode: off(사용 안 함) | approve(만들거나 코드 실행 전 사용자 승인) | auto(자동)
+#   - 별도 파이썬 프로세스에서 실행(제한시간, 최소 환경변수, 작업폴더=workspace)
+#   - subprocess/eval/파일삭제 등 위험한 호출은 정적 검사로 차단 (완전한 보안 샌드박스는 아님)
+#   - 만든 도구는 tools/<이름>.py 로 저장 → 다음 실행/예약작업에서도 custom__<이름> 으로 사용
+# ---------------------------------------------------------------------
+dynamic_tools:
+  mode: approve
+  dir: tools
+  timeout: 120
+  allow_tool_calls: true        # 도구 코드에서 ctx.call_tool() 로 MCP tool 호출 허용
+  env_passthrough: []           # 도구 코드에 넘겨줄 환경변수 이름 (예: [ERP_API_TOKEN])
+  # blocked_modules: [subprocess, ctypes, multiprocessing, winreg, pty, pickle, marshal]
+  # blocked_calls: [os.system, os.popen, os.remove, shutil.rmtree, eval, exec, ...]
+
+# ---------------------------------------------------------------------
 # 스킬: skills/<이름>/SKILL.md (웹 화면 '스킬' 탭에서 편집/테스트)
 # ---------------------------------------------------------------------
 skills:

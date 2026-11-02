@@ -8,6 +8,8 @@
     inhouse-agent jobs run <작업이름>         # 예약작업 즉시 1회 실행
     inhouse-agent skills list|show|new|validate|run   # 스킬 관리/테스트
     inhouse-agent files list|status|analyze|query|wait  # 파일 점검 (LLM 없이)
+    inhouse-agent fetch <URL> [--cookies]    # 다운로드 URL 받기
+    inhouse-agent ctools list|show|test|delete  # 동적 도구 관리
     inhouse-agent scheduler                  # 예약작업 데몬
     inhouse-agent serve --port 8080          # 웹/API 서버 + 예약작업
 """
@@ -356,6 +358,50 @@ async def cmd_files(cfg: AppConfig, args: argparse.Namespace) -> int:
     return 1
 
 
+async def cmd_ctools(cfg: AppConfig, args: argparse.Namespace) -> int:
+    """동적 도구 관리 (LLM 없이)."""
+    async with AgentRuntime(cfg) as rt:
+        dyn = rt.dynamic
+        c = args.ctools_cmd
+        if c == "list":
+            tools, errors = dyn.list()
+            print(f"승인 모드: {dyn.cfg.mode} · 폴더: {dyn.root}")
+            for t in tools:
+                lt = t.meta.get("last_test") or {}
+                print(f"- custom__{t.name}: {t.description}  [작성: {t.meta.get('created_by')}, 테스트: {'성공' if lt.get('ok') else ('실패' if lt else '-')}]")
+            for n, e in errors.items():
+                print(f"- {n}: ⚠ {e}")
+            if not tools and not errors:
+                print("(동적 도구 없음)")
+            return 0
+        if c == "show":
+            print(dyn.load(args.name).path.read_text(encoding="utf-8"))
+            return 0
+        if c == "test":
+            t = dyn.load(args.name)
+            r = await dyn.execute("tool", t.path, json.loads(args.args or "{}"))
+            print(dyn.format_result(r))
+            return 0 if r["ok"] else 2
+        if c == "delete":
+            dyn.delete(args.name)
+            print(f"삭제(→ {dyn.root / '.trash'}): {args.name}")
+            return 0
+    return 1
+
+
+async def cmd_fetch(cfg: AppConfig, args: argparse.Namespace) -> int:
+    """다운로드 URL 직접 받기 + 상태 점검."""
+    async with AgentRuntime(cfg) as rt:
+        a: dict[str, Any] = {"url": args.url}
+        if args.cookies:
+            a["cookies"] = args.cookies
+        if args.filename:
+            a["filename"] = args.filename
+        out = await rt.hub.call("download_url", a)
+        print(out.text)
+        return 1 if out.is_error else 0
+
+
 async def cmd_scheduler(cfg: AppConfig, args: argparse.Namespace) -> int:
     from .scheduler import AgentScheduler
 
@@ -472,6 +518,22 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("pattern", nargs="?", default="*")
     x.add_argument("--timeout", type=float, default=120)
 
+    ct = sub.add_parser("ctools", help="동적 도구(에이전트가 만든 tool) 관리")
+    cts = ct.add_subparsers(dest="ctools_cmd", required=True)
+    cts.add_parser("list")
+    x = cts.add_parser("show")
+    x.add_argument("name")
+    x = cts.add_parser("test")
+    x.add_argument("name")
+    x.add_argument("--args", help='JSON 예: {"months":["2026-10"]}')
+    x = cts.add_parser("delete")
+    x.add_argument("name")
+
+    x = sub.add_parser("fetch", help="다운로드 URL 받기 + 상태 점검")
+    x.add_argument("url")
+    x.add_argument("--cookies", help="'A=1; B=2'")
+    x.add_argument("--filename")
+
     sub.add_parser("scheduler", help="예약작업 데몬 실행")
 
     s = sub.add_parser("serve", help="웹/API 서버 (+예약작업)")
@@ -489,7 +551,7 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigError, OSError) as e:
         print(f"설정 오류: {e}", file=sys.stderr)
         return 1
-    setup_logging(cfg, args.log_level, console=args.cmd not in ("chat", "skills"))
+    setup_logging(cfg, args.log_level, console=args.cmd not in ("chat", "skills", "ctools", "fetch"))
 
     if args.cmd == "serve":
         return cmd_serve(cfg, args)
@@ -501,6 +563,8 @@ def main(argv: list[str] | None = None) -> int:
         "jobs": cmd_jobs,
         "skills": cmd_skills,
         "files": cmd_files,
+        "ctools": cmd_ctools,
+        "fetch": cmd_fetch,
         "scheduler": cmd_scheduler,
     }
     try:

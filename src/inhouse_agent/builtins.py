@@ -6,6 +6,8 @@
 - 파일 분석: analyze_file, read_file_text, query_table, extract_zip
 - 결과 저장: save_file
 - 스킬: use_skill, read_skill_file
+- 다운로드 URL: download_url
+- 동적 도구: create_tool, run_python
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ import asyncio
 import json
 import time
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 from . import analyzers
@@ -22,6 +24,10 @@ from .files import FileWorkspace, file_status, format_status, wait_for_download
 from .interaction import current_run
 from .mcp_hub import BuiltinTool, ToolOutcome
 from .skills import SkillStore
+
+if TYPE_CHECKING:
+    from .downloader import Downloader
+    from .dynamic_tools import DynamicToolManager
 
 
 def _obj(props: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
@@ -31,7 +37,13 @@ def _obj(props: dict[str, Any], required: list[str] | None = None) -> dict[str, 
     return d
 
 
-def make_builtin_tools(ws: FileWorkspace, timezone: str, skills: SkillStore | None = None) -> list[BuiltinTool]:
+def make_builtin_tools(
+    ws: FileWorkspace,
+    timezone: str,
+    skills: SkillStore | None = None,
+    downloader: "Downloader | None" = None,
+    dyn: "DynamicToolManager | None" = None,
+) -> list[BuiltinTool]:
     tz = ZoneInfo(timezone)
 
     # ---------------- 시간 / 사용자 ----------------
@@ -295,6 +307,184 @@ def make_builtin_tools(ws: FileWorkspace, timezone: str, skills: SkillStore | No
                 "스킬 폴더 안의 참고 파일(템플릿, 기준표 등)을 읽습니다.",
                 _obj({"name": {"type": "string"}, "path": {"type": "string"}}, ["name", "path"]),
                 read_skill_file,
+            ),
+        ]
+    if downloader is not None:
+
+        async def download_url(args: dict[str, Any]) -> ToolOutcome:
+            from .downloader import DownloadError
+
+            url = str(args["url"]).strip()
+            if args.get("base_url") and not url.lower().startswith(("http://", "https://")):
+                import urllib.parse
+
+                url = urllib.parse.urljoin(str(args["base_url"]), url)
+            try:
+                info = await asyncio.to_thread(
+                    downloader.download,
+                    url,
+                    filename=args.get("filename"),
+                    subdir=str(args.get("subdir") or ""),
+                    headers=args.get("headers"),
+                    cookies=args.get("cookies"),
+                    method=str(args.get("method") or "GET"),
+                    data=args.get("data"),
+                    referer=args.get("referer"),
+                    overwrite=bool(args.get("overwrite")),
+                )
+            except (DownloadError, PermissionError, ValueError) as e:
+                return ToolOutcome(f"오류: 다운로드 실패 - {e}\nURL: {url}", True)
+            from pathlib import Path
+
+            st = await file_status(Path(info["path"]), ws, stable_wait=0)
+            ctype = (info.get("content_type") or "").lower()
+            if st["state"] == "complete" and st.get("detected_type") == "html" and "html" in ctype and not str(args.get("filename") or "").lower().endswith((".html", ".htm")):
+                # 다운로드 링크인데 웹 페이지가 응답됨 → 대부분 로그인/권한/만료 페이지
+                head = Path(info["path"]).read_bytes()[:4000].decode("utf-8", errors="ignore").lower()
+                hint = next((h for h in ("로그인", "login", "세션", "session", "권한", "denied", "만료", "expired", "error", "오류") if h in head), None)
+                st["state"] = "suspicious"
+                st.setdefault("issues", []).append(
+                    "다운로드 링크인데 파일이 아닌 HTML 웹 페이지가 응답됨" + (f" ('{hint}' 문구 포함)" if hint else "")
+                )
+            lines = [
+                f"다운로드 완료: {info['path']}",
+                f"- HTTP {info['status']} · {info['size']:,} bytes · {info.get('content_type') or '-'} · {info['elapsed']}s"
+                + (f" · 리다이렉트 → {info['final_url']}" if info.get("redirected") else ""),
+                format_status(st),
+            ]
+            if st["state"] == "suspicious" and st.get("detected_type") == "html":
+                lines.append(
+                    "※ 파일 대신 HTML(로그인/오류 페이지)이 내려왔습니다. 인증이 필요한 링크로 보입니다. "
+                    "MCP 에서 세션 쿠키를 얻을 수 있으면 cookies 인자로 다시 받거나, MCP 브라우저로 직접 다운로드하세요."
+                )
+            elif st["state"] == "complete":
+                lines.append("※ analyze_file 로 내용을 분석할 수 있습니다.")
+            return ToolOutcome("\n".join(lines), st["state"] in ("corrupt", "empty"), [st])
+
+        tools.append(
+            BuiltinTool(
+                "download_url",
+                "http(s) 다운로드 URL 의 파일을 workspace/downloads 에 받고 상태를 점검합니다. "
+                "MCP 결과에 다운로드 링크가 있을 때 사용하세요. 한글 파일명, 리다이렉트, 사내 프록시를 지원합니다.",
+                _obj(
+                    {
+                        "url": {"type": "string", "description": "다운로드 URL (상대경로면 base_url 필요)"},
+                        "base_url": {"type": "string", "description": "url 이 상대경로일 때 기준 주소"},
+                        "filename": {"type": "string", "description": "저장할 파일명(선택, 기본: 서버가 준 이름)"},
+                        "subdir": {"type": "string", "description": "downloads 아래 하위 폴더(선택)"},
+                        "cookies": {"type": "string", "description": "쿠키 문자열 'A=1; B=2' (로그인이 필요한 링크)"},
+                        "headers": {"type": "object", "description": "추가 HTTP 헤더 (예: Authorization)"},
+                        "method": {"type": "string", "enum": ["GET", "POST"]},
+                        "data": {"type": "object", "description": "POST 폼 데이터"},
+                        "referer": {"type": "string"},
+                        "overwrite": {"type": "boolean"},
+                    },
+                    ["url"],
+                ),
+                download_url,
+            )
+        )
+
+    if dyn is not None and dyn.cfg.mode != "off":
+
+        async def create_tool(args: dict[str, Any]) -> ToolOutcome:
+            from .dynamic_tools import ToolCodeError, check_code
+
+            name = str(args.get("name", "")).strip()
+            code = str(args.get("code", ""))
+            desc = str(args.get("description", "")).strip()
+            params = args.get("parameters")
+            test_args = args.get("test_args")
+            if isinstance(test_args, str):
+                try:
+                    test_args = json.loads(test_args) if test_args.strip() else None
+                except json.JSONDecodeError:
+                    return ToolOutcome("오류: test_args 는 JSON 객체여야 합니다.", True)
+            exists = (dyn.root / f"{name}.py").exists()
+            if exists and not args.get("overwrite"):
+                return ToolOutcome(f"오류: 도구 '{name}' 이(가) 이미 있습니다. 그대로 쓰려면 custom__{name} 을 호출하고, 고치려면 overwrite=true 로 다시 만드세요.", True)
+            problems = check_code(code, dyn.cfg, require_run=True)
+            if not desc:
+                problems.append("description 이 비어 있습니다.")
+            if problems:
+                return ToolOutcome("오류: 코드 검사 실패 - 고쳐서 다시 만드세요:\n- " + "\n- ".join(problems), True)
+            ok, why = await dyn.approve(
+                f"🛠 에이전트가 새 도구 '{name}' 을(를) {'수정' if exists else '만들어'} 실행하려고 합니다. 승인할까요?",
+                f"설명: {desc}\n인자: {json.dumps(params, ensure_ascii=False)}\n테스트 인자: {json.dumps(test_args, ensure_ascii=False)}\n\n--- 코드 ---\n{code[:6000]}",
+            )
+            if not ok:
+                return ToolOutcome(f"도구를 만들지 않았습니다: {why}", True)
+            last_test = None
+            test_text = "(test_args 가 없어 테스트하지 않음 - 다음에는 test_args 를 넣으세요)"
+            if test_args is not None:
+                r = await dyn.test_draft(name, code, test_args if isinstance(test_args, dict) else {})
+                test_text = dyn.format_result(r)
+                last_test = {"ok": r["ok"], "args": test_args, "at": datetime.now().isoformat(timespec="seconds"), "elapsed": r["elapsed"]}
+                if not r["ok"]:
+                    return ToolOutcome(f"오류: 테스트 실행 실패 - 도구를 등록하지 않았습니다. 오류를 보고 코드를 고쳐 다시 create_tool 하세요.\n\n{test_text}", True)
+            try:
+                t = dyn.save(name, desc, params, code, created_by="agent", last_test=last_test)
+            except ToolCodeError as e:
+                return ToolOutcome(f"오류: {e}", True)
+            return ToolOutcome(
+                f"도구 등록 완료: custom__{t.name} (저장: {t.path})\n이제 custom__{t.name} 을 호출해서 사용하세요.\n\n[테스트 결과]\n{test_text}"
+            )
+
+        async def run_python(args: dict[str, Any]) -> ToolOutcome:
+            code = str(args.get("code", ""))
+            inputs = args.get("args") or {}
+            ok, why = await dyn.approve(
+                "🐍 에이전트가 파이썬 코드를 실행하려고 합니다. 승인할까요?",
+                f"목적: {args.get('purpose', '-')}\n\n--- 코드 ---\n{code[:6000]}",
+            )
+            if not ok:
+                return ToolOutcome(f"실행하지 않았습니다: {why}", True)
+            timeout = min(float(args.get("timeout_sec") or dyn.cfg.timeout), 1800)
+            r = await dyn.run_script(code, inputs if isinstance(inputs, dict) else {}, timeout)
+            return ToolOutcome(dyn.format_result(r), not r["ok"])
+
+        code_help = (
+            "코드 규칙: 최상위에 def run(args, ctx): 를 정의하고 결과(dict/list/str)를 return. "
+            "ctx.workspace(Path, 작업폴더), ctx.download_dir(Path), ctx.files_dir(Path), ctx.path('downloads/x.csv'), "
+            "ctx.call_tool_data('tool이름', {...}) → 결과 dict/list (MCP 결과 파싱에 권장), ctx.call_tool(...) → 결과 텍스트, "
+            "ctx.call_tool_files('download_url', {'url': ...}) → 받은 파일 [{path, state}], ctx.log('...'). "
+            "from inhouse_agent import analyzers 로 analyzers.load_tables(path) (엑셀/CSV → [Table(name, columns, rows)], CSV 셀은 문자열), "
+            "analyzers.to_number('1,234원') → 1234.0 사용 가능. "
+            "subprocess/eval/파일삭제 등은 금지."
+        )
+        tools += [
+            BuiltinTool(
+                "create_tool",
+                "필요한 tool 이 없을 때 파이썬으로 새 tool 을 만들어 등록합니다 (등록 후 custom__<name> 으로 호출, 다음 실행에도 재사용). "
+                "test_args 로 바로 테스트하며, 실패하면 오류를 보고 고쳐서 다시 만드세요. " + code_help,
+                _obj(
+                    {
+                        "name": {"type": "string", "description": "영문 소문자/숫자/_ (예: merge_monthly_csv)"},
+                        "description": {"type": "string", "description": "무엇을 하는 tool 인지 (LLM 이 보고 고름)"},
+                        "parameters": {"type": "object", "description": "인자 JSON 스키마 (type: object, properties, required)"},
+                        "code": {"type": "string", "description": "def run(args, ctx): 를 포함한 파이썬 코드"},
+                        "test_args": {"type": "object", "description": "등록 전 테스트 실행 인자"},
+                        "overwrite": {"type": "boolean", "description": "같은 이름 도구를 고칠 때 true"},
+                    },
+                    ["name", "description", "parameters", "code", "test_args"],
+                ),
+                create_tool,
+            ),
+            BuiltinTool(
+                "run_python",
+                "일회성 파이썬 코드를 별도 프로세스에서 실행합니다 (데이터 가공, 계산, 파일 변환/병합 등). "
+                "결과는 변수 result 에 넣거나 print 하세요. 전역 변수 args, ctx 사용 가능 (ctx 는 create_tool 과 동일). "
+                "반복해서 쓸 기능이면 create_tool 을 쓰세요.",
+                _obj(
+                    {
+                        "code": {"type": "string"},
+                        "purpose": {"type": "string", "description": "이 코드로 하려는 일 (승인 화면에 표시)"},
+                        "args": {"type": "object", "description": "코드에 넘길 값"},
+                        "timeout_sec": {"type": "number"},
+                    },
+                    ["code", "purpose"],
+                ),
+                run_python,
             ),
         ]
     return tools

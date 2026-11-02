@@ -61,6 +61,23 @@ class SkillSaveRequest(BaseModel):
     content: str
 
 
+class ToolSaveRequest(BaseModel):
+    description: str
+    parameters: dict[str, Any] | None = None
+    code: str
+
+
+class ToolTestRequest(BaseModel):
+    args: dict[str, Any] = {}
+    code: str | None = None  # 저장 전 편집 중인 코드로 테스트
+
+
+class FetchRequest(BaseModel):
+    url: str
+    cookies: str | None = None
+    filename: str | None = None
+
+
 class SkillCreateRequest(BaseModel):
     name: str
     description: str = ""
@@ -510,6 +527,65 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
         if not p.is_file():
             raise HTTPException(404, "파일 없음")
         return FileResponse(p, filename=p.name)
+
+    @app.post("/api/files/fetch", dependencies=A)
+    async def files_fetch(req: FetchRequest) -> dict[str, Any]:
+        args: dict[str, Any] = {"url": req.url}
+        if req.cookies:
+            args["cookies"] = req.cookies
+        if req.filename:
+            args["filename"] = req.filename
+        out = await rt.hub.call("download_url", args)
+        return {"text": out.text, "is_error": out.is_error, "files": out.files}
+
+    # ---------------- 동적 도구 ----------------
+    from .dynamic_tools import DEFAULT_CODE, ToolCodeError, check_code
+
+    @app.get("/api/ctools", dependencies=A)
+    async def ctools_list() -> dict[str, Any]:
+        tools, errors = rt.dynamic.list()
+        return {"mode": rt.dynamic.cfg.mode, "tools": [t.summary() for t in tools], "errors": errors, "template": DEFAULT_CODE}
+
+    @app.get("/api/ctools/{name}", dependencies=A)
+    async def ctools_get(name: str) -> dict[str, Any]:
+        try:
+            t = rt.dynamic.load(name)
+        except (ToolCodeError, OSError) as e:
+            raise HTTPException(404, str(e)) from e
+        return {**t.summary(), "code": t.code}
+
+    @app.put("/api/ctools/{name}", dependencies=A)
+    async def ctools_save(name: str, req: ToolSaveRequest) -> dict[str, Any]:
+        # 사람이 화면에서 직접 저장 → 승인 절차 없이 저장 (정적 검사는 적용)
+        try:
+            t = rt.dynamic.save(name, req.description, req.parameters, req.code, created_by="user")
+        except ToolCodeError as e:
+            raise HTTPException(400, str(e)) from e
+        return t.summary()
+
+    @app.post("/api/ctools/{name}/check", dependencies=A)
+    async def ctools_check(name: str, req: ToolTestRequest) -> dict[str, Any]:
+        problems = check_code(req.code or "", rt.dynamic.cfg, require_run=True)
+        return {"ok": not problems, "problems": problems}
+
+    @app.post("/api/ctools/{name}/test", dependencies=A)
+    async def ctools_test(name: str, req: ToolTestRequest) -> dict[str, Any]:
+        try:
+            if req.code is not None:
+                r = await rt.dynamic.test_draft(name, req.code, req.args)
+            else:
+                r = await rt.dynamic.execute("tool", rt.dynamic.load(name).path, req.args)
+        except ToolCodeError as e:
+            raise HTTPException(400, str(e)) from e
+        return {**r, "text": rt.dynamic.format_result(r)}
+
+    @app.delete("/api/ctools/{name}", dependencies=A)
+    async def ctools_delete(name: str) -> dict[str, Any]:
+        try:
+            rt.dynamic.delete(name)
+        except ToolCodeError as e:
+            raise HTTPException(400, str(e)) from e
+        return {"ok": True}
 
     # ---------------- 예약작업 ----------------
     @app.get("/api/jobs", dependencies=A)

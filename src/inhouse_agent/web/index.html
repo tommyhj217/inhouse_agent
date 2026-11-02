@@ -76,9 +76,17 @@ table.grid{width:100%;border-collapse:collapse;font-size:13px}
 table.grid th,table.grid td{border-bottom:1px solid var(--line);padding:6px;text-align:left}
 table.grid tr.sel td{background:var(--soft)}
 table.grid tbody tr{cursor:pointer}
+.tools{display:grid;grid-template-columns:240px minmax(0,1.3fr) minmax(0,1fr);gap:12px;height:calc(100vh - 110px);min-height:520px}
+.tools>.card{display:flex;flex-direction:column;min-height:0;gap:6px}
+.tools>.card.runpane{overflow:auto;display:block}
+.mono{font-family:ui-monospace,Consolas,"D2Coding",monospace;font-size:13px;line-height:1.5;tab-size:4}
+#t-code{flex:1;min-height:260px;width:100%}
+.ask pre{max-height:280px}
 .status-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}
 .hidden{display:none!important}
 @media (max-width:1000px){
+  .tools{grid-template-columns:1fr;height:auto}
+  .tools>.card{min-height:auto}
   .skills{grid-template-columns:1fr;height:auto}
   .skills>.card{min-height:auto}
   #sk-editor{min-height:320px}
@@ -94,6 +102,7 @@ table.grid tbody tr{cursor:pointer}
     <button data-tab="chat" class="active">조사</button>
     <button data-tab="skills">스킬</button>
     <button data-tab="files">파일</button>
+    <button data-tab="tools">도구</button>
     <button data-tab="status">상태</button>
   </nav>
   <div class="right">
@@ -179,6 +188,12 @@ table.grid tbody tr{cursor:pointer}
         <span class="grow"></span>
         <label class="row"><input id="f-upload" type="file" class="hidden"><button id="f-upload-btn">업로드</button></label>
       </div>
+      <div class="row" style="margin-top:8px">
+        <input id="f-url" class="grow" placeholder="다운로드 URL (MCP 가 준 링크)">
+        <input id="f-cookie" placeholder="쿠키 (선택) A=1; B=2" style="width:170px">
+        <button id="f-fetch">URL로 받기</button>
+      </div>
+      <div id="f-fetch-out" class="small" style="white-space:pre-wrap"></div>
       <div id="f-dirs" class="small muted" style="margin:6px 0"></div>
       <div class="scroll" style="max-height:calc(100vh - 230px)">
         <table class="grid"><thead><tr><th>파일</th><th>크기</th><th>수정</th></tr></thead><tbody id="f-body"></tbody></table>
@@ -193,6 +208,37 @@ table.grid tbody tr{cursor:pointer}
       </div>
       <div id="f-status" style="margin-top:8px"></div>
       <div id="f-analysis" class="answer hidden" style="margin-top:8px"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 도구 (동적 도구) ===================== -->
+<section id="tab-tools" class="tab">
+  <div class="tools">
+    <div class="card">
+      <div class="row"><b class="grow">동적 도구</b><button id="t-new">＋ 새 도구</button></div>
+      <div id="t-mode" class="small muted"></div>
+      <div id="t-list" class="list"></div>
+      <div id="t-errors" class="small" style="color:var(--err)"></div>
+    </div>
+    <div class="card">
+      <div class="row"><b id="t-title" class="grow">도구를 선택하세요</b>
+        <span id="t-dirty" class="badge b-warn hidden">수정됨</span>
+        <button id="t-save" class="primary" disabled>저장</button>
+        <button id="t-delete" class="danger" disabled>삭제</button></div>
+      <div id="t-meta" class="small muted"></div>
+      <label class="form" style="margin:0"><span class="small muted">설명 (LLM 이 보고 고르는 기준)</span><input id="t-desc"></label>
+      <label class="form" style="margin:0"><span class="small muted">인자 JSON 스키마</span><textarea id="t-params" class="mono" rows="5" spellcheck="false"></textarea></label>
+      <div id="t-check" class="small muted">코드: def run(args, ctx) → 결과 반환 · ctx.call_tool("tool", {...}) 로 MCP tool 호출 가능</div>
+      <textarea id="t-code" class="mono" spellcheck="false" wrap="off"></textarea>
+    </div>
+    <div class="card runpane">
+      <b>테스트 실행</b>
+      <div class="small muted">편집 중인 코드로 바로 실행합니다 (저장하지 않아도 됨).</div>
+      <label class="form"><span class="small muted">테스트 인자 (JSON)</span><textarea id="t-args" class="mono" rows="4" spellcheck="false">{}</textarea></label>
+      <div class="row"><button id="t-run" class="primary" disabled>▶ 테스트</button><span id="t-run-status"></span></div>
+      <pre id="t-out" class="hidden"></pre>
+      <div class="small muted" style="margin-top:12px">에이전트가 대화 중에 만든 도구도 여기에 나타납니다. 승인 모드(dynamic_tools.mode)가 approve 면 에이전트가 도구를 만들거나 코드를 실행하기 전에 조사/스킬 화면에서 승인을 묻습니다.</div>
     </div>
   </div>
 </section>
@@ -284,6 +330,7 @@ function showTab(name) {
   if (name === "skills") loadSkills();
   if (name === "files") loadFiles();
   if (name === "status") loadStatus();
+  if (name === "tools") loadTools();
 }
 
 // ---------------- 실행 뷰 (조사/스킬 공용) ----------------
@@ -333,7 +380,8 @@ class RunView {
   }
   askBox(d) {
     this.status.innerHTML = `<span class="badge b-warn">답변 대기</span>`;
-    const box = this.add(`<div class="ask"><b>🙋 에이전트의 질문</b><div style="margin:6px 0;white-space:pre-wrap">${esc(d.question)}</div>
+    const [qText, qCode] = String(d.question).split("\n\n--- 코드 ---\n");
+    const box = this.add(`<div class="ask"><b>🙋 에이전트의 질문</b><div style="margin:6px 0;white-space:pre-wrap">${esc(qText)}</div>${qCode ? `<pre>${esc(qCode)}</pre>` : ""}
       <div class="row opts">${(d.options || []).map(o => `<button class="opt">${esc(o)}</button>`).join("")}</div>
       <div class="row" style="margin-top:6px"><input class="grow ans" placeholder="직접 입력${d.default ? " (기본값: " + esc(d.default) + ")" : ""}"><button class="primary send">답변</button></div></div>`);
     const send = async v => {
@@ -565,6 +613,85 @@ $("#f-upload").onchange = async e => {
   e.target.value = "";
 };
 
+$("#f-fetch").onclick = async () => {
+  const url = $("#f-url").value.trim(); if (!url) return;
+  const out = $("#f-fetch-out"); out.textContent = "받는 중…"; $("#f-fetch").disabled = true;
+  try {
+    const r = await api("/api/files/fetch", {json: {url, cookies: $("#f-cookie").value || null}});
+    out.innerHTML = (r.is_error ? '<span class="b-err">' : "<span>") + esc(r.text) + "</span>";
+    await loadFiles();
+    if (r.files && r.files[0]) selectFile(r.files[0].path, r.files[0].state === "complete");
+  } catch (e) { out.innerHTML = `<span class="b-err">${esc(e.message)}</span>`; }
+  $("#f-fetch").disabled = false;
+};
+
+// ---------------- 도구 ----------------
+let tCurrent = null, tSaved = "", tTemplate = "";
+const tFields = () => JSON.stringify([$("#t-desc").value, $("#t-params").value, $("#t-code").value]);
+function tDirty() { $("#t-dirty").classList.toggle("hidden", !tCurrent || tFields() === tSaved); }
+["#t-desc", "#t-params", "#t-code"].forEach(sel => $(sel).addEventListener("input", () => { tDirty(); clearTimeout(window._tc); window._tc = setTimeout(tCheck, 400); }));
+$("#t-code").addEventListener("keydown", e => {
+  if (e.key === "Tab") { e.preventDefault(); const el = e.target, st = el.selectionStart; el.setRangeText("    ", st, el.selectionEnd, "end"); tDirty(); }
+  if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); $("#t-save").click(); }
+});
+async function tCheck() {
+  if (!tCurrent) return;
+  let msg = "";
+  try { JSON.parse($("#t-params").value || "{}"); } catch (e) { msg = "인자 스키마 JSON 오류: " + e.message; }
+  const r = await api(`/api/ctools/${tCurrent}/check`, {json: {code: $("#t-code").value, args: {}}}).catch(e => ({ok: false, problems: [e.message]}));
+  const probs = (r.problems || []).concat(msg ? [msg] : []);
+  $("#t-check").innerHTML = probs.length ? `<span class="b-err">⚠ ${probs.map(esc).join("<br>⚠ ")}</span>` : `<span class="b-ok">✓ 코드 검사 통과</span>`;
+}
+async function loadTools(select) {
+  try {
+    const d = await api("/api/ctools"); tTemplate = d.template;
+    $("#t-mode").innerHTML = `승인 모드: <b>${esc(d.mode)}</b>`;
+    $("#t-list").innerHTML = d.tools.map(t => `<div class="item ${t.name === tCurrent ? "active" : ""}" data-name="${esc(t.name)}"><div>${esc(t.name)} ${t.created_by === "agent" ? '<span class="badge">에이전트 작성</span>' : ""}</div><div class="small muted">${esc(t.description.slice(0, 70))}</div></div>`).join("")
+      || `<div class="small muted">아직 동적 도구가 없습니다. 에이전트가 필요할 때 만들거나 ＋ 로 직접 만들 수 있습니다.</div>`;
+    $("#t-errors").textContent = Object.entries(d.errors).map(([n, e]) => `${n}: ${e}`).join("\n");
+    document.querySelectorAll("#t-list .item").forEach(el => el.onclick = () => openTool(el.dataset.name));
+    if (select) openTool(select);
+  } catch (e) { $("#t-list").innerHTML = `<div class="b-err small">${esc(e.message)}</div>`; }
+}
+function fillTool(t, isNew) {
+  $("#t-title").textContent = t.name + (isNew ? " (새 도구 - 저장 전)" : "");
+  $("#t-desc").value = t.description || ""; $("#t-params").value = JSON.stringify(t.parameters || {type: "object", properties: {}}, null, 2);
+  $("#t-code").value = t.code || "";
+  $("#t-meta").textContent = isNew ? "" : `작성: ${t.created_by || "-"} · 생성 ${t.created_at || "-"} · 수정 ${t.updated_at || "-"}` + (t.last_test ? ` · 마지막 테스트 ${t.last_test.ok ? "성공" : "실패"} ${JSON.stringify(t.last_test.args)}` : "");
+  if (t.last_test && t.last_test.args) $("#t-args").value = JSON.stringify(t.last_test.args, null, 2);
+  tSaved = isNew ? "" : tFields(); ["#t-save", "#t-delete", "#t-run"].forEach(x => $(x).disabled = false);
+  $("#t-out").classList.add("hidden"); tDirty(); tCheck();
+  document.querySelectorAll("#t-list .item").forEach(el => el.classList.toggle("active", el.dataset.name === t.name));
+}
+async function openTool(name) {
+  if (tCurrent && tFields() !== tSaved && !confirm("저장하지 않은 수정 내용을 버릴까요?")) return;
+  try { const t = await api(`/api/ctools/${encodeURIComponent(name)}`); tCurrent = name; fillTool(t, false); } catch (e) { alert(e.message); }
+}
+$("#t-new").onclick = () => {
+  const name = prompt("도구 이름 (영문 소문자/숫자/_)", "my_tool"); if (!name) return;
+  tCurrent = name; fillTool({name, description: "", parameters: {type: "object", properties: {}}, code: tTemplate}, true);
+};
+$("#t-save").onclick = async () => {
+  let params; try { params = JSON.parse($("#t-params").value || "{}"); } catch (e) { return alert("인자 스키마 JSON 오류: " + e.message); }
+  try { await api(`/api/ctools/${encodeURIComponent(tCurrent)}`, {method: "PUT", json: {description: $("#t-desc").value, parameters: params, code: $("#t-code").value}}); tSaved = ""; await loadTools(tCurrent); }
+  catch (e) { $("#t-check").innerHTML = `<span class="b-err">저장 실패: ${esc(e.message)}</span>`; }
+};
+$("#t-delete").onclick = async () => {
+  if (!tCurrent || !confirm(`'${tCurrent}' 도구를 삭제할까요? (tools/.trash 로 이동)`)) return;
+  await api(`/api/ctools/${encodeURIComponent(tCurrent)}`, {method: "DELETE"}).catch(() => {});
+  tCurrent = null; tSaved = ""; $("#t-title").textContent = "도구를 선택하세요"; ["#t-desc", "#t-params", "#t-code"].forEach(x => $(x).value = ""); loadTools();
+};
+$("#t-run").onclick = async () => {
+  let args; try { args = JSON.parse($("#t-args").value || "{}"); } catch (e) { return alert("테스트 인자 JSON 오류: " + e.message); }
+  $("#t-run").disabled = true; $("#t-run-status").innerHTML = '<span class="badge b-run">실행 중</span>';
+  try {
+    const r = await api(`/api/ctools/${encodeURIComponent(tCurrent)}/test`, {json: {args, code: $("#t-code").value}});
+    $("#t-run-status").innerHTML = r.ok ? `<span class="badge b-ok">성공 ${r.elapsed}s</span>` : `<span class="badge b-err">실패</span>`;
+    const o = $("#t-out"); o.classList.remove("hidden"); o.textContent = r.text;
+  } catch (e) { $("#t-run-status").innerHTML = `<span class="b-err">${esc(e.message)}</span>`; }
+  $("#t-run").disabled = false;
+};
+
 // ---------------- 상태 ----------------
 async function loadStatus() {
   try {
@@ -589,7 +716,7 @@ $("#st-refresh").onclick = loadStatus;
 // 시작
 loadServerOptions();
 showTab(store.get("agent_tab", "chat"));
-window.addEventListener("beforeunload", e => { if (skCurrent && editor.value !== skSaved) { e.preventDefault(); e.returnValue = ""; } });
+window.addEventListener("beforeunload", e => { if ((skCurrent && editor.value !== skSaved) || (tCurrent && tSaved && tFields() !== tSaved)) { e.preventDefault(); e.returnValue = ""; } });
 </script>
 </body>
 </html>

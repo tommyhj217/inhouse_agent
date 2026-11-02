@@ -10,3 +10,6 @@ logs/
 workspace/
 skills/_trash/
 skills/*/.history/
+tools/.drafts/
+tools/.trash/
+tools/.history/

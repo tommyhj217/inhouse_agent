@@ -171,6 +171,77 @@ def download_approval_list(month: str) -> str:
     return f"파일 저장: {path}"
 
 
+# ---------------------------------------------------------------------------
+# 다운로드 URL 시나리오: MCP 가 파일 대신 '다운로드 링크'를 돌려주는 경우
+# ---------------------------------------------------------------------------
+_HTTP: dict = {}
+DEMO_SESSION = "SESSION=demo-session-7f3a"
+
+
+def _file_server() -> str:
+    """샘플용 사내 파일 서버 (127.0.0.1 임의 포트)."""
+    if "base" in _HTTP:
+        return _HTTP["base"]
+    import urllib.parse
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):  # stdout 은 MCP 프로토콜 채널이므로 출력 금지
+            pass
+
+        def do_GET(self):
+            u = urllib.parse.urlparse(self.path)
+            q = urllib.parse.parse_qs(u.query)
+            month = (q.get("month") or ["2026-10"])[0]
+            if u.path == "/protected/download" and DEMO_SESSION.split("=", 1)[1] not in (self.headers.get("Cookie") or ""):
+                body = "<html><head><title>로그인</title></head><body>로그인이 필요합니다.</body></html>".encode()
+                self.send_response(200)  # 사내 시스템은 흔히 200 으로 로그인 페이지를 줌
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if u.path in ("/files/download", "/protected/download"):
+                tmp = DOWNLOAD_DIR.parent / f".srv_{month}_{threading.get_ident()}.xlsx"
+                tmp.parent.mkdir(parents=True, exist_ok=True)
+                _write_xlsx(tmp, month)
+                body = tmp.read_bytes()
+                tmp.unlink()
+                name = urllib.parse.quote(f"매출현황_{month}.xlsx")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                self.send_header("Content-Disposition", f"attachment; filename=\"report.xlsx\"; filename*=UTF-8''{name}")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            self.send_response(404)
+            self.end_headers()
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    _HTTP["base"] = f"http://127.0.0.1:{srv.server_address[1]}"
+    return _HTTP["base"]
+
+
+@mcp.tool()
+def get_sales_download_link(month: str) -> str:
+    """ERP 월별 매출 엑셀의 다운로드 URL 을 조회합니다 (파일은 직접 받지 않음). month: YYYY-MM"""
+    return f"파일 다운로드 주소: {_file_server()}/files/download?fileId=SALES-{month}&month={month}"
+
+
+@mcp.tool()
+def get_secure_report_link(month: str) -> str:
+    """보안 문서함의 월간 보고서 다운로드 URL 을 조회합니다. 로그인 세션 쿠키가 있어야 받을 수 있습니다."""
+    return f"보고서 다운로드: {_file_server()}/protected/download?month={month}  (로그인 세션 필요)"
+
+
+@mcp.tool()
+def get_session_cookie() -> str:
+    """현재 브라우저의 로그인 세션 쿠키를 돌려줍니다 (다운로드 링크를 직접 받을 때 사용)."""
+    return DEMO_SESSION
+
+
 if __name__ == "__main__":
     import sys
 

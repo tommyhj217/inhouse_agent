@@ -17,6 +17,8 @@ from zoneinfo import ZoneInfo
 from .agent import Agent, AgentResult, EventCallback
 from .builtins import make_builtin_tools
 from .config import AppConfig, ScheduleConfig
+from .downloader import DownloadConfig, Downloader
+from .dynamic_tools import DynamicToolManager, DynamicToolsConfig
 from .files import FileWorkspace
 from .interaction import AskFn
 from .llm import AzureChatModel, ChatModel
@@ -65,13 +67,20 @@ class AgentRuntime:
             max_file_mb=cfg.files.max_file_mb,
         )
         self.skills = SkillStore(cfg.skills_path)
+        self.downloader = Downloader(DownloadConfig.from_dict(cfg.downloads), self.workspace)
+        dyn_cfg = DynamicToolsConfig.from_dict(cfg.dynamic_tools)
+        self.dynamic = DynamicToolManager(dyn_cfg, cfg.resolve_path(dyn_cfg.dir), self.workspace)
         self.hub = MCPHub(
             cfg.mcp_servers,
             log_dir=cfg.log_path,
-            builtins=make_builtin_tools(self.workspace, cfg.agent.timezone, self.skills),
+            builtins=make_builtin_tools(self.workspace, cfg.agent.timezone, self.skills, self.downloader, self.dynamic),
             workspace=self.workspace,
             auto_detect=cfg.files.auto_detect,
         )
+        self.hub.downloader = self.downloader
+        self.dynamic.hub = self.hub
+        if dyn_cfg.mode != "off":
+            self.dynamic.register_all()  # 저장해 둔 동적 도구 등록
         self._agent: Agent | None = None
         self._job_locks: dict[str, asyncio.Lock] = {}
 

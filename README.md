@@ -31,6 +31,8 @@
 | 파일 상태 점검 | 다운로드 중(`.crdownload`, 크기 변화, 재다운로드), 빈 파일, 손상(ZIP/PDF 무결성), 의심(엑셀인데 실제로는 로그인 HTML 페이지) 상태를 구분합니다. |
 | 파일 분석 | xlsx/xls/HTML표 xls/CSV(cp949)/PDF/DOCX/PPTX/JSON/ZIP을 분석합니다. 표는 제목행을 건너뛰고 열별 통계를 내며, `query_table`로 필터·그룹 집계를 정확하게 계산합니다. |
 | 스킬 | `skills/<이름>/SKILL.md`에 업무 절차와 입력값을 정의합니다. 에이전트가 알아서 불러 쓰고, 예약작업에서도 실행할 수 있습니다. |
+| 다운로드 URL | MCP 결과에 있는 다운로드 링크를 감지해서 `download_url`로 받습니다. 한글 파일명(`filename*=`, 깨진 인코딩)을 복원하고, 리다이렉트, 사내 프록시/CA, 쿠키/헤더, 사이트별 인증 설정을 지원합니다. 링크인데 로그인 페이지가 받아지면 의심 상태로 표시합니다. |
+| 동적 도구 | 필요한 tool이 없으면 에이전트가 파이썬 코드로 tool을 만들고(`create_tool`) 테스트해서 바로 사용합니다. 일회성 계산은 `run_python`으로 처리합니다. 만든 도구는 `ctx.call_tool_data()`로 기존 MCP tool을 조합할 수 있고, `tools/`에 저장되어 계속 재사용됩니다. 승인 모드를 지원합니다. |
 | 인터랙티브 UI | 스킬을 편집하면 입력 폼이 즉시 바뀌고, 바로 테스트 실행할 수 있습니다. 실행 과정은 실시간으로 표시되고, 에이전트의 질문(`ask_user`)에 화면에서 답할 수 있습니다. 결과를 보고 후속 지시를 내릴 수 있습니다. |
 | 사용 방식 | 대화형 CLI, 1회 실행 CLI, 웹 채팅 화면과 REST API(`serve`), 예약 데몬(`scheduler`) |
 | SDK 호환 | mcp SDK 1.x와 2.x, openai SDK 1.x 이상에서 테스트했습니다. |
@@ -264,7 +266,75 @@ inputs:                        # (선택) 웹 UI 입력 폼으로 표시
   웹컨트롤이 화면이 있는 브라우저를 쓰면 서비스(세션 0) 대신 **로그온한 사용자 세션**에서 실행해야 합니다.
 - **Linux**: systemd 유닛의 `ExecStart=/opt/inhouse_agent/.venv/bin/inhouse-agent serve`, `WorkingDirectory=/opt/inhouse_agent`
 
-## 6. 구조
+## 6. 다운로드 URL 받기
+
+MCP가 파일 대신 링크를 돌려주면(`파일 다운로드 주소: https://.../download?fileId=...`), 에이전트가 결과 뒤에
+`[다운로드 링크 감지]`를 붙여 LLM에 알려주고, LLM이 `download_url`로 받은 뒤 상태 점검 결과를 확인합니다.
+`downloads.auto_download: true`로 설정하면 링크를 바로 자동으로 받습니다.
+
+| 상황 | 처리 |
+|---|---|
+| 한글 파일명 | `filename*=UTF-8''…`, latin-1로 깨진 UTF-8/CP949, `%` 인코딩, `?fileName=` 쿼리에서 복원합니다. |
+| 사내 프록시 / 인증서 | `HTTP(S)_PROXY`/`NO_PROXY` 환경변수를 사용합니다. `downloads.verify`에 사내 CA 경로를 지정합니다. |
+| 로그인이 필요한 링크 | 쿠키 없이 받은 결과가 로그인 HTML이면 ⚠️ 의심으로 표시합니다. LLM은 MCP에서 세션 쿠키를 얻는 tool이 있으면 `cookies` 인자로 다시 받습니다. 고정 토큰과 쿠키는 `downloads.sites`에 사이트별로 설정합니다. |
+| 안전장치 | http/https만 허용하고, `allowed_hosts`/`blocked_hosts`로 호스트를 제한하며, 링크로컬(169.254.x) 주소를 차단합니다. 크기 제한이 있고, `.part`로 받다가 완료되면 이름을 바꿉니다. |
+
+```bash
+inhouse-agent fetch "https://erp.company.com/file/download?id=123" --cookies "JSESSIONID=..."
+```
+웹 UI 파일 탭의 "URL로 받기"로도 받을 수 있습니다.
+
+## 7. 동적 도구 (tool이 없을 때 직접 만들어 실행)
+
+에이전트가 필요한 tool이 없다고 판단하면 다음 두 가지로 처리합니다.
+
+- **`run_python`**: 일회성 계산, 변환, 병합. 코드는 `workspace/_scripts/`에 감사 기록으로 남습니다.
+- **`create_tool`**: 반복해서 쓸 기능을 만듭니다. 처리 순서는 다음과 같습니다.
+  1. 정적 검사
+  2. (approve 모드) 사용자 승인. 조사/스킬 화면에 코드와 함께 승인/거부 버튼이 표시됩니다.
+  3. `test_args`로 테스트 실행. 실패하면 traceback을 LLM에 돌려주고, LLM이 코드를 고쳐 다시 시도합니다.
+  4. `tools/<이름>.py`로 저장하고 `custom__<이름>`으로 등록합니다. 같은 실행 안에서 바로 호출할 수 있습니다.
+
+도구 코드 형식:
+
+```python
+def run(args, ctx):
+    rows = ctx.call_tool_data("erp__get_daily_sales", {"date_from": "2026-10-01", "date_to": "2026-10-31"})  # MCP tool → dict/list
+    files = ctx.call_tool_files("download_url", {"url": args["url"]})   # 받은 파일 [{path, state, ...}]
+    from inhouse_agent import analyzers
+    t = analyzers.load_tables(files[0]["path"])[0]                       # 엑셀/CSV → Table(columns, rows)
+    total = sum(analyzers.to_number(r[t.columns.index("금액")]) or 0 for r in t.rows)
+    ctx.log("진행 로그")                                                    # stderr 로그
+    return {"total": total, "rows": len(rows)}
+```
+
+`ctx`가 제공하는 것: `workspace`, `download_dir`, `files_dir`, `path('downloads/x.csv')`, `call_tool()`(텍스트), `call_tool_data()`(구조화), `call_tool_files()`, `log()`
+
+**실행 환경과 안전장치**
+
+| 항목 | 내용 |
+|---|---|
+| 실행 위치 | 별도 파이썬 프로세스 (`python -I`). 작업폴더는 workspace입니다. |
+| 제한 시간 | `dynamic_tools.timeout` |
+| 환경변수 | 최소한만 전달합니다. Azure 키 등은 넘어가지 않고, 필요한 변수만 `env_passthrough`에 지정합니다. |
+| 정적 검사 | `subprocess`/`ctypes`/`pickle` import, `os.system`/`os.remove`/`shutil.rmtree`/`eval`/`exec` 호출을 차단합니다. 목록은 설정할 수 있습니다. |
+| 도구 안에서 못 부르는 tool | `create_tool`, `run_python`, `ask_user`, 다른 `custom__` 도구 |
+| 승인 모드 | `dynamic_tools.mode`: `approve`(기본, 사용자 승인), `auto`(자동), `off`(사용 안 함). 예약작업처럼 사람이 없는 실행에서는 approve 모드일 때 새 도구를 만들지 않고, 이미 저장된 도구만 씁니다. |
+
+> ⚠️ 이 장치는 프로세스 격리, 정적 검사, 승인 절차를 합친 것이고, **완전한 보안 샌드박스는 아닙니다**.
+> 신뢰할 수 있는 사내 서버에서 운영하고, 웹 UI를 다른 사람과 같이 쓰면 반드시 `AGENT_API_TOKEN`을 설정하세요.
+> 웹 UI의 도구 탭에서는 코드를 직접 실행할 수 있습니다. 운영 환경에서는 `approve` 모드를 권장합니다.
+
+도구 관리:
+
+| 방법 | 기능 |
+|---|---|
+| 웹 UI **도구** 탭 | 목록을 보고 코드, 설명, 인자 스키마를 편집합니다. 편집하는 동안 정적 검사가 돌고, 편집 중인 코드로 바로 테스트하며, 저장(이전 버전 `.history` 보관)과 삭제를 합니다. |
+| CLI | `inhouse-agent ctools list`, `ctools show <이름>`, `ctools test <이름> --args '{...}'`, `ctools delete <이름>` |
+
+검토한 도구는 `tools/` 폴더째 GitHub에 커밋해서 다른 서버와 공유할 수 있습니다.
+
+## 8. 구조
 
 ```
 src/inhouse_agent/
@@ -275,7 +345,10 @@ src/inhouse_agent/
   analyzers.py  엑셀/CSV/HTML표/PDF/DOCX/PPTX/JSON/ZIP 분석, query_table
   skills.py     SKILL.md 파싱, 입력값 처리, 저장소(버전 백업)
   interaction.py ask_user 를 실행 중인 UI(웹/CLI)와 연결
-  builtins.py   내장 tool (파일, 분석, 스킬, ask_user, 저장)
+  builtins.py   내장 tool (파일, 분석, 스킬, ask_user, 저장, download_url, create_tool, run_python)
+  downloader.py 다운로드 URL 받기 (한글 파일명, 프록시/CA, 쿠키, 호스트 제한)
+  dynamic_tools.py 동적 도구 저장소, 정적 검사, 승인, 자식 프로세스 실행(+tool 호출 중계)
+  _tool_runner.py  동적 도구를 실행하는 자식 프로세스
   agent.py      LLM ↔ tool 루프, 시스템 프롬프트, 이력 관리
   runtime.py    조립, 예약작업 실행, 결과 저장, 웹훅
   scheduler.py  APScheduler cron 등록
@@ -283,6 +356,7 @@ src/inhouse_agent/
   web/index.html 웹 UI (조사 / 스킬 / 파일 / 상태) - 외부 CDN 없이 단일 파일
   cli.py        명령행
 skills/                         스킬 (샘플: monthly_sales_report, notice_digest)
+tools/                          에이전트/사용자가 만든 동적 도구 (실행 시 생성)
 examples/sample_mcp_server.py   데모 MCP 서버 (stdio, 또는 --http 8001). 백그라운드 다운로드, blob 첨부, 세션 만료 HTML 저장 시나리오 포함
 tests/                          통합 테스트 (실제 MCP 서버, 가짜 Azure 엔드포인트)
 ```
@@ -291,7 +365,7 @@ tests/                          통합 테스트 (실제 MCP 서버, 가짜 Azur
   현재 시각과 서버 목록, 서버 설명은 자동으로 붙습니다.
 - 결과를 디버깅할 때는 `outputs/<작업>/_trace/*.json`에서 LLM이 어떤 tool을 어떤 인자로 불렀는지 확인할 수 있습니다.
 
-## 7. 테스트
+## 9. 테스트
 
 ```bash
 pip install -e ".[server,dev]"
@@ -309,3 +383,5 @@ pytest -q
 - 분석 (cp949 CSV 제목행, HTML표 xls, docx, 다중 시트 xlsx, zip slip 차단)
 - 스킬 파싱/검증/버전 백업, 스킬 실행 중 ask_user 답변 반영과 다운로드 감지
 - 웹 API 흐름: 스킬 생성/저장 → 실행 → SSE 이벤트 → 질문 답변 → 후속 지시 → 파일 업로드/분석
+- 다운로드: 한글 파일명 복원, 리다이렉트, 404, 크기 제한, 호스트 제한, 링크로컬 차단, 사이트별 헤더/쿠키, 로그인 페이지 감지, 링크 감지/자동 받기
+- 동적 도구: 정적 검사, 승인/거부/비대화형 거절, 테스트 실패 시 미등록, 같은 실행 안에서 생성→호출, 재시작 후 재사용, 재귀 호출 금지, 제한 시간, 비밀 환경변수 미전달, mode off, 웹 API

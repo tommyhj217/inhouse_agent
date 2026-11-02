@@ -69,6 +69,25 @@ def describe_exception(e: BaseException) -> str:
 BlobSaver = Callable[[bytes, str, "str | None"], Path]
 
 
+def tool_result_data(data: dict[str, Any]) -> Any:
+    """결과에서 구조화 데이터 추출: structuredContent → 텍스트 항목 JSON 파싱(여러 개면 리스트)."""
+    sc = data.get("structuredContent")
+    if sc is not None:
+        if isinstance(sc, dict) and set(sc) == {"result"}:
+            return sc["result"]
+        return sc
+    texts = [i.get("text", "") for i in data.get("content") or [] if i.get("type") == "text"]
+    if not texts:
+        return None
+    parsed = []
+    for t in texts:
+        try:
+            parsed.append(json.loads(t))
+        except (json.JSONDecodeError, TypeError):
+            return None
+    return parsed[0] if len(parsed) == 1 else parsed
+
+
 def tool_result_to_text(result: Any, saver: BlobSaver | None = None) -> tuple[str, bool, list[Path]]:
     """CallToolResult → (LLM 에 줄 텍스트, is_error, 저장한 파일 목록).
 
@@ -193,6 +212,7 @@ class ServerConnection:
         self._lock = asyncio.Lock()  # 서버 단위 호출 직렬화
         self._conn_lock = asyncio.Lock()
         self.last_error: str | None = None
+        self.last_data: Any = None
 
     @property
     def name(self) -> str:
@@ -324,6 +344,7 @@ class ServerConnection:
                     result = await asyncio.wait_for(
                         self.session.call_tool(tool, arguments), timeout=self.cfg.tool_timeout
                     )
+                    self.last_data = tool_result_data(_dump(result)) if hasattr(result, "model_dump") else None
                     return tool_result_to_text(result, saver)
                 except asyncio.TimeoutError:
                     return f"오류: tool '{tool}' 실행이 {self.cfg.tool_timeout}초 내에 끝나지 않았습니다.", True, []
@@ -365,6 +386,7 @@ class ToolOutcome:
     text: str
     is_error: bool = False
     files: list[dict[str, Any]] = field(default_factory=list)  # 감지/점검한 파일 상태
+    data: Any = None  # 구조화 결과 (동적 도구의 ctx.call_tool_data 용)
 
 
 @dataclass
@@ -381,6 +403,8 @@ class MCPHub:
         }
         self._routes: dict[str, _Route] = {}
         self._functions: list[tuple[str, dict[str, Any]]] = []  # (server, openai tool spec)
+        self.custom_tools: list[BuiltinTool] = []  # 에이전트가 만든 동적 도구 (custom__<이름>)
+        self.downloader: Any = None  # downloader.Downloader (다운로드 링크 자동 처리용)
 
     async def __aenter__(self) -> "MCPHub":
         await self.start()
@@ -423,6 +447,11 @@ class MCPHub:
             used.add(b.name)
             routes[b.name] = _Route("builtin", b.name, b)
             funcs.append(("builtin", _spec(b.name, b.description, b.input_schema)))
+        for b in self.custom_tools:
+            fn = f"custom{NAME_SEP}{b.name}"
+            used.add(fn)
+            routes[fn] = _Route("custom", b.name, b)
+            funcs.append(("custom", _spec(fn, b.description, b.input_schema)))
         for conn in self.connections.values():
             for t in conn.tools:
                 fn = make_function_name(conn.name, t.name, used)
@@ -434,9 +463,13 @@ class MCPHub:
         self._routes = routes
         self._functions = funcs
 
+    def set_custom_tools(self, tools: list[BuiltinTool]) -> None:
+        self.custom_tools = list(tools)
+        self._rebuild()
+
     def openai_tools(self, servers: list[str] | None = None) -> list[dict[str, Any]]:
-        """LLM 에 전달할 tools 목록. servers 를 주면 해당 서버(+builtin)만."""
-        return [spec for srv, spec in self._functions if servers is None or srv in servers or srv == "builtin"]
+        """LLM 에 전달할 tools 목록. servers 를 주면 해당 서버(+builtin, 동적 도구)만."""
+        return [spec for srv, spec in self._functions if servers is None or srv in servers or srv in ("builtin", "custom")]
 
     def server_status(self) -> list[dict[str, Any]]:
         return [
@@ -467,22 +500,42 @@ class MCPHub:
         route = self._routes.get(function_name)
         if route is None:
             return ToolOutcome(f"오류: 알 수 없는 tool '{function_name}'", True)
+        ws = self.workspace
         if route.builtin is not None:
+            # 동적 도구는 파일을 내려받는 경우가 많으므로 MCP tool 처럼 폴더 변화도 점검
+            before = await asyncio.to_thread(ws.snapshot) if route.server == "custom" and ws is not None and self.auto_detect else None
             try:
                 res = await route.builtin.handler(arguments)
             except Exception as e:  # noqa: BLE001
                 return ToolOutcome(f"오류: {describe_exception(e)}", True)
-            if isinstance(res, ToolOutcome):
-                return res
-            return ToolOutcome(str(res))
+            out = res if isinstance(res, ToolOutcome) else ToolOutcome(str(res))
+            if before is not None:
+                inspected = await self._inspect_files(out.text, out.is_error, [], before)
+                inspected.files = out.files + inspected.files
+                return inspected
+            return out
 
-        ws = self.workspace
         before = await asyncio.to_thread(ws.snapshot) if ws is not None and self.auto_detect else None
         saver = (lambda data, name, mime: ws.save_blob(data, name, mime, route.server)) if ws is not None else None
-        text, is_err, saved = await self.connections[route.server].call(route.tool, arguments, saver)
+        conn = self.connections[route.server]
+        text, is_err, saved = await conn.call(route.tool, arguments, saver)
+        data = conn.last_data if not is_err else None  # 서버 단위 lock 안에서 설정됨
         if ws is None:
-            return ToolOutcome(text, is_err)
-        return await self._inspect_files(text, is_err, saved, before)
+            return ToolOutcome(text, is_err, data=data)
+        out = await self._inspect_files(text, is_err, saved, before)
+        out.data = data
+        return out
+
+    @staticmethod
+    def _download_links(text: str) -> list[str]:
+        from .downloader import find_urls
+
+        links = find_urls(text)
+        # resource_link 로 온 http 링크도 포함
+        for m in re.finditer(r"\[리소스 링크\][^\n]*?(https?://\S+)", text):
+            if m.group(1) not in links:
+                links.append(m.group(1))
+        return links
 
     async def _inspect_files(self, text: str, is_err: bool, saved: list[Path], before: dict[str, Any] | None) -> ToolOutcome:
         """tool 호출로 생긴 파일(저장된 blob / 다운로드 폴더 변화 / 결과에 적힌 경로)을 찾아 상태를 점검."""
@@ -498,8 +551,23 @@ class MCPHub:
         for p in paths:
             if p not in uniq:
                 uniq.append(p)
+        links = [] if is_err else self._download_links(text)
+        if links and self.downloader is not None and self.downloader.cfg.auto_download:
+            from .downloader import DownloadError
+
+            for url in links[:3]:
+                try:
+                    info = await asyncio.to_thread(self.downloader.download, url)
+                    p = Path(info["path"])
+                    if p not in uniq:
+                        uniq.append(p)
+                except DownloadError as e:
+                    text += f"\n\n[다운로드 링크 자동 받기 실패] {url}\n  - {e}"
+            links = []
+        if links:
+            text += "\n\n[다운로드 링크 감지] " + " , ".join(links) + "\n※ download_url tool 로 받으세요 (로그인이 필요하면 cookies 인자 사용)."
         if not uniq:
-            if not is_err and re.search(r"다운로드|내려받|download|export|엑셀|excel", text, re.I):
+            if not links and not is_err and re.search(r"다운로드|내려받|download|export|엑셀|excel", text, re.I):
                 text += (
                     "\n\n[파일 감지] 아직 감시 폴더에 새 파일이 보이지 않습니다. 다운로드가 백그라운드로 진행 중일 수 있으니 "
                     "wait_for_download 로 완료를 확인하세요."

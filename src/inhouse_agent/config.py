@@ -270,6 +270,8 @@ class AppConfig:
     base_dir: Path
     files: FilesConfig = field(default_factory=FilesConfig)
     skills_dir: str = "skills"
+    downloads: dict[str, Any] = field(default_factory=dict)
+    dynamic_tools: dict[str, Any] = field(default_factory=dict)
 
     @property
     def workspace_path(self) -> Path:
@@ -357,7 +359,17 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         base_dir=base_dir,
         files=files,
         skills_dir=str((raw.get("skills") or {}).get("dir") or "skills"),
+        downloads=dict(raw.get("downloads") or {}),
+        dynamic_tools=dict(raw.get("dynamic_tools") or {}),
     )
+    try:  # 형식 오류를 시작 시점에 알림
+        from .downloader import DownloadConfig
+        from .dynamic_tools import DynamicToolsConfig
+
+        DownloadConfig.from_dict(app.downloads)
+        DynamicToolsConfig.from_dict(app.dynamic_tools)
+    except (ValueError, TypeError) as e:
+        raise ConfigError(f"downloads/dynamic_tools 설정 오류: {e}") from e
     if files.inject_env:
         ws = app.workspace_path.resolve()
         for srv in servers.values():
