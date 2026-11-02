@@ -3,6 +3,10 @@ mcp>=1.9
 apscheduler>=3.10,<4
 pyyaml>=6
 python-dotenv>=1.0
+# 파일 분석 (엑셀/PDF/구형 xls)
+openpyxl>=3.1
+pypdf>=4
+xlrd>=2.0
 tzdata; platform_system == 'Windows'
 # 웹/API 서버 (serve 명령)
 fastapi>=0.110

@@ -38,6 +38,27 @@ agent:
   #   ...
 
 # ---------------------------------------------------------------------
+# 파일 (MCP 로 내려받은 파일 감지 / 상태 점검 / 분석)
+#   - workspace/downloads, uploads, files 폴더가 자동 생성됩니다.
+#   - stdio MCP 서버에는 AGENT_DOWNLOAD_DIR(=workspace/downloads) 환경변수가 전달됩니다.
+#     웹컨트롤 MCP 의 브라우저 다운로드 경로를 이 값으로 맞추면 가장 정확합니다.
+#   - 브라우저 기본 다운로드 폴더를 그대로 쓰면 watch_dirs 에 추가하세요.
+# ---------------------------------------------------------------------
+files:
+  workspace: workspace
+  watch_dirs: []
+    # - C:/Users/<사용자>/Downloads
+  extra_read_dirs: []          # 분석(읽기)만 허용할 추가 폴더
+  max_file_mb: 200
+  auto_detect: true            # MCP tool 호출 전후 다운로드 폴더를 비교해 새 파일 자동 점검
+
+# ---------------------------------------------------------------------
+# 스킬: skills/<이름>/SKILL.md (웹 화면 '스킬' 탭에서 편집/테스트)
+# ---------------------------------------------------------------------
+skills:
+  dir: skills
+
+# ---------------------------------------------------------------------
 # MCP 서버 (기존에 만들어 둔 사이트별 웹컨트롤 MCP)
 #   transport: stdio  → command/args 로 프로세스를 직접 띄움
 #   transport: http   → 이미 떠 있는 Streamable HTTP MCP 서버 (url)
@@ -81,6 +102,7 @@ mcp_servers:
 #     {today} {yesterday} {tomorrow} {now} {weekday}
 #     {this_month} {last_month} {week_start} {week_end} {last_week_start} {last_week_end}
 #   servers: 이 작업에서 사용할 MCP 서버 제한 (생략 시 전체)
+#   skill / inputs: 스킬로 실행 (예약작업에서는 ask_user 질문 없이 기본값으로 진행)
 #   결과: outputs/<name>/<시각>.md (+ latest.md, _trace/ 상세 기록)
 # ---------------------------------------------------------------------
 schedules:
@@ -95,6 +117,15 @@ schedules:
       {yesterday} 에 등록된 공지사항을 모두 가져와서
       제목/작성부서/핵심 내용 표로 정리하고, 업무에 영향이 큰 항목을 맨 위에 요약해줘.
       정리한 표는 save_file 로 notices/{yesterday}.md 에 저장해줘.
+
+  - name: monthly_sales
+    description: "매월 1일 지난달 매출 보고서 (스킬 사용)"
+    cron: "10 9 1 * *"
+    skill: monthly_sales_report      # 스킬로 실행 (prompt 생략 가능)
+    inputs:
+      month: "{last_month}"
+      dept: 전체
+    enabled: false
 
   - name: weekly_sales
     description: "매주 월요일 지난주 매출 집계"

@@ -9,7 +9,7 @@ import logging.handlers
 import re
 import urllib.request
 from dataclasses import asdict
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -17,8 +17,12 @@ from zoneinfo import ZoneInfo
 from .agent import Agent, AgentResult, EventCallback
 from .builtins import make_builtin_tools
 from .config import AppConfig, ScheduleConfig
+from .files import FileWorkspace
+from .interaction import AskFn
 from .llm import AzureChatModel, ChatModel
 from .mcp_hub import MCPHub
+from .runtime_utils import render_dates
+from .skills import SkillStore
 
 log = logging.getLogger(__name__)
 
@@ -44,30 +48,7 @@ def setup_logging(cfg: AppConfig, level: str = "INFO", console: bool = True) -> 
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
-_PLACEHOLDER = re.compile(r"\{(today|yesterday|tomorrow|now|weekday|this_month|last_month|week_start|week_end|last_week_start|last_week_end)\}")
-
-
-def render_prompt(template: str, timezone: str, now: datetime | None = None) -> str:
-    """예약작업 프롬프트의 {today}, {yesterday} 등 날짜 변수를 치환합니다."""
-    now = now or datetime.now(ZoneInfo(timezone))
-    today = now.date()
-    week_start = today - timedelta(days=today.weekday())
-    first = today.replace(day=1)
-    last_month_end = first - timedelta(days=1)
-    values = {
-        "today": today.isoformat(),
-        "yesterday": (today - timedelta(days=1)).isoformat(),
-        "tomorrow": (today + timedelta(days=1)).isoformat(),
-        "now": now.strftime("%Y-%m-%d %H:%M"),
-        "weekday": ["월", "화", "수", "목", "금", "토", "일"][today.weekday()],
-        "this_month": today.strftime("%Y-%m"),
-        "last_month": last_month_end.strftime("%Y-%m"),
-        "week_start": week_start.isoformat(),
-        "week_end": (week_start + timedelta(days=6)).isoformat(),
-        "last_week_start": (week_start - timedelta(days=7)).isoformat(),
-        "last_week_end": (week_start - timedelta(days=1)).isoformat(),
-    }
-    return _PLACEHOLDER.sub(lambda m: values[m.group(1)], template)
+render_prompt = render_dates
 
 
 class AgentRuntime:
@@ -77,10 +58,19 @@ class AgentRuntime:
         self.cfg = cfg
         self._llm: ChatModel | None = llm
         self.start_results: dict[str, str | None] = {}
+        self.workspace = FileWorkspace(
+            cfg.workspace_path,
+            watch_dirs=[cfg.resolve_path(d) for d in cfg.files.watch_dirs],
+            extra_read_dirs=[cfg.output_path] + [cfg.resolve_path(d) for d in cfg.files.extra_read_dirs],
+            max_file_mb=cfg.files.max_file_mb,
+        )
+        self.skills = SkillStore(cfg.skills_path)
         self.hub = MCPHub(
             cfg.mcp_servers,
             log_dir=cfg.log_path,
-            builtins=make_builtin_tools(cfg.output_path, cfg.agent.timezone),
+            builtins=make_builtin_tools(self.workspace, cfg.agent.timezone, self.skills),
+            workspace=self.workspace,
+            auto_detect=cfg.files.auto_detect,
         )
         self._agent: Agent | None = None
         self._job_locks: dict[str, asyncio.Lock] = {}
@@ -95,7 +85,7 @@ class AgentRuntime:
     @property
     def agent(self) -> Agent:
         if self._agent is None:
-            self._agent = Agent(self.llm, self.hub, self.cfg.agent)
+            self._agent = Agent(self.llm, self.hub, self.cfg.agent, self.skills)
         return self._agent
 
     async def __aenter__(self) -> "AgentRuntime":
@@ -131,12 +121,37 @@ class AgentRuntime:
                 "이 요청은 예약작업으로 자동 실행되었습니다. 사용자에게 추가 질문을 할 수 없으니 "
                 "합리적인 기본값으로 판단해서 끝까지 수행하고 결과를 정리하세요."
             )
-            result = await self.agent.run(prompt, servers=job.servers, extra_system=extra, on_event=on_event)
+            skill = self.skills.get(job.skill) if job.skill else None
+            result = await self.agent.run(
+                prompt, servers=job.servers, extra_system=extra, on_event=on_event, skill=skill, skill_inputs=job.inputs
+            )
             path = self.save_result(job.name, prompt, result, started_at, job.output_format)
             log.info("예약작업 '%s' 종료 (%s, %.1fs) → %s", job.name, result.stopped_reason, result.elapsed, path)
             if job.webhook_url:
                 await asyncio.to_thread(_post_webhook, job.webhook_url, job.name, result, path)
             return result, path
+
+    async def run_skill(
+        self,
+        name: str,
+        inputs: dict[str, Any] | None = None,
+        prompt: str = "",
+        *,
+        on_event: EventCallback | None = None,
+        ask: AskFn | None = None,
+        messages: list[dict[str, Any]] | None = None,
+        save: bool = True,
+    ) -> tuple[AgentResult, Path | None]:
+        """스킬 1회 실행 (테스트용). 결과는 outputs/skill_<이름>/ 에 저장."""
+        skill = self.skills.get(name)
+        result = await self.agent.run(
+            prompt, messages=messages, on_event=on_event, ask=ask, skill=skill, skill_inputs=inputs
+        )
+        path = None
+        if save:
+            label = prompt or f"[스킬 실행] {name} 입력값={json.dumps(inputs or {}, ensure_ascii=False)}"
+            path = self.save_result(f"skill_{name}", label, result)
+        return result, path
 
     def save_result(
         self,
@@ -162,6 +177,10 @@ class AgentRuntime:
             "iterations": result.iterations,
             "usage": result.usage,
             "tools_used": [f"{e.server}.{e.tool}" + (" (오류)" if e.is_error else "") for e in result.tool_events],
+            "skills_used": result.skills_used,
+            "files": [
+                {k: f.get(k) for k in ("path", "state", "detected_type", "size", "issues")} for f in result.files
+            ],
         }
         if ext == "json":
             path.write_text(
@@ -177,6 +196,8 @@ class AgentRuntime:
                 f"- 실행 시각: {meta['started_at']}",
                 f"- 상태: {meta['status']} / 소요: {meta['elapsed_sec']}s / 반복: {meta['iterations']}",
                 f"- 사용 tool: {', '.join(meta['tools_used']) or '-'}",
+                *([f"- 사용 스킬: {', '.join(result.skills_used)}"] if result.skills_used else []),
+                *([f"- 파일: {f['path']} [{f['state']}]" for f in meta["files"]]),
                 "",
                 "## 요청",
                 "",

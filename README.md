@@ -27,6 +27,11 @@
 | 웹컨트롤 안전장치 | 같은 서버에 대한 호출은 자동으로 순차 실행하고(브라우저 충돌 방지), 서로 다른 서버는 병렬로 실행합니다. 서버별 호출 제한 시간을 둘 수 있고, 서버가 죽으면 자동으로 재시작한 뒤 1회 재시도합니다. |
 | 예약작업 | cron 형식으로 등록합니다. 프롬프트에 `{yesterday}`, `{last_week_start}` 같은 날짜 변수를 쓸 수 있습니다. 같은 작업이 겹쳐서 실행되지 않습니다. |
 | 결과 저장 | `outputs/<작업명>/`에 md/txt/json 결과와 `latest.*`, tool 입출력 전체 기록(`_trace/`)을 남깁니다. |
+| 다운로드 파일 감지 | MCP tool을 호출하기 전과 후의 다운로드 폴더를 비교하고, 결과 텍스트에 적힌 경로와 바이너리(blob)로 받은 파일도 찾아서 자동으로 상태를 점검합니다. |
+| 파일 상태 점검 | 다운로드 중(`.crdownload`, 크기 변화, 재다운로드), 빈 파일, 손상(ZIP/PDF 무결성), 의심(엑셀인데 실제로는 로그인 HTML 페이지) 상태를 구분합니다. |
+| 파일 분석 | xlsx/xls/HTML표 xls/CSV(cp949)/PDF/DOCX/PPTX/JSON/ZIP을 분석합니다. 표는 제목행을 건너뛰고 열별 통계를 내며, `query_table`로 필터·그룹 집계를 정확하게 계산합니다. |
+| 스킬 | `skills/<이름>/SKILL.md`에 업무 절차와 입력값을 정의합니다. 에이전트가 알아서 불러 쓰고, 예약작업에서도 실행할 수 있습니다. |
+| 인터랙티브 UI | 스킬을 편집하면 입력 폼이 즉시 바뀌고, 바로 테스트 실행할 수 있습니다. 실행 과정은 실시간으로 표시되고, 에이전트의 질문(`ask_user`)에 화면에서 답할 수 있습니다. 결과를 보고 후속 지시를 내릴 수 있습니다. |
 | 사용 방식 | 대화형 CLI, 1회 실행 CLI, 웹 채팅 화면과 REST API(`serve`), 예약 데몬(`scheduler`) |
 | SDK 호환 | mcp SDK 1.x와 2.x, openai SDK 1.x 이상에서 테스트했습니다. |
 
@@ -130,10 +135,106 @@ inhouse-agent jobs list -v                   # 예약작업 목록, 다음 실�
 inhouse-agent jobs run daily_notice          # 예약작업 즉시 1회 실행 (테스트용)
 inhouse-agent scheduler                      # 예약작업 데몬 (상시 실행)
 
-inhouse-agent serve --port 8080              # 웹 채팅 화면(/)과 REST API, 예약작업을 함께 실행
+inhouse-agent serve --port 8080              # 웹 UI(/)와 REST API, 예약작업을 함께 실행
+
+# 스킬
+inhouse-agent skills list
+inhouse-agent skills new my_skill -d "언제 쓰는 스킬인지"
+inhouse-agent skills validate monthly_sales_report -i month=2026-10   # 형식 검사와 치환된 지침 미리보기
+inhouse-agent skills run monthly_sales_report -i month=2026-10 -i dept=전체 -v
+inhouse-agent chat --skill monthly_sales_report -i month=2026-10       # 스킬 모드로 대화 ('실행' 입력)
+
+# 파일 (LLM 없이 바로 점검)
+inhouse-agent files list "*.xlsx" --recent 60
+inhouse-agent files status downloads/매출현황_2026-10.xlsx
+inhouse-agent files analyze downloads/매출현황_2026-10.xlsx
+inhouse-agent files query downloads/매출현황_2026-10.xlsx --group-by 부서 --agg sum:금액,count
+inhouse-agent files wait "*.xlsx" --timeout 60
 ```
 
+### 웹 UI (`serve` 실행 후 http://<서버>:8080/)
+
+| 탭 | 기능 |
+|---|---|
+| 조사 | 자유롭게 요청합니다. tool 호출, 인자, 결과, 소요 시간, 감지된 파일 상태가 실시간으로 표시됩니다. 에이전트가 질문하면 선택지 버튼이나 직접 입력으로 답합니다. 실행 중에 중단할 수 있습니다. |
+| 스킬 | 왼쪽에서 스킬을 고르고 가운데에서 SKILL.md를 편집합니다. 편집하는 동안 형식을 검사하고 **오른쪽 입력 폼을 즉시 다시 그립니다**. "저장하고 실행"으로 테스트하고, 결과를 본 뒤 "이어서 지시"로 같은 스킬 대화를 이어갑니다. 저장할 때마다 이전 버전을 보관하고 되돌릴 수 있습니다. 지난 테스트 결과도 볼 수 있습니다. |
+| 파일 | 다운로드/업로드/저장 폴더를 탐색합니다. 상태 점검과 분석은 LLM 없이 즉시 실행됩니다. 파일을 업로드하거나 "에이전트에게 요청"으로 조사 탭에 넘길 수 있습니다. |
+| 상태 | MCP 서버 연결 상태와 재연결, 예약작업 목록과 즉시 실행, 최근 실행 기록을 봅니다. |
+
 `python -m inhouse_agent ...`으로도 실행할 수 있습니다.
+
+## 4. 파일 다운로드, 상태 점검, 분석
+
+웹컨트롤 MCP가 파일을 받는 세 가지 방식을 모두 처리합니다.
+
+| 방식 | 에이전트 처리 |
+|---|---|
+| 브라우저가 다운로드 폴더에 저장 (비동기) | tool 호출 전후의 감시 폴더를 비교해 새 파일을 감지합니다. 아직 받는 중이면 LLM에 `wait_for_download`를 쓰라고 알려줍니다. |
+| tool 결과 텍스트에 저장 경로를 적음 | 경로를 찾아 상태를 점검합니다. |
+| tool 결과에 파일 내용을 blob/image로 담아 보냄 | `workspace/downloads/<서버>/`에 저장하고 상태를 점검합니다. |
+
+점검 결과는 tool 결과 뒤에 `[파일 감지 - 에이전트 자동 점검]`으로 붙어 LLM에 전달되고, 웹 UI에는 배지로 표시됩니다.
+
+| 상태 | 의미 |
+|---|---|
+| ✅ 정상 `complete` | 확장자와 실제 형식이 같고 무결성 검사를 통과했습니다. |
+| ⏳ 다운로드 중 `downloading` | `.crdownload`/`.part` 임시파일이 있거나, 크기가 변하는 중이거나, 같은 이름으로 다시 받는 중입니다. |
+| ⚠️ 의심 `suspicious` | 확장자와 내용이 다릅니다. 예: `.xlsx`인데 실제로는 HTML이고 '로그인' 문구가 있어 세션 만료 페이지로 보입니다. |
+| ❌ 손상 `corrupt` | ZIP 구조가 깨졌거나 PDF 끝(`%%EOF`)이 없습니다. 다운로드가 중간에 끊긴 경우입니다. |
+| ⚠️ 빈 파일 / ❌ 없음 / 잠김 / 시간 초과 | 이름 그대로입니다. |
+
+**권장 설정**: stdio MCP 서버에는 `AGENT_DOWNLOAD_DIR` 환경변수(= `workspace/downloads`)가 자동으로 전달됩니다.
+웹컨트롤 MCP의 브라우저 다운로드 경로를 이 값으로 맞추면 감지가 가장 정확합니다.
+예: Playwright `accept_downloads` 후 `download.save_as(os.environ["AGENT_DOWNLOAD_DIR"] + "/" + download.suggested_filename)`
+브라우저 기본 다운로드 폴더를 그대로 쓰면 `config.yaml`의 `files.watch_dirs`에 추가하세요.
+
+에이전트가 쓰는 내장 tool:
+
+| tool | 용도 |
+|---|---|
+| `file_status` | 파일 1개의 상태를 상세히 점검합니다. |
+| `wait_for_download` | 패턴에 맞는 파일이 완료될 때까지 기다립니다. |
+| `list_downloads` | 최근 파일 목록을 보여줍니다. |
+| `analyze_file` | 구조, 통계, 샘플 행, 문서 텍스트를 뽑습니다. |
+| `query_table` | 필터, 정렬, 그룹 집계를 정확하게 계산합니다. |
+| `read_file_text` | 긴 문서를 구간별로 이어서 읽습니다. |
+| `extract_zip` | ZIP을 풉니다 (한글 파일명 지원, zip slip 차단). |
+| `save_file` | 결과를 저장합니다. |
+| `ask_user` | 사용자에게 확인을 받습니다. |
+| `use_skill` / `read_skill_file` | 스킬 지침과 참고 파일을 불러옵니다. |
+
+파일 접근은 workspace, 감시 폴더, `extra_read_dirs`, outputs 안으로만 제한되고, 쓰기는 workspace 안에서만 됩니다.
+
+## 5. 스킬
+
+`skills/<이름>/SKILL.md`. 같은 폴더의 다른 파일(양식, 기준표)은 `read_skill_file`로 참조합니다.
+
+```markdown
+---
+name: monthly_sales_report
+description: ERP 월 매출 엑셀을 받아 부서별/제품별로 집계한다. "월 매출" 요청에 사용.   # 에이전트가 고르는 기준
+servers: [erp]                 # (선택) 이 스킬에서 쓸 MCP 서버
+inputs:                        # (선택) 웹 UI 입력 폼으로 표시
+  - name: month
+    label: 대상 월
+    type: string               # string | text | number | date | select | boolean | file
+    default: "{last_month}"    # 날짜 변수 사용 가능
+    required: true
+  - name: dept
+    type: select
+    options: [전체, 인사팀, IT운영팀]
+    default: 전체
+---
+# 절차
+1. download_sales_excel 로 {month} 엑셀을 받는다.
+2. [파일 감지] 결과를 보고, 다운로드 중이면 wait_for_download ...
+3. query_table 로 집계한다. 숫자는 추측하지 않는다.
+```
+
+- **자동 사용**: 조사 탭에서 요청이 스킬 설명과 맞으면 에이전트가 `use_skill`로 지침을 불러와 따릅니다.
+- **직접 실행/테스트**: 웹 UI의 스킬 탭, `inhouse-agent skills run`, `chat --skill`로 실행합니다. 결과는 `outputs/skill_<이름>/`에 저장됩니다.
+- **예약작업**: `schedules`에 `skill: monthly_sales_report`와 `inputs: {month: "{last_month}"}`를 적으면 됩니다. 예약작업은 사람이 없으므로 `ask_user`가 기본값으로 진행합니다.
+- 샘플 스킬 `monthly_sales_report`와 `notice_digest`가 데모 MCP 서버로 바로 동작합니다.
 
 ### REST API (`serve`)
 
@@ -141,7 +242,15 @@ inhouse-agent serve --port 8080              # 웹 채팅 화면(/)과 REST API,
 
 | 메서드 | 경로 | 설명 |
 |---|---|---|
-| POST | `/api/chat` | `{"prompt": "...", "session_id": null, "servers": null}`를 보내면 `{session_id, output, tools_used, ...}`를 돌려줍니다. 받은 session_id를 다시 보내면 대화가 이어집니다. |
+| POST | `/api/runs` | 실행을 시작합니다. `{"prompt", "session_id", "servers", "skill", "inputs", "new_session"}`를 보내면 `{id, session_id, ...}`를 돌려줍니다. |
+| GET | `/api/runs/{id}/events` | 실행 이벤트 스트림(SSE)입니다: start, llm_start, tool_start, tool_end(files 포함), ask, answer, done |
+| POST | `/api/runs/{id}/answer` | `ask_user` 질문에 답합니다: `{"answer": "..."}` |
+| POST | `/api/runs/{id}/cancel` | 실행을 중단합니다. |
+| POST | `/api/chat` | 동기 방식으로 실행 1건을 처리합니다 (기존 호환). |
+| GET/POST/PUT/DELETE | `/api/skills[/{name}]` | 스킬 목록, 조회, 생성, 저장(검증과 이전 버전 백업), 삭제 |
+| POST | `/api/skills/validate` | 저장하지 않고 SKILL.md 형식만 검사합니다. |
+| GET | `/api/files`, `/api/files/status`, `/api/files/analyze`, `/api/files/download` | 파일 목록, 상태, 분석, 내려받기 |
+| POST | `/api/files/upload?name=` | 파일을 업로드합니다 (요청 body가 파일 내용). |
 | DELETE | `/api/chat/{session_id}` | 대화 초기화 |
 | GET | `/api/servers` | MCP 서버 상태 |
 | POST | `/api/servers/{name}/reconnect` | MCP 서버 재연결 |
@@ -155,20 +264,26 @@ inhouse-agent serve --port 8080              # 웹 채팅 화면(/)과 REST API,
   웹컨트롤이 화면이 있는 브라우저를 쓰면 서비스(세션 0) 대신 **로그온한 사용자 세션**에서 실행해야 합니다.
 - **Linux**: systemd 유닛의 `ExecStart=/opt/inhouse_agent/.venv/bin/inhouse-agent serve`, `WorkingDirectory=/opt/inhouse_agent`
 
-## 4. 구조
+## 6. 구조
 
 ```
 src/inhouse_agent/
   config.py     설정 로딩 (${ENV} 치환, .env)
   llm.py        Azure OpenAI Chat Completions + function calling
-  mcp_hub.py    MCP 서버 연결, tool 변환, 호출 (재연결, 순차 실행, 제한 시간)
-  builtins.py   내장 tool: get_current_time, save_file, read_file, list_files (outputs/files 안으로 제한)
+  mcp_hub.py    MCP 서버 연결, tool 변환, 호출 (재연결, 순차 실행, 제한 시간, 다운로드 파일 자동 감지)
+  files.py      작업폴더(sandbox), 다운로드 감지, 파일 상태 점검, 다운로드 대기
+  analyzers.py  엑셀/CSV/HTML표/PDF/DOCX/PPTX/JSON/ZIP 분석, query_table
+  skills.py     SKILL.md 파싱, 입력값 처리, 저장소(버전 백업)
+  interaction.py ask_user 를 실행 중인 UI(웹/CLI)와 연결
+  builtins.py   내장 tool (파일, 분석, 스킬, ask_user, 저장)
   agent.py      LLM ↔ tool 루프, 시스템 프롬프트, 이력 관리
   runtime.py    조립, 예약작업 실행, 결과 저장, 웹훅
   scheduler.py  APScheduler cron 등록
-  server.py     FastAPI 웹 채팅과 REST API
+  server.py     FastAPI: 실행 관리(SSE 스트리밍, 질문/답변, 중단), 스킬/파일 API
+  web/index.html 웹 UI (조사 / 스킬 / 파일 / 상태) - 외부 CDN 없이 단일 파일
   cli.py        명령행
-examples/sample_mcp_server.py   데모 MCP 서버 (stdio, 또는 --http 8001)
+skills/                         스킬 (샘플: monthly_sales_report, notice_digest)
+examples/sample_mcp_server.py   데모 MCP 서버 (stdio, 또는 --http 8001). 백그라운드 다운로드, blob 첨부, 세션 만료 HTML 저장 시나리오 포함
 tests/                          통합 테스트 (실제 MCP 서버, 가짜 Azure 엔드포인트)
 ```
 
@@ -176,7 +291,7 @@ tests/                          통합 테스트 (실제 MCP 서버, 가짜 Azur
   현재 시각과 서버 목록, 서버 설명은 자동으로 붙습니다.
 - 결과를 디버깅할 때는 `outputs/<작업>/_trace/*.json`에서 LLM이 어떤 tool을 어떤 인자로 불렀는지 확인할 수 있습니다.
 
-## 5. 테스트
+## 7. 테스트
 
 ```bash
 pip install -e ".[server,dev]"
@@ -190,3 +305,7 @@ pytest -q
 - 반복 한도 초과 시 마무리 답변
 - 예약작업 실행과 결과 저장
 - Azure 요청 형식 (배포 이름 경로, api-version, api-key, 추가 헤더, max_completion_tokens)
+- 파일 상태 판정 (정상/빈 파일/의심 HTML/잘린 PDF/깨진 ZIP/다운로드 중/재다운로드 중), 다운로드 대기, 경로 sandbox
+- 분석 (cp949 CSV 제목행, HTML표 xls, docx, 다중 시트 xlsx, zip slip 차단)
+- 스킬 파싱/검증/버전 백업, 스킬 실행 중 ask_user 답변 반영과 다운로드 감지
+- 웹 API 흐름: 스킬 생성/저장 → 실행 → SSE 이벤트 → 질문 답변 → 후속 지시 → 파일 업로드/분석

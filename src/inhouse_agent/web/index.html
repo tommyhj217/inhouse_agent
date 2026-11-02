@@ -1,0 +1,595 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>사내 자료수집 에이전트</title>
+<style>
+:root{
+  --bg:#f5f6f8;--panel:#ffffff;--fg:#1c2230;--muted:#687083;--line:#e2e5eb;--accent:#2457d6;--accent-fg:#fff;
+  --ok:#14804a;--warn:#b26a00;--err:#c8322b;--soft:#eef2fb;--code:#f3f4f7;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#101318;--panel:#181c23;--fg:#e4e7ec;--muted:#98a0ae;--line:#2a303b;--accent:#6c9cff;--accent-fg:#0b0f17;
+  --ok:#4cc38a;--warn:#e3a343;--err:#ff6b62;--soft:#1e2635;--code:#11151b;}}
+:root[data-theme="dark"]{--bg:#101318;--panel:#181c23;--fg:#e4e7ec;--muted:#98a0ae;--line:#2a303b;--accent:#6c9cff;--accent-fg:#0b0f17;
+  --ok:#4cc38a;--warn:#e3a343;--err:#ff6b62;--soft:#1e2635;--code:#11151b;}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 system-ui,-apple-system,"Malgun Gothic","Apple SD Gothic Neo",sans-serif}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer;border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:6px 12px}
+button.primary{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}
+button.danger{color:var(--err)}
+button:disabled{opacity:.5;cursor:default}
+input,select,textarea{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:6px 8px;min-width:0}
+textarea{resize:vertical}
+header{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:5;flex-wrap:wrap}
+header h1{font-size:16px;margin:0 8px 0 0}
+nav{display:flex;gap:4px;flex-wrap:wrap}
+nav button{border:0;background:transparent;padding:6px 12px}
+nav button.active{background:var(--soft);color:var(--accent);font-weight:600}
+header .right{margin-left:auto;display:flex;gap:6px;align-items:center}
+main{padding:16px;max-width:1400px;margin:0 auto}
+.tab{display:none}.tab.active{display:block}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px}
+.muted{color:var(--muted)}.small{font-size:12px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.grow{flex:1}
+.badge{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;border:1px solid var(--line);white-space:nowrap}
+.b-ok{color:var(--ok);border-color:currentColor}.b-warn{color:var(--warn);border-color:currentColor}.b-err{color:var(--err);border-color:currentColor}.b-run{color:var(--accent);border-color:currentColor}
+pre,code{font-family:ui-monospace,Consolas,"D2Coding",monospace;font-size:12.5px}
+pre{background:var(--code);padding:8px 10px;border-radius:8px;overflow:auto;max-height:360px;white-space:pre-wrap;word-break:break-word;margin:6px 0}
+/* 대화 */
+.chat{display:flex;flex-direction:column;height:calc(100vh - 110px);min-height:420px}
+.log{flex:1;overflow:auto;display:flex;flex-direction:column;gap:10px;padding:4px 2px 12px}
+.msg-user{align-self:flex-end;background:var(--soft);border-radius:12px;padding:8px 12px;max-width:80%;white-space:pre-wrap}
+.answer{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 14px;overflow:auto}
+.answer table{border-collapse:collapse;margin:6px 0;font-size:13px}
+.answer th,.answer td{border:1px solid var(--line);padding:4px 8px;text-align:left;vertical-align:top}
+.answer h1,.answer h2,.answer h3{font-size:15px;margin:10px 0 4px}
+.answer p{margin:6px 0}
+.step{border-left:3px solid var(--line);padding:2px 0 2px 10px;margin-left:4px}
+.step.err{border-color:var(--err)}.step.run{border-color:var(--accent)}.step.ok{border-color:var(--ok)}
+.step summary{cursor:pointer;list-style:none;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.step summary::-webkit-details-marker{display:none}
+.filechip{display:inline-flex;gap:4px;align-items:center;font-size:12px;border:1px solid var(--line);border-radius:6px;padding:1px 6px;margin:2px 4px 0 0;cursor:pointer}
+.ask{border:2px solid var(--accent);border-radius:12px;padding:10px 12px;background:var(--soft)}
+.composer{display:flex;gap:8px;align-items:flex-end;padding-top:8px;border-top:1px solid var(--line)}
+.composer textarea{flex:1;min-height:52px;max-height:200px}
+/* 스킬 */
+.skills{display:grid;grid-template-columns:220px minmax(0,1.1fr) minmax(0,1fr);gap:12px;height:calc(100vh - 110px);min-height:520px}
+.skills>.card{display:flex;flex-direction:column;min-height:0}
+.skills>.card.runpane{overflow:auto;display:block}
+.runpane .log{overflow:visible}
+.list{overflow:auto;display:flex;flex-direction:column;gap:2px;margin-top:8px}
+.list .item{padding:6px 8px;border-radius:8px;cursor:pointer}
+.list .item:hover{background:var(--soft)}.list .item.active{background:var(--soft);color:var(--accent);font-weight:600}
+#sk-editor{flex:1;width:100%;font-family:ui-monospace,Consolas,"D2Coding",monospace;font-size:13px;line-height:1.5;tab-size:2;min-height:240px}
+.form{display:grid;gap:8px;margin:8px 0}
+.form label{display:grid;gap:2px}
+.form label span{font-size:12px;color:var(--muted)}
+.scroll{overflow:auto;min-height:0;flex:1}
+/* 파일 */
+.files{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px}
+table.grid{width:100%;border-collapse:collapse;font-size:13px}
+table.grid th,table.grid td{border-bottom:1px solid var(--line);padding:6px;text-align:left}
+table.grid tr.sel td{background:var(--soft)}
+table.grid tbody tr{cursor:pointer}
+.status-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}
+.hidden{display:none!important}
+@media (max-width:1000px){
+  .skills{grid-template-columns:1fr;height:auto}
+  .skills>.card{min-height:auto}
+  #sk-editor{min-height:320px}
+  .files{grid-template-columns:1fr}
+}
+@media (max-width:600px){main{padding:10px}.msg-user{max-width:95%}}
+</style>
+</head>
+<body>
+<header>
+  <h1>사내 자료수집 에이전트</h1>
+  <nav id="nav">
+    <button data-tab="chat" class="active">조사</button>
+    <button data-tab="skills">스킬</button>
+    <button data-tab="files">파일</button>
+    <button data-tab="status">상태</button>
+  </nav>
+  <div class="right">
+    <input id="token" type="password" placeholder="API 토큰" style="width:130px" title="AGENT_API_TOKEN 을 설정한 경우 입력">
+    <button id="theme" title="밝게/어둡게">◐</button>
+  </div>
+</header>
+
+<main>
+<!-- ===================== 조사 ===================== -->
+<section id="tab-chat" class="tab active">
+  <div class="chat">
+    <div class="row small muted" style="margin-bottom:6px">
+      <span id="chat-session">새 대화</span>
+      <span class="grow"></span>
+      <label class="row small">사용할 서버 <select id="chat-servers"><option value="">전체</option></select></label>
+      <button id="chat-new">새 대화</button>
+    </div>
+    <div id="chat-log" class="log">
+      <div class="muted small">예) "그룹웨어에서 어제 공지 엑셀을 내려받아 부서별 건수를 집계해줘"<br>
+      실행 중에는 tool 호출과 다운로드한 파일의 상태가 실시간으로 표시됩니다. 에이전트가 확인을 요청하면 여기서 답할 수 있습니다.</div>
+    </div>
+    <div class="composer">
+      <textarea id="chat-input" placeholder="요청을 입력하세요 (Enter 전송, Shift+Enter 줄바꿈)"></textarea>
+      <div style="display:grid;gap:6px">
+        <button id="chat-send" class="primary">전송</button>
+        <button id="chat-cancel" class="danger hidden">중단</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 스킬 ===================== -->
+<section id="tab-skills" class="tab">
+  <div class="skills">
+    <div class="card">
+      <div class="row"><b class="grow">스킬</b><button id="sk-new" title="새 스킬">＋ 새로 만들기</button></div>
+      <div id="sk-list" class="list"></div>
+      <div id="sk-errors" class="small" style="color:var(--err)"></div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <b id="sk-title" class="grow">스킬을 선택하세요</b>
+        <span id="sk-dirty" class="badge b-warn hidden">수정됨</span>
+        <select id="sk-history" title="이전 버전"><option value="">이전 버전…</option></select>
+        <button id="sk-save" class="primary" disabled>저장 (Ctrl+S)</button>
+        <button id="sk-delete" class="danger" disabled>삭제</button>
+      </div>
+      <div id="sk-validate" class="small muted" style="margin:6px 0">SKILL.md 를 수정하면 오른쪽 입력 폼이 바로 바뀝니다.</div>
+      <textarea id="sk-editor" spellcheck="false" disabled></textarea>
+    </div>
+
+    <div class="card runpane" id="sk-pane">
+      <div class="row"><b class="grow">테스트 실행</b><span id="sk-run-status"></span></div>
+      <div id="sk-desc" class="small muted"></div>
+      <div id="sk-form" class="form"></div>
+      <label class="form"><span class="small muted">추가 지시 (선택)</span>
+        <textarea id="sk-prompt" rows="2" placeholder="예) 이번에는 IT운영팀만 보여줘"></textarea></label>
+      <div class="row">
+        <button id="sk-run" class="primary" disabled>▶ 저장하고 실행</button>
+        <button id="sk-cancel" class="danger hidden">중단</button>
+        <span class="grow"></span>
+        <button id="sk-results-btn" disabled>지난 결과</button>
+      </div>
+      <div id="sk-log" class="log" style="margin-top:8px"></div>
+      <div id="sk-follow" class="composer hidden">
+        <textarea id="sk-follow-input" placeholder="결과를 보고 이어서 지시 (같은 스킬 대화 유지)"></textarea>
+        <button id="sk-follow-send">보내기</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 파일 ===================== -->
+<section id="tab-files" class="tab">
+  <div class="files">
+    <div class="card">
+      <div class="row">
+        <select id="f-where"><option value="all">전체</option><option value="downloads">다운로드</option><option value="uploads">업로드</option><option value="files">저장 결과</option></select>
+        <input id="f-pattern" placeholder="*.xlsx" style="width:110px">
+        <button id="f-refresh">새로고침</button>
+        <span class="grow"></span>
+        <label class="row"><input id="f-upload" type="file" class="hidden"><button id="f-upload-btn">업로드</button></label>
+      </div>
+      <div id="f-dirs" class="small muted" style="margin:6px 0"></div>
+      <div class="scroll" style="max-height:calc(100vh - 230px)">
+        <table class="grid"><thead><tr><th>파일</th><th>크기</th><th>수정</th></tr></thead><tbody id="f-body"></tbody></table>
+      </div>
+    </div>
+    <div class="card">
+      <div class="row"><b id="f-name" class="grow">파일을 선택하세요</b>
+        <button id="f-status-btn" disabled>상태 점검</button>
+        <button id="f-analyze-btn" disabled>분석</button>
+        <button id="f-ask-btn" disabled title="조사 탭에서 에이전트에게 분석 요청">에이전트에게 요청</button>
+        <a id="f-dl" class="hidden" target="_blank"><button>받기</button></a>
+      </div>
+      <div id="f-status" style="margin-top:8px"></div>
+      <div id="f-analysis" class="answer hidden" style="margin-top:8px"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 상태 ===================== -->
+<section id="tab-status" class="tab">
+  <div class="row" style="margin-bottom:10px"><button id="st-refresh">새로고침</button><span id="st-info" class="small muted"></span></div>
+  <h3>MCP 서버</h3>
+  <div id="st-servers" class="status-grid"></div>
+  <h3>예약작업</h3>
+  <div id="st-jobs" class="status-grid"></div>
+  <h3>최근 실행</h3>
+  <div id="st-runs" class="card"></div>
+</section>
+</main>
+
+<script>
+"use strict";
+// ---------------- 공통 ----------------
+const $ = (s, el=document) => el.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const store = {
+  get(k, d){ try { const v = localStorage.getItem(k); return v === null ? d : v; } catch { return d; } },
+  set(k, v){ try { localStorage.setItem(k, v); } catch {} },
+};
+const tokenEl = $("#token");
+tokenEl.value = store.get("agent_token", "");
+tokenEl.onchange = () => store.set("agent_token", tokenEl.value);
+const theme = store.get("agent_theme", "");
+if (theme) document.documentElement.dataset.theme = theme;
+$("#theme").onclick = () => {
+  const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+  const cur = document.documentElement.dataset.theme || (dark ? "dark" : "light");
+  const next = cur === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next; store.set("agent_theme", next);
+};
+
+async function api(path, opts={}) {
+  const headers = Object.assign({}, opts.headers || {});
+  if (tokenEl.value) headers["Authorization"] = "Bearer " + tokenEl.value;
+  if (opts.json !== undefined) { headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(opts.json); }
+  const r = await fetch(path, {method: opts.method || (opts.body ? "POST" : "GET"), headers, body: opts.body});
+  const ct = r.headers.get("content-type") || "";
+  const data = ct.includes("json") ? await r.json() : await r.text();
+  if (!r.ok) throw new Error((data && data.detail) || r.status);
+  return data;
+}
+const withToken = url => tokenEl.value ? url + (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(tokenEl.value) : url;
+
+// 아주 단순한 마크다운 렌더러 (표/제목/목록/굵게/코드)
+function md(src) {
+  const lines = String(src || "").replace(/\r/g, "").split("\n");
+  let out = [], i = 0;
+  const inline = s => esc(s).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+  while (i < lines.length) {
+    const l = lines[i];
+    if (l.startsWith("```")) { const buf = []; i++; while (i < lines.length && !lines[i].startsWith("```")) buf.push(lines[i++]); i++; out.push("<pre>" + esc(buf.join("\n")) + "</pre>"); continue; }
+    if (/^\s*\|.*\|\s*$/.test(l)) {
+      const rows = []; while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) rows.push(lines[i++]);
+      const cells = r => r.trim().replace(/^\||\|$/g, "").split("|").map(c => c.trim());
+      let html = "<table>"; let hdr = true;
+      rows.forEach((r, k) => {
+        if (/^\s*\|?\s*:?-{2,}/.test(r)) return;
+        const tag = hdr && k === 0 && rows[1] && /-{2,}/.test(rows[1]) ? "th" : "td";
+        html += "<tr>" + cells(r).map(c => `<${tag}>${inline(c)}</${tag}>`).join("") + "</tr>"; hdr = false;
+      });
+      out.push(html + "</table>"); continue;
+    }
+    const h = l.match(/^(#{1,4})\s+(.*)/); if (h) { out.push(`<h3>${inline(h[2])}</h3>`); i++; continue; }
+    if (/^\s*([-*]|\d+\.)\s+/.test(l)) { const items = []; while (i < lines.length && /^\s*([-*]|\d+\.)\s+/.test(lines[i])) items.push(lines[i++].replace(/^\s*([-*]|\d+\.)\s+/, "")); out.push("<ul>" + items.map(t => "<li>" + inline(t) + "</li>").join("") + "</ul>"); continue; }
+    if (!l.trim()) { i++; continue; }
+    const para = []; while (i < lines.length && lines[i].trim() && !/^(```|#|\s*\||\s*([-*]|\d+\.)\s)/.test(lines[i])) para.push(lines[i++]);
+    if (!para.length) para.push(lines[i++]);
+    out.push("<p>" + para.map(inline).join("<br>") + "</p>");
+  }
+  return out.join("");
+}
+
+const STATE = {complete:["정상","b-ok"],downloading:["다운로드 중","b-run"],suspicious:["의심","b-warn"],corrupt:["손상","b-err"],
+  empty:["빈 파일","b-warn"],missing:["없음","b-err"],timeout:["시간 초과","b-err"],too_large:["너무 큼","b-warn"],locked:["잠김","b-warn"],directory:["폴더","b-ok"]};
+const stateBadge = s => { const [t, c] = STATE[s] || [s || "?", ""]; return `<span class="badge ${c}">${esc(t)}</span>`; };
+
+// 탭
+document.querySelectorAll("#nav button").forEach(b => b.onclick = () => showTab(b.dataset.tab));
+function showTab(name) {
+  document.querySelectorAll("#nav button").forEach(x => x.classList.toggle("active", x.dataset.tab === name));
+  document.querySelectorAll(".tab").forEach(x => x.classList.toggle("active", x.id === "tab-" + name));
+  store.set("agent_tab", name);
+  if (name === "skills") loadSkills();
+  if (name === "files") loadFiles();
+  if (name === "status") loadStatus();
+}
+
+// ---------------- 실행 뷰 (조사/스킬 공용) ----------------
+class RunView {
+  constructor(logEl, {onDone, onStart} = {}) { this.log = logEl; this.onDone = onDone; this.onStart = onStart; this.es = null; this.runId = null; this.steps = {}; }
+  async start(body) {
+    const run = await api("/api/runs", {json: body});
+    this.attach(run);
+    return run;
+  }
+  attach(run) {
+    this.runId = run.id; this.steps = {};
+    this.box = document.createElement("div"); this.box.style.display = "grid"; this.box.style.gap = "6px";
+    this.log.appendChild(this.box);
+    this.status = this.add(`<span class="badge b-run">실행 중…</span>`);
+    this.onStart && this.onStart(run);
+    this.es = new EventSource(withToken(`/api/runs/${run.id}/events`));
+    const on = (t, fn) => this.es.addEventListener(t, e => { fn(JSON.parse(e.data)); this.scroll(); });
+    on("llm_start", d => { this.status.innerHTML = `<span class="badge b-run">생각 중… (${d.iteration}단계)</span>`; });
+    on("thought", d => this.add(`<div class="small muted">💭 ${esc(d.content)}</div>`));
+    on("tool_start", d => this.toolStart(d));
+    on("tool_end", d => this.toolEnd(d));
+    on("ask", d => this.askBox(d));
+    on("answer", d => { this.status.innerHTML = `<span class="badge b-run">실행 중…</span>`; if (d.timeout) this.add(`<div class="small muted">답변 시간 초과 - 기본값 사용</div>`); });
+    on("error", d => this.add(`<div class="b-err small">${esc(d.error)}</div>`));
+    on("done", d => this.done(d));
+    this.es.onerror = () => { if (this.es && this.es.readyState === 2) this.es = null; };
+  }
+  add(html) { const d = document.createElement("div"); d.innerHTML = html; this.box.appendChild(d); this.scroll(); return d; }
+  scroll() { const el = this.log.closest(".runpane") || this.log; el.scrollTop = el.scrollHeight; }
+  fileChips(files) {
+    return (files || []).map(f => `<span class="filechip" data-path="${esc(f.path)}" title="${esc((f.issues || []).join("\n"))}">📄 ${esc(f.name || f.path)} ${stateBadge(f.state)}</span>`).join("");
+  }
+  toolStart(d) {
+    const el = document.createElement("details"); el.className = "step run";
+    const label = d.server === "builtin" ? d.tool : `${d.server} · ${d.tool}`;
+    el.innerHTML = `<summary><span>🔧 <b>${esc(label)}</b></span><span class="small muted">${esc(JSON.stringify(d.arguments).slice(0, 140))}</span><span class="st badge b-run">실행 중</span></summary><div class="body small"><b>인자</b><pre>${esc(JSON.stringify(d.arguments, null, 2))}</pre></div>`;
+    this.box.appendChild(el); this.steps[d.id] = el;
+  }
+  toolEnd(d) {
+    let el = this.steps[d.id]; if (!el) { this.toolStart(d); el = this.steps[d.id]; }
+    el.className = "step " + (d.is_error ? "err" : "ok");
+    el.querySelector(".st").outerHTML = d.is_error ? `<span class="badge b-err">오류 ${d.elapsed}s</span>` : `<span class="badge b-ok">완료 ${d.elapsed}s</span>`;
+    if (d.files && d.files.length) { const fc = document.createElement("div"); fc.innerHTML = this.fileChips(d.files); el.appendChild(fc); if (d.files.some(f => f.state !== "complete")) el.open = true; }
+    el.querySelector(".body").insertAdjacentHTML("beforeend", `<b>결과</b><pre>${esc(d.result)}</pre>`);
+    if (d.is_error) el.open = true;
+  }
+  askBox(d) {
+    this.status.innerHTML = `<span class="badge b-warn">답변 대기</span>`;
+    const box = this.add(`<div class="ask"><b>🙋 에이전트의 질문</b><div style="margin:6px 0;white-space:pre-wrap">${esc(d.question)}</div>
+      <div class="row opts">${(d.options || []).map(o => `<button class="opt">${esc(o)}</button>`).join("")}</div>
+      <div class="row" style="margin-top:6px"><input class="grow ans" placeholder="직접 입력${d.default ? " (기본값: " + esc(d.default) + ")" : ""}"><button class="primary send">답변</button></div></div>`);
+    const send = async v => {
+      box.querySelectorAll("button,input").forEach(x => x.disabled = true);
+      try { await api(`/api/runs/${this.runId}/answer`, {json: {answer: v}}); box.insertAdjacentHTML("beforeend", `<div class="small">↳ ${esc(v || "(빈 답변)")}</div>`); }
+      catch (e) { alert(e.message); box.querySelectorAll("button,input").forEach(x => x.disabled = false); }
+    };
+    box.querySelectorAll(".opt").forEach(b => b.onclick = () => send(b.textContent));
+    const inp = box.querySelector(".ans"); inp.focus();
+    inp.onkeydown = e => { if (e.key === "Enter") send(inp.value); };
+    box.querySelector(".send").onclick = () => send(inp.value || d.default || "");
+  }
+  done(d) {
+    if (this.es) { this.es.close(); this.es = null; }
+    const ok = d.status === "completed";
+    this.status.innerHTML = `<span class="badge ${ok ? "b-ok" : (d.status === "cancelled" ? "b-warn" : "b-err")}">${ok ? "완료" : esc(d.status)}${d.elapsed ? " · " + d.elapsed + "s" : ""}</span>`
+      + (d.usage && d.usage.total_tokens ? ` <span class="small muted">토큰 ${d.usage.total_tokens.toLocaleString()}</span>` : "")
+      + (d.saved_to ? ` <span class="small muted">저장: ${esc(d.saved_to)}</span>` : "");
+    const ans = this.add(`<div class="answer">${md(d.output)}</div>`);
+    if (d.files && d.files.length) ans.insertAdjacentHTML("beforeend", `<div class="small muted" style="margin-top:6px">사용한 파일: ${this.fileChips(d.files)}</div>`);
+    this.onDone && this.onDone(d);
+  }
+  async cancel() { if (this.runId) await api(`/api/runs/${this.runId}/cancel`, {method: "POST"}); }
+}
+document.addEventListener("click", e => {
+  const chip = e.target.closest(".filechip"); if (!chip) return;
+  showTab("files"); selectFile(chip.dataset.path, true);
+});
+
+// ---------------- 조사 ----------------
+let chatSession = null, chatRun = null;
+const chatLog = $("#chat-log"), chatInput = $("#chat-input");
+async function loadServerOptions() {
+  try {
+    const servers = await api("/api/servers");
+    $("#chat-servers").innerHTML = `<option value="">전체</option>` + servers.map(s => `<option value="${esc(s.name)}">${esc(s.name)}${s.connected ? "" : " (끊김)"}</option>`).join("");
+  } catch {}
+}
+async function sendChat(text) {
+  text = (text ?? chatInput.value).trim(); if (!text || chatRun) return;
+  chatInput.value = "";
+  chatLog.insertAdjacentHTML("beforeend", `<div class="msg-user">${esc(text)}</div>`);
+  const srv = $("#chat-servers").value;
+  const servers = srv ? [srv] : [];
+  $("#chat-send").disabled = true; $("#chat-cancel").classList.remove("hidden");
+  const view = new RunView(chatLog, {onDone: () => { chatRun = null; $("#chat-send").disabled = false; $("#chat-cancel").classList.add("hidden"); }});
+  chatRun = view;
+  try {
+    const run = await view.start({prompt: text, session_id: chatSession, servers: servers.length ? servers : null});
+    chatSession = run.session_id; $("#chat-session").textContent = "대화 " + chatSession.slice(0, 8);
+  } catch (e) { chatLog.insertAdjacentHTML("beforeend", `<div class="b-err">오류: ${esc(e.message)}</div>`); chatRun = null; $("#chat-send").disabled = false; $("#chat-cancel").classList.add("hidden"); }
+}
+$("#chat-send").onclick = () => sendChat();
+$("#chat-cancel").onclick = () => chatRun && chatRun.cancel();
+chatInput.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendChat(); } });
+$("#chat-new").onclick = () => { chatSession = null; chatLog.innerHTML = ""; $("#chat-session").textContent = "새 대화"; };
+
+// ---------------- 스킬 ----------------
+let skCurrent = null, skSaved = "", skParsed = null, skSession = null, skRun = null, skFiles = [];
+const editor = $("#sk-editor");
+async function loadSkills(select) {
+  try {
+    const {skills, errors} = await api("/api/skills");
+    $("#sk-list").innerHTML = skills.map(s => `<div class="item ${s.name === skCurrent ? "active" : ""}" data-name="${esc(s.name)}"><div>${esc(s.name)}</div><div class="small muted">${esc(s.description.slice(0, 70))}</div></div>`).join("")
+      + Object.keys(errors).map(n => `<div class="item" data-name="${esc(n)}"><div>${esc(n)} <span class="badge b-err">오류</span></div></div>`).join("")
+      || `<div class="small muted">스킬이 없습니다. ＋ 새로 만들기</div>`;
+    $("#sk-errors").textContent = Object.entries(errors).map(([n, e]) => `${n}: ${e}`).join("\n");
+    document.querySelectorAll("#sk-list .item").forEach(el => el.onclick = () => openSkill(el.dataset.name));
+    const target = select || skCurrent || store.get("agent_skill", "");
+    if (target && !skCurrent) openSkill(target);
+  } catch (e) { $("#sk-list").innerHTML = `<div class="b-err small">${esc(e.message)}</div>`; }
+}
+async function openSkill(name) {
+  if (skCurrent && editor.value !== skSaved && !confirm("저장하지 않은 수정 내용이 있습니다. 버리고 이동할까요?")) return;
+  let d; try { d = await api(`/api/skills/${encodeURIComponent(name)}`); } catch (e) { return; }
+  skCurrent = name; store.set("agent_skill", name); skSession = null;
+  editor.disabled = false; editor.value = d.content; skSaved = d.content;
+  $("#sk-title").textContent = name;
+  ["#sk-save", "#sk-delete", "#sk-run", "#sk-results-btn"].forEach(s => $(s).disabled = false);
+  $("#sk-history").innerHTML = `<option value="">이전 버전 (${d.history.length})</option>` + d.history.map(h => `<option>${esc(h)}</option>`).join("");
+  $("#sk-log").innerHTML = ""; $("#sk-follow").classList.add("hidden");
+  document.querySelectorAll("#sk-list .item").forEach(el => el.classList.toggle("active", el.dataset.name === name));
+  applyParsed(d.parsed, d.error);
+  markDirty();
+}
+function markDirty() { $("#sk-dirty").classList.toggle("hidden", editor.value === skSaved); }
+let vTimer = null;
+editor.addEventListener("input", () => { markDirty(); clearTimeout(vTimer); vTimer = setTimeout(validate, 350); });
+editor.addEventListener("keydown", e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); saveSkill(); }
+  if (e.key === "Tab") { e.preventDefault(); const s = editor.selectionStart; editor.setRangeText("  ", s, editor.selectionEnd, "end"); markDirty(); }
+});
+async function validate() {
+  const r = await api("/api/skills/validate", {json: {content: editor.value}}).catch(e => ({ok: false, error: e.message}));
+  applyParsed(r.ok ? r.parsed : null, r.ok ? null : r.error);
+}
+function applyParsed(parsed, error) {
+  const v = $("#sk-validate");
+  if (error) { v.innerHTML = `<span class="b-err">⚠ ${esc(error)}</span>`; $("#sk-run").disabled = true; return; }
+  v.innerHTML = `<span class="b-ok">✓ 형식 정상</span> · 입력 ${parsed.inputs.length}개` + (parsed.servers ? ` · 서버 ${esc(parsed.servers.join(", "))}` : "");
+  $("#sk-run").disabled = !skCurrent;
+  // 입력값 보존하면서 폼 다시 그리기
+  const prev = collectInputs();
+  skParsed = parsed;
+  $("#sk-desc").textContent = parsed.description;
+  $("#sk-form").innerHTML = parsed.inputs.map(inp => {
+    const val = prev[inp.name] ?? inp.default ?? "";
+    const id = "in-" + inp.name, lbl = `<span>${esc(inp.label)}${inp.required ? " *" : ""}${inp.description ? " — " + esc(inp.description) : ""}</span>`;
+    let ctl;
+    if (inp.type === "select") ctl = `<select id="${id}">${inp.options.map(o => `<option ${String(o) === String(val) ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>`;
+    else if (inp.type === "text") ctl = `<textarea id="${id}" rows="3">${esc(val)}</textarea>`;
+    else if (inp.type === "boolean") ctl = `<select id="${id}"><option value="true" ${val === true || val === "true" ? "selected" : ""}>예</option><option value="false" ${!(val === true || val === "true") ? "selected" : ""}>아니오</option></select>`;
+    else if (inp.type === "file") ctl = `<input id="${id}" list="sk-file-list" value="${esc(val)}" placeholder="파일 경로 (목록에서 선택 가능)">`;
+    else ctl = `<input id="${id}" value="${esc(val)}" ${inp.type === "number" ? 'inputmode="decimal"' : ""} placeholder="${inp.type === "date" ? "YYYY-MM-DD 또는 {yesterday}" : ""}">`;
+    return `<label data-name="${esc(inp.name)}">${lbl}${ctl}</label>`;
+  }).join("") + `<datalist id="sk-file-list">${skFiles.map(f => `<option value="${esc(f.display)}">`).join("")}</datalist>`;
+  if (parsed.inputs.some(i => i.type === "file") && !skFiles.length) api("/api/files").then(fs => { skFiles = fs; $("#sk-file-list").innerHTML = fs.map(f => `<option value="${esc(f.display)}">`).join(""); }).catch(() => {});
+}
+function collectInputs() {
+  const out = {};
+  document.querySelectorAll("#sk-form label[data-name]").forEach(l => { const c = l.querySelector("input,select,textarea"); out[l.dataset.name] = c.value; });
+  return out;
+}
+async function saveSkill() {
+  if (!skCurrent) return false;
+  try {
+    const r = await api(`/api/skills/${encodeURIComponent(skCurrent)}`, {method: "PUT", json: {content: editor.value}});
+    skSaved = editor.value; markDirty(); applyParsed(r.parsed, null);
+    const d = await api(`/api/skills/${encodeURIComponent(skCurrent)}`);
+    $("#sk-history").innerHTML = `<option value="">이전 버전 (${d.history.length})</option>` + d.history.map(h => `<option>${esc(h)}</option>`).join("");
+    loadSkills(); return true;
+  } catch (e) { $("#sk-validate").innerHTML = `<span class="b-err">저장 실패: ${esc(e.message)}</span>`; return false; }
+}
+$("#sk-save").onclick = saveSkill;
+$("#sk-history").onchange = async e => {
+  const f = e.target.value; if (!f) return;
+  const d = await api(`/api/skills/${encodeURIComponent(skCurrent)}/history/${encodeURIComponent(f)}`);
+  if (confirm(`${f} 내용을 편집기에 불러올까요? (저장해야 반영됩니다)`)) { editor.value = d.content; markDirty(); validate(); }
+  e.target.value = "";
+};
+$("#sk-new").onclick = async () => {
+  const name = prompt("새 스킬 이름 (영문/숫자/_/-)", "my_skill"); if (!name) return;
+  const desc = prompt("이 스킬은 언제 쓰나요? (설명)", "") || "";
+  try { await api("/api/skills", {json: {name, description: desc}}); skCurrent = null; skSaved = editor.value; await loadSkills(name); }
+  catch (e) { alert(e.message); }
+};
+$("#sk-delete").onclick = async () => {
+  if (!skCurrent || !confirm(`'${skCurrent}' 스킬을 삭제할까요? (skills/_trash 로 이동)`)) return;
+  await api(`/api/skills/${encodeURIComponent(skCurrent)}`, {method: "DELETE"});
+  skCurrent = null; skSaved = ""; editor.value = ""; editor.disabled = true; $("#sk-title").textContent = "스킬을 선택하세요"; $("#sk-form").innerHTML = ""; loadSkills();
+};
+function skBusy(b) {
+  $("#sk-run").disabled = b; $("#sk-follow-send").disabled = b;
+  $("#sk-cancel").classList.toggle("hidden", !b);
+  $("#sk-run-status").innerHTML = b ? `<span class="badge b-run">실행 중</span>` : "";
+}
+$("#sk-run").onclick = async () => {
+  if (editor.value !== skSaved && !(await saveSkill())) return;
+  $("#sk-log").innerHTML = "";
+  const inputs = collectInputs();
+  $("#sk-log").insertAdjacentHTML("beforeend", `<div class="msg-user small">▶ ${esc(skCurrent)} ${esc(JSON.stringify(inputs))}${$("#sk-prompt").value ? "<br>" + esc($("#sk-prompt").value) : ""}</div>`);
+  skBusy(true);
+  skRun = new RunView($("#sk-log"), {onDone: () => { skBusy(false); skRun = null; $("#sk-follow").classList.remove("hidden"); }});
+  try { const run = await skRun.start({skill: skCurrent, inputs, prompt: $("#sk-prompt").value, new_session: true}); skSession = run.session_id; }
+  catch (e) { $("#sk-log").insertAdjacentHTML("beforeend", `<div class="b-err">${esc(e.message)}</div>`); skBusy(false); skRun = null; }
+};
+$("#sk-cancel").onclick = () => skRun && skRun.cancel();
+$("#sk-follow-send").onclick = async () => {
+  const t = $("#sk-follow-input").value.trim(); if (!t || !skSession || skRun) return;
+  $("#sk-follow-input").value = "";
+  $("#sk-log").insertAdjacentHTML("beforeend", `<div class="msg-user">${esc(t)}</div>`);
+  skBusy(true);
+  skRun = new RunView($("#sk-log"), {onDone: () => { skBusy(false); skRun = null; }});
+  try { await skRun.start({prompt: t, session_id: skSession}); } catch (e) { skBusy(false); skRun = null; alert(e.message); }
+};
+$("#sk-follow-input").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#sk-follow-send").click(); } });
+$("#sk-results-btn").onclick = async () => {
+  const rs = await api(`/api/skills/${encodeURIComponent(skCurrent)}/results`);
+  $("#sk-log").innerHTML = rs.length ? rs.map(r => `<details class="step ok"><summary><b>${esc(r.file)}</b><span class="small muted">${(r.size / 1024).toFixed(1)}KB</span></summary><div class="answer">${md(r.preview)}</div></details>`).join("") : `<div class="small muted">저장된 테스트 결과가 없습니다.</div>`;
+};
+
+// ---------------- 파일 ----------------
+let fSel = null;
+async function loadFiles() {
+  try {
+    const info = await api("/api/info");
+    $("#f-dirs").textContent = "감시 폴더: " + info.watch_dirs.join(", ");
+  } catch {}
+  const q = new URLSearchParams({where: $("#f-where").value, pattern: $("#f-pattern").value || "*"});
+  try {
+    const fs = await api("/api/files?" + q); skFiles = fs;
+    $("#f-body").innerHTML = fs.map(f => `<tr data-path="${esc(f.path)}" class="${f.path === fSel ? "sel" : ""}"><td>${esc(f.display)}</td><td>${(f.size / 1024).toFixed(1)}KB</td><td class="small">${new Date(f.modified * 1000).toLocaleString()}</td></tr>`).join("")
+      || `<tr><td colspan="3" class="muted">파일이 없습니다</td></tr>`;
+    document.querySelectorAll("#f-body tr[data-path]").forEach(tr => tr.onclick = () => selectFile(tr.dataset.path));
+  } catch (e) { $("#f-body").innerHTML = `<tr><td colspan="3" class="b-err">${esc(e.message)}</td></tr>`; }
+}
+async function selectFile(path, analyze=false) {
+  fSel = path;
+  document.querySelectorAll("#f-body tr").forEach(tr => tr.classList.toggle("sel", tr.dataset.path === path));
+  $("#f-name").textContent = path.split(/[\\/]/).pop();
+  ["#f-status-btn", "#f-analyze-btn", "#f-ask-btn"].forEach(s => $(s).disabled = false);
+  const dl = $("#f-dl"); dl.href = withToken("/api/files/download?path=" + encodeURIComponent(path)); dl.classList.remove("hidden");
+  $("#f-analysis").classList.add("hidden");
+  await showStatus();
+  if (analyze) analyzeFile();
+}
+async function showStatus() {
+  $("#f-status").innerHTML = `<span class="small muted">점검 중…</span>`;
+  try {
+    const s = await api("/api/files/status?path=" + encodeURIComponent(fSel));
+    $("#f-status").innerHTML = `<div class="row">${stateBadge(s.state)} <span>${esc(s.size_h || "")}</span> <span class="small muted">형식=${esc(s.detected_type || "-")} · 확장자=${esc(s.extension || "-")} · 수정 ${esc(s.modified || "")}</span></div>`
+      + ((s.issues || []).length ? `<ul class="small">${s.issues.map(i => `<li>${esc(i)}</li>`).join("")}</ul>` : "")
+      + (s.sha256 ? `<div class="small muted">sha256 ${esc(s.sha256.slice(0, 16))}…</div>` : "");
+  } catch (e) { $("#f-status").innerHTML = `<span class="b-err">${esc(e.message)}</span>`; }
+}
+async function analyzeFile() {
+  const box = $("#f-analysis"); box.classList.remove("hidden"); box.innerHTML = `<span class="small muted">분석 중…</span>`;
+  try { const r = await api("/api/files/analyze?path=" + encodeURIComponent(fSel)); box.innerHTML = (r.is_error ? `<div class="b-err">${esc(r.text)}</div>` : md(r.text)); }
+  catch (e) { box.innerHTML = `<span class="b-err">${esc(e.message)}</span>`; }
+}
+$("#f-refresh").onclick = loadFiles; $("#f-where").onchange = loadFiles; $("#f-pattern").onchange = loadFiles;
+$("#f-status-btn").onclick = showStatus; $("#f-analyze-btn").onclick = analyzeFile;
+$("#f-ask-btn").onclick = () => { showTab("chat"); chatInput.value = `다음 파일을 분석해서 핵심 내용과 이상한 점을 정리해줘: ${fSel}`; chatInput.focus(); };
+$("#f-upload-btn").onclick = () => $("#f-upload").click();
+$("#f-upload").onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  try { const r = await api("/api/files/upload?name=" + encodeURIComponent(f.name), {method: "POST", body: f}); await loadFiles(); selectFile(r.path, true); }
+  catch (err) { alert("업로드 실패: " + err.message); }
+  e.target.value = "";
+};
+
+// ---------------- 상태 ----------------
+async function loadStatus() {
+  try {
+    const [info, servers, jobs, runs] = await Promise.all([api("/api/info"), api("/api/servers"), api("/api/jobs"), api("/api/runs")]);
+    $("#st-info").textContent = `배포: ${info.deployment} · 작업폴더: ${info.workspace} · 스킬폴더: ${info.skills_dir}`;
+    $("#st-servers").innerHTML = servers.map(s => `<div class="card"><div class="row"><b class="grow">${esc(s.name)}</b>${s.connected ? '<span class="badge b-ok">연결됨</span>' : '<span class="badge b-err">끊김</span>'}<button data-re="${esc(s.name)}">재연결</button></div>
+      <div class="small muted">${esc(s.transport)} · ${esc(s.description)}</div>${s.error ? `<div class="small b-err">${esc(s.error)}</div>` : ""}
+      <div class="small" style="margin-top:4px">${s.tools.map(t => `<code>${esc(t)}</code>`).join(" ")}</div></div>`).join("") || `<div class="muted">설정된 서버 없음</div>`;
+    document.querySelectorAll("[data-re]").forEach(b => b.onclick = async () => { b.disabled = true; try { await api(`/api/servers/${encodeURIComponent(b.dataset.re)}/reconnect`, {method: "POST"}); } catch (e) { alert(e.message); } loadStatus(); });
+    $("#st-jobs").innerHTML = jobs.map(j => `<div class="card"><div class="row"><b class="grow">${esc(j.name)}</b>${j.enabled ? '<span class="badge b-ok">사용</span>' : '<span class="badge">중지</span>'}<button data-job="${esc(j.name)}">지금 실행</button></div>
+      <div class="small muted">cron ${esc(j.cron)}${j.skill ? " · 스킬 " + esc(j.skill) : ""} · 다음 ${esc(j.next_run || "-")}</div><div class="small">${esc(j.description || "")}</div><div class="out small"></div></div>`).join("") || `<div class="muted">예약작업 없음</div>`;
+    document.querySelectorAll("[data-job]").forEach(b => b.onclick = async () => {
+      b.disabled = true; const out = b.closest(".card").querySelector(".out"); out.textContent = "실행 중…";
+      try { const r = await api(`/api/jobs/${encodeURIComponent(b.dataset.job)}/run`, {method: "POST"}); out.innerHTML = `${stateBadge(r.status === "completed" ? "complete" : "corrupt")} 저장: ${esc(r.saved_to)}`; }
+      catch (e) { out.textContent = e.message; } b.disabled = false;
+    });
+    $("#st-runs").innerHTML = runs.length ? `<table class="grid"><thead><tr><th>시각</th><th>종류</th><th>내용</th><th>상태</th></tr></thead><tbody>${runs.slice(0, 30).map(r => `<tr><td class="small">${new Date(r.created * 1000).toLocaleString()}</td><td>${r.kind === "skill" ? "스킬" : "조사"}</td><td>${esc(r.title)}</td><td>${esc(r.status)}</td></tr>`).join("")}</tbody></table>` : `<span class="muted small">아직 실행 기록이 없습니다</span>`;
+  } catch (e) { $("#st-info").textContent = "오류: " + e.message; }
+}
+$("#st-refresh").onclick = loadStatus;
+
+// 시작
+loadServerOptions();
+showTab(store.get("agent_tab", "chat"));
+window.addEventListener("beforeunload", e => { if (skCurrent && editor.value !== skSaved) { e.preventDefault(); e.returnValue = ""; } });
+</script>
+</body>
+</html>

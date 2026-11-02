@@ -207,19 +207,21 @@ class ScheduleConfig:
     output_format: str = "md"  # md | txt | json
     webhook_url: str | None = None
     description: str = ""
+    skill: str | None = None
+    inputs: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "ScheduleConfig":
         if not d.get("name"):
             raise ConfigError("schedules 항목에 name 이 없습니다.")
-        if not d.get("prompt"):
-            raise ConfigError(f"schedules.{d['name']}: prompt 가 없습니다.")
+        if not d.get("prompt") and not d.get("skill"):
+            raise ConfigError(f"schedules.{d['name']}: prompt 또는 skill 이 필요합니다.")
         if not d.get("cron"):
             raise ConfigError(f"schedules.{d['name']}: cron 이 없습니다.")
         servers = d.get("servers")
         return cls(
             name=str(d["name"]),
-            prompt=str(d["prompt"]),
+            prompt=str(d.get("prompt") or ""),
             cron=str(d["cron"]),
             timezone=_none_if_blank(d.get("timezone")),
             servers=[str(s) for s in servers] if servers else None,
@@ -227,6 +229,35 @@ class ScheduleConfig:
             output_format=str(d.get("output_format") or "md").lower(),
             webhook_url=_none_if_blank(d.get("webhook_url")),
             description=str(d.get("description") or ""),
+            skill=_none_if_blank(d.get("skill")),
+            inputs=dict(d.get("inputs") or {}),
+        )
+
+
+@dataclass
+class FilesConfig:
+    workspace: str = "workspace"
+    """다운로드/업로드/저장 파일 작업 폴더 (하위: downloads, uploads, files)."""
+    watch_dirs: list[str] = field(default_factory=list)
+    """MCP(브라우저)가 파일을 내려받는 폴더. workspace/downloads 는 항상 포함."""
+    extra_read_dirs: list[str] = field(default_factory=list)
+    """읽기(분석)만 허용할 추가 폴더."""
+    max_file_mb: int = 200
+    inject_env: bool = True
+    """stdio MCP 서버에 AGENT_DOWNLOAD_DIR / AGENT_WORKSPACE 환경변수를 넘겨줄지."""
+    auto_detect: bool = True
+    """MCP tool 호출 전후로 다운로드 폴더를 비교해 새 파일을 자동 감지·점검할지."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "FilesConfig":
+        d = d or {}
+        return cls(
+            workspace=str(d.get("workspace") or "workspace"),
+            watch_dirs=[str(x) for x in d.get("watch_dirs") or [] if _none_if_blank(x)],
+            extra_read_dirs=[str(x) for x in d.get("extra_read_dirs") or [] if _none_if_blank(x)],
+            max_file_mb=_to_int(d.get("max_file_mb"), 200) or 200,
+            inject_env=_to_bool(d.get("inject_env"), True),
+            auto_detect=_to_bool(d.get("auto_detect"), True),
         )
 
 
@@ -237,6 +268,16 @@ class AppConfig:
     mcp_servers: dict[str, MCPServerConfig]
     schedules: list[ScheduleConfig]
     base_dir: Path
+    files: FilesConfig = field(default_factory=FilesConfig)
+    skills_dir: str = "skills"
+
+    @property
+    def workspace_path(self) -> Path:
+        return self.resolve_path(self.files.workspace)
+
+    @property
+    def skills_path(self) -> Path:
+        return self.resolve_path(self.skills_dir)
 
     def resolve_path(self, p: str) -> Path:
         path = Path(p)
@@ -307,10 +348,20 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             if srv not in servers and srv != "builtin":
                 raise ConfigError(f"schedules.{s.name}: 알 수 없는 MCP 서버 '{srv}'")
 
-    return AppConfig(
+    files = FilesConfig.from_dict(raw.get("files") or {})
+    app = AppConfig(
         llm=LLMConfig.from_dict(raw.get("llm") or {}),
         agent=AgentConfig.from_dict(raw.get("agent") or {}),
         mcp_servers=servers,
         schedules=schedules,
         base_dir=base_dir,
+        files=files,
+        skills_dir=str((raw.get("skills") or {}).get("dir") or "skills"),
     )
+    if files.inject_env:
+        ws = app.workspace_path.resolve()
+        for srv in servers.values():
+            if srv.transport == "stdio":
+                srv.env.setdefault("AGENT_DOWNLOAD_DIR", str(ws / "downloads"))
+                srv.env.setdefault("AGENT_WORKSPACE", str(ws))
+    return app

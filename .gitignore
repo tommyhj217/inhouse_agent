@@ -7,3 +7,6 @@ __pycache__/
 config/config.yaml
 outputs/
 logs/
+workspace/
+skills/_trash/
+skills/*/.history/

@@ -101,7 +101,7 @@ async def test_agent_calls_mcp_tools_and_saves(tmp_path: Path) -> None:
         assert result.success and result.output == "정리 완료"
         ev = {e.function: e for e in result.tool_events}
         assert "N20261031" in ev["demo__list_notices"].result
-        assert (cfg.output_path / "files" / "a" / "b.csv").read_text(encoding="utf-8-sig") == "x,y\n1,2\n"
+        assert (cfg.workspace_path / "files" / "a" / "b.csv").read_text(encoding="utf-8-sig") == "x,y\n1,2\n"
         # 두 번째 호출은 서버가 오류(92일 초과)를 돌려주고, 에이전트는 그것을 LLM 에 전달
         err = [e for e in result.tool_events if e.is_error]
         assert err and "92" in err[0].result
@@ -116,8 +116,8 @@ async def test_agent_calls_mcp_tools_and_saves(tmp_path: Path) -> None:
         res, path = await rt.run_job(cfg.get_schedule("notice"))
         assert path.exists() and "예약 결과" in path.read_text(encoding="utf-8")
         assert (path.parent / "latest.md").exists()
-        # servers 제한 → demo + builtin 만 노출
-        assert all(t["function"]["name"].startswith("demo__") or "__" not in t["function"]["name"] for t in llm.tools)
+        # servers 제한 → demo + builtin 만 노출 (broken 서버 tool 은 없음)
+        assert not any(t["function"]["name"].startswith("broken__") for t in llm.tools)
 
 
 async def test_server_crash_reconnect(tmp_path: Path) -> None:
@@ -127,8 +127,8 @@ async def test_server_crash_reconnect(tmp_path: Path) -> None:
         conn._stop.set()  # 연결을 강제로 끊음
         await asyncio.sleep(0.5)
         assert not conn.connected
-        text, is_err = await rt.hub.call("demo__get_notice", {"notice_id": "N1"})
-        assert not is_err and "N1" in text
+        out = await rt.hub.call("demo__get_notice", {"notice_id": "N1"})
+        assert not out.is_error and "N1" in out.text
 
 
 async def test_bad_json_and_max_iterations(tmp_path: Path) -> None:

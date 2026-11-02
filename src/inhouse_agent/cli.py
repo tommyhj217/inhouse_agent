@@ -6,6 +6,8 @@
     inhouse-agent run "요청 내용"             # 1회 실행
     inhouse-agent jobs list                  # 예약작업 목록
     inhouse-agent jobs run <작업이름>         # 예약작업 즉시 1회 실행
+    inhouse-agent skills list|show|new|validate|run   # 스킬 관리/테스트
+    inhouse-agent files list|status|analyze|query|wait  # 파일 점검 (LLM 없이)
     inhouse-agent scheduler                  # 예약작업 데몬
     inhouse-agent serve --port 8080          # 웹/API 서버 + 예약작업
 """
@@ -43,6 +45,10 @@ def _print_event(verbose: bool):
             line = f"  {mark} {data['tool']} ({data['elapsed']}s, {len(data['result'])}자)"
             if data["is_error"] or verbose:
                 line += "\n    " + data["result"][: 2000 if verbose else 300].replace("\n", "\n    ")
+            for f in data.get("files") or []:
+                from .files import format_status
+
+                line += "\n    " + format_status(f).replace("\n", "\n    ")
             print(line, flush=True)
         elif kind == "thought" and verbose:
             print(f"  · {data['content']}", flush=True)
@@ -119,14 +125,41 @@ async def cmd_run(cfg: AppConfig, args: argparse.Namespace) -> int:
     return 0 if result.success else 2
 
 
+async def _cli_ask(question: str, options: list[str] | None, default: str | None) -> str:
+    """ask_user → 터미널에서 질문."""
+    print(f"\n🙋 에이전트 질문: {question}")
+    if options:
+        for i, o in enumerate(options, 1):
+            print(f"   {i}) {o}")
+    hint = f" [기본값: {default}]" if default else ""
+    ans = (await asyncio.to_thread(input, f"답변{hint}> ")).strip()
+    if options and ans.isdigit() and 1 <= int(ans) <= len(options):
+        ans = options[int(ans) - 1]
+    return ans or (default or "")
+
+
+def _parse_inputs(items: list[str] | None) -> dict[str, str]:
+    out = {}
+    for it in items or []:
+        k, sep, v = it.partition("=")
+        if not sep:
+            raise SystemExit(f"입력값 형식은 key=value 입니다: {it}")
+        out[k.strip()] = v
+    return out
+
+
 async def cmd_chat(cfg: AppConfig, args: argparse.Namespace) -> int:
     servers = _parse_servers(args.servers)
     async with AgentRuntime(cfg) as rt:
         _warn_failed(rt)
         print("사내 자료수집 에이전트 - 대화형 모드")
-        print("명령: /tools  /servers  /reset  /save <이름>  /reconnect <서버>  /exit\n")
+        print("명령: /tools  /servers  /files  /skills  /skill <이름> [k=v ...]  /noskill  /reset  /save <이름>  /reconnect <서버>  /exit\n")
+        skill = rt.skills.get(args.skill) if getattr(args, "skill", None) else None
+        skill_inputs: dict[str, str] = _parse_inputs(getattr(args, "input", None))
         messages = rt.agent.new_conversation(servers)
         last = None
+        if skill:
+            print(f"[스킬 모드] {skill.name}: {skill.description}")
         while True:
             try:
                 line = await asyncio.to_thread(input, "나> ")
@@ -143,6 +176,28 @@ async def cmd_chat(cfg: AppConfig, args: argparse.Namespace) -> int:
                 if cmd == "/reset":
                     messages = rt.agent.new_conversation(servers)
                     print("대화를 초기화했습니다.")
+                elif cmd == "/skills":
+                    print(rt.skills.catalog_text() or "(스킬 없음)")
+                elif cmd == "/skill":
+                    parts = rest.split()
+                    if not parts:
+                        print("사용법: /skill <이름> [key=value ...]")
+                        continue
+                    try:
+                        skill = rt.skills.get(parts[0])
+                        skill_inputs = _parse_inputs(parts[1:])
+                    except Exception as e:  # noqa: BLE001
+                        print(f"스킬 오류: {e}")
+                        continue
+                    messages = rt.agent.new_conversation(servers)
+                    print(f"[스킬 모드] {skill.name}: {skill.description}\n  입력: {[i.name for i in skill.inputs]} · 빈 줄 대신 '실행' 이라고 입력하면 바로 실행합니다.")
+                elif cmd == "/noskill":
+                    skill = None
+                    messages = rt.agent.new_conversation(servers)
+                    print("스킬 모드를 해제했습니다.")
+                elif cmd == "/files":
+                    for p in rt.workspace.list_files(rest.strip() or "*")[:30]:
+                        print(f"- {rt.workspace.display(p)} ({p.stat().st_size:,} bytes)")
                 elif cmd == "/tools":
                     for spec in rt.hub.openai_tools(servers):
                         print(f"- {spec['function']['name']}")
@@ -163,7 +218,15 @@ async def cmd_chat(cfg: AppConfig, args: argparse.Namespace) -> int:
                 else:
                     print("알 수 없는 명령")
                 continue
-            result = await rt.agent.run(line, messages=messages, servers=servers, on_event=_print_event(args.verbose))
+            try:
+                result = await rt.agent.run(
+                    "" if (skill and line == "실행") else line,
+                    messages=messages, servers=servers, on_event=_print_event(args.verbose), ask=_cli_ask,
+                    skill=skill, skill_inputs=skill_inputs,
+                )
+            except Exception as e:  # noqa: BLE001 - 스킬 입력 오류 등
+                print(f"오류: {e}")
+                continue
             last = (line, result)
             print(f"\n에이전트> {result.output}\n")
     return 0
@@ -196,6 +259,101 @@ async def cmd_jobs(cfg: AppConfig, args: argparse.Namespace) -> int:
         print(result.output)
         print(f"\n[저장] {path}")
     return 0 if result.success else 2
+
+
+async def cmd_skills(cfg: AppConfig, args: argparse.Namespace) -> int:
+    from .skills import SkillStore
+
+    store = SkillStore(cfg.skills_path)
+    sc = args.skills_cmd
+    if sc == "list":
+        skills, errors = store.list()
+        for s in skills:
+            ins = ", ".join(f"{i.name}{'*' if i.required else ''}" for i in s.inputs)
+            print(f"- {s.name}: {s.description}" + (f"  [입력: {ins}]" if ins else "") + (f"  [서버: {', '.join(s.servers)}]" if s.servers else ""))
+        for n, e in errors.items():
+            print(f"- {n}: ⚠ 오류 - {e}")
+        if not skills and not errors:
+            print(f"(스킬 없음) {store.root}")
+        return 0
+    if sc == "show":
+        sk = store.get(args.name)
+        print(sk.raw)
+        if sk.files:
+            print("\n추가 파일:", ", ".join(sk.files))
+        return 0
+    if sc == "new":
+        sk = store.create(args.name, args.description or "")
+        print(f"생성: {sk.path / 'SKILL.md'}")
+        return 0
+    if sc == "validate":
+        from .skills import parse_skill
+
+        target = store.root / args.name / "SKILL.md"
+        try:
+            sk = parse_skill(target.read_text(encoding="utf-8"), target.parent)
+        except Exception as e:  # noqa: BLE001
+            print(f"✗ {e}")
+            return 1
+        print(f"✓ {sk.name} - 입력 {len(sk.inputs)}개, 서버 {sk.servers or '전체'}")
+        print("\n--- 치환된 지침 미리보기 ---")
+        print(sk.render(sk.resolve_inputs(_parse_inputs(args.input), cfg.agent.timezone), cfg.agent.timezone))
+        return 0
+    # run
+    async with AgentRuntime(cfg) as rt:
+        _warn_failed(rt)
+        result, path = await rt.run_skill(
+            args.name, _parse_inputs(args.input), args.prompt or "",
+            on_event=_print_event(args.verbose), ask=None if args.no_ask else _cli_ask,
+        )
+        print()
+        print(result.output)
+        print(f"\n[저장] {path}")
+    return 0 if result.success else 2
+
+
+async def cmd_files(cfg: AppConfig, args: argparse.Namespace) -> int:
+    """LLM 없이 파일 상태 점검/분석 (MCP 다운로드 결과 확인용)."""
+    from . import analyzers
+    from .files import FileWorkspace, file_status, format_status, wait_for_download
+
+    ws = FileWorkspace(
+        cfg.workspace_path,
+        watch_dirs=[cfg.resolve_path(d) for d in cfg.files.watch_dirs],
+        extra_read_dirs=[cfg.output_path] + [cfg.resolve_path(d) for d in cfg.files.extra_read_dirs],
+        max_file_mb=cfg.files.max_file_mb,
+    )
+    fc = args.files_cmd
+    if fc == "list":
+        print("감시 폴더:", ", ".join(str(d) for d in ws.watch_dirs))
+        for p in ws.list_files(args.pattern, args.recent):
+            print(f"- {ws.display(p)}\t{p.stat().st_size:,} bytes")
+        return 0
+    if fc == "wait":
+        st = await wait_for_download(ws, args.pattern, args.timeout)
+        print(format_status(st))
+        return 0 if st["state"] == "complete" else 1
+    p = ws.resolve(args.path)
+    st = await file_status(p, ws)
+    print(format_status(st))
+    if fc == "status":
+        print(json.dumps(st, ensure_ascii=False, indent=2))
+        return 0 if st["state"] == "complete" else 1
+    if fc == "analyze":
+        if st["state"] in ("missing", "downloading", "empty"):
+            return 1
+        print()
+        print(await asyncio.to_thread(analyzers.analyze, p, args.sheet))
+        return 0
+    if fc == "query":
+        print(await asyncio.to_thread(
+            analyzers.query_table, p, args.sheet, None, json.loads(args.filters) if args.filters else None,
+            args.group_by.split(",") if args.group_by else None,
+            [{"column": c.split(":")[1], "func": c.split(":")[0]} if ":" in c else {"func": c} for c in (args.agg or "").split(",") if c] or None,
+            None, False, args.limit, 0,
+        ))
+        return 0
+    return 1
 
 
 async def cmd_scheduler(cfg: AppConfig, args: argparse.Namespace) -> int:
@@ -256,6 +414,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     c = sub.add_parser("chat", help="대화형 모드")
     c.add_argument("-s", "--servers", help="사용할 MCP 서버 제한 (쉼표 구분)")
+    c.add_argument("--skill", help="스킬 모드로 시작")
+    c.add_argument("-i", "--input", action="append", help="스킬 입력값 key=value (여러 번)")
     c.add_argument("-v", "--verbose", action="store_true")
 
     r = sub.add_parser("run", help="요청 1회 실행")
@@ -272,6 +432,45 @@ def build_parser() -> argparse.ArgumentParser:
     jr = jsub.add_parser("run")
     jr.add_argument("name")
     jr.add_argument("-v", "--verbose", action="store_true")
+
+    sk = sub.add_parser("skills", help="스킬 관리/테스트")
+    sks = sk.add_subparsers(dest="skills_cmd", required=True)
+    sks.add_parser("list")
+    x = sks.add_parser("show")
+    x.add_argument("name")
+    x = sks.add_parser("new")
+    x.add_argument("name")
+    x.add_argument("-d", "--description")
+    x = sks.add_parser("validate", help="형식 검사 + 치환된 지침 미리보기")
+    x.add_argument("name")
+    x.add_argument("-i", "--input", action="append")
+    x = sks.add_parser("run", help="스킬 테스트 실행")
+    x.add_argument("name")
+    x.add_argument("-i", "--input", action="append", help="입력값 key=value (여러 번)")
+    x.add_argument("-p", "--prompt", help="추가 지시")
+    x.add_argument("--no-ask", action="store_true", help="ask_user 질문 없이 기본값으로 진행")
+    x.add_argument("-v", "--verbose", action="store_true")
+
+    fl = sub.add_parser("files", help="파일 상태 점검/분석 (LLM 없이)")
+    fls = fl.add_subparsers(dest="files_cmd", required=True)
+    x = fls.add_parser("list")
+    x.add_argument("pattern", nargs="?", default="*")
+    x.add_argument("--recent", type=float, help="최근 N분")
+    x = fls.add_parser("status")
+    x.add_argument("path")
+    x = fls.add_parser("analyze")
+    x.add_argument("path")
+    x.add_argument("--sheet")
+    x = fls.add_parser("query")
+    x.add_argument("path")
+    x.add_argument("--sheet")
+    x.add_argument("--filters", help='JSON 예: [{"column":"부서","op":"==","value":"인사팀"}]')
+    x.add_argument("--group-by", help="쉼표 구분 열")
+    x.add_argument("--agg", help="예: count,sum:금액,avg:금액")
+    x.add_argument("--limit", type=int, default=50)
+    x = fls.add_parser("wait", help="다운로드 완료 대기")
+    x.add_argument("pattern", nargs="?", default="*")
+    x.add_argument("--timeout", type=float, default=120)
 
     sub.add_parser("scheduler", help="예약작업 데몬 실행")
 
@@ -290,7 +489,7 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigError, OSError) as e:
         print(f"설정 오류: {e}", file=sys.stderr)
         return 1
-    setup_logging(cfg, args.log_level, console=args.cmd not in ("chat",))
+    setup_logging(cfg, args.log_level, console=args.cmd not in ("chat", "skills"))
 
     if args.cmd == "serve":
         return cmd_serve(cfg, args)
@@ -300,12 +499,17 @@ def main(argv: list[str] | None = None) -> int:
         "chat": cmd_chat,
         "run": cmd_run,
         "jobs": cmd_jobs,
+        "skills": cmd_skills,
+        "files": cmd_files,
         "scheduler": cmd_scheduler,
     }
     try:
         return asyncio.run(handlers[args.cmd](cfg, args))
     except ConfigError as e:
         print(f"설정 오류: {e}", file=sys.stderr)
+        return 1
+    except (ValueError, PermissionError) as e:  # SkillError, FileAccessError 등
+        print(f"오류: {e}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         return 130

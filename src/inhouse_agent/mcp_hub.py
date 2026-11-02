@@ -66,26 +66,51 @@ def describe_exception(e: BaseException) -> str:
     return f"{type(e).__name__}: {e}"
 
 
-def tool_result_to_text(result: Any) -> tuple[str, bool]:
-    """CallToolResult → (LLM 에 줄 텍스트, is_error)."""
+BlobSaver = Callable[[bytes, str, "str | None"], Path]
+
+
+def tool_result_to_text(result: Any, saver: BlobSaver | None = None) -> tuple[str, bool, list[Path]]:
+    """CallToolResult → (LLM 에 줄 텍스트, is_error, 저장한 파일 목록).
+
+    바이너리(EmbeddedResource blob / image / audio)는 saver 가 있으면 파일로 저장하고 경로를 알려줍니다.
+    """
     data = _dump(result)
     if not isinstance(data, dict):
-        return str(data), False
+        return str(data), False, []
     is_error = bool(data.get("isError"))
     parts: list[str] = []
+    saved: list[Path] = []
+
+    def _save(b64: str, name: str, mime: str | None) -> str:
+        if saver is None:
+            return "텍스트로 전달되지 않음"
+        try:
+            from .files import decode_b64
+
+            p = saver(decode_b64(b64), name, mime)
+            saved.append(p)
+            return f"파일로 저장됨: {p}"
+        except Exception as e:  # noqa: BLE001
+            return f"저장 실패: {e}"
+
     for item in data.get("content") or []:
         typ = item.get("type")
         if typ == "text":
             parts.append(item.get("text", ""))
-        elif typ == "image":
+        elif typ in ("image", "audio"):
             size = len(item.get("data", "")) * 3 // 4
-            parts.append(f"[이미지 {item.get('mimeType', '')} 약 {size} bytes - 텍스트로 전달되지 않음]")
-        elif typ == "audio":
-            parts.append(f"[오디오 {item.get('mimeType', '')} - 텍스트로 전달되지 않음]")
+            mime = item.get("mimeType", "")
+            note = _save(item.get("data", ""), f"{typ}.{(mime.split('/')[-1] or 'bin')}", mime)
+            parts.append(f"[{'이미지' if typ == 'image' else '오디오'} {mime} 약 {size:,} bytes - {note}]")
         elif typ == "resource":
             res = item.get("resource") or {}
             if "text" in res:
                 parts.append(f"[리소스 {res.get('uri', '')}]\n{res['text']}")
+            elif res.get("blob"):
+                uri = str(res.get("uri", ""))
+                name = uri.rstrip("/").split("/")[-1] or "download"
+                note = _save(res["blob"], name, res.get("mimeType"))
+                parts.append(f"[바이너리 리소스 {uri} {res.get('mimeType', '')} - {note}]")
             else:
                 parts.append(f"[바이너리 리소스 {res.get('uri', '')} {res.get('mimeType', '')}]")
         elif typ == "resource_link":
@@ -96,7 +121,7 @@ def tool_result_to_text(result: Any) -> tuple[str, bool]:
     if structured is not None and not parts:
         parts.append(json.dumps(structured, ensure_ascii=False, indent=2))
     text = "\n".join(p for p in parts if p) or ("(빈 결과)" if not is_error else "(오류 - 상세 내용 없음)")
-    return text, is_error
+    return text, is_error, saved
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +313,7 @@ class ServerConnection:
             await self._stop_locked()
             await self._start_locked()
 
-    async def call(self, tool: str, arguments: dict[str, Any]) -> tuple[str, bool]:
+    async def call(self, tool: str, arguments: dict[str, Any], saver: BlobSaver | None = None) -> tuple[str, bool, list[Path]]:
         async with self._lock:
             attempts = 2 if self.cfg.retry_on_failure else 1
             last_exc: Exception | None = None
@@ -299,9 +324,9 @@ class ServerConnection:
                     result = await asyncio.wait_for(
                         self.session.call_tool(tool, arguments), timeout=self.cfg.tool_timeout
                     )
-                    return tool_result_to_text(result)
+                    return tool_result_to_text(result, saver)
                 except asyncio.TimeoutError:
-                    return f"오류: tool '{tool}' 실행이 {self.cfg.tool_timeout}초 내에 끝나지 않았습니다.", True
+                    return f"오류: tool '{tool}' 실행이 {self.cfg.tool_timeout}초 내에 끝나지 않았습니다.", True, []
                 except Exception as e:  # noqa: BLE001
                     last_exc = e
                     log.warning("MCP '%s.%s' 호출 실패(%d/%d): %s", self.name, tool, attempt + 1, attempts, e)
@@ -309,8 +334,8 @@ class ServerConnection:
                         try:
                             await self.restart()
                         except Exception as re_e:  # noqa: BLE001
-                            return f"오류: MCP 서버 '{self.name}' 재연결 실패: {re_e}", True
-            return f"오류: {describe_exception(last_exc) if last_exc else '알 수 없음'}", True
+                            return f"오류: MCP 서버 '{self.name}' 재연결 실패: {re_e}", True, []
+            return f"오류: {describe_exception(last_exc) if last_exc else '알 수 없음'}", True, []
 
 
 # ---------------------------------------------------------------------------
@@ -336,10 +361,19 @@ class _Route:
 
 
 @dataclass
+class ToolOutcome:
+    text: str
+    is_error: bool = False
+    files: list[dict[str, Any]] = field(default_factory=list)  # 감지/점검한 파일 상태
+
+
+@dataclass
 class MCPHub:
     servers: dict[str, MCPServerConfig]
     log_dir: Path | None = None
     builtins: list[BuiltinTool] = field(default_factory=list)
+    workspace: Any = None  # files.FileWorkspace
+    auto_detect: bool = True
 
     def __post_init__(self) -> None:
         self.connections: dict[str, ServerConnection] = {
@@ -429,16 +463,67 @@ class MCPHub:
             lines.append(line)
         return "\n".join(lines) or "- (연결된 MCP 서버 없음)"
 
-    async def call(self, function_name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
+    async def call(self, function_name: str, arguments: dict[str, Any]) -> ToolOutcome:
         route = self._routes.get(function_name)
         if route is None:
-            return f"오류: 알 수 없는 tool '{function_name}'", True
+            return ToolOutcome(f"오류: 알 수 없는 tool '{function_name}'", True)
         if route.builtin is not None:
             try:
-                return await route.builtin.handler(arguments), False
+                res = await route.builtin.handler(arguments)
             except Exception as e:  # noqa: BLE001
-                return f"오류: {type(e).__name__}: {e}", True
-        return await self.connections[route.server].call(route.tool, arguments)
+                return ToolOutcome(f"오류: {describe_exception(e)}", True)
+            if isinstance(res, ToolOutcome):
+                return res
+            return ToolOutcome(str(res))
+
+        ws = self.workspace
+        before = await asyncio.to_thread(ws.snapshot) if ws is not None and self.auto_detect else None
+        saver = (lambda data, name, mime: ws.save_blob(data, name, mime, route.server)) if ws is not None else None
+        text, is_err, saved = await self.connections[route.server].call(route.tool, arguments, saver)
+        if ws is None:
+            return ToolOutcome(text, is_err)
+        return await self._inspect_files(text, is_err, saved, before)
+
+    async def _inspect_files(self, text: str, is_err: bool, saved: list[Path], before: dict[str, Any] | None) -> ToolOutcome:
+        """tool 호출로 생긴 파일(저장된 blob / 다운로드 폴더 변화 / 결과에 적힌 경로)을 찾아 상태를 점검."""
+        from .files import file_status, format_status
+
+        ws = self.workspace
+        paths: list[Path] = list(saved)
+        if before is not None:
+            after = await asyncio.to_thread(ws.snapshot)
+            paths += ws.diff(before, after)
+        paths += await asyncio.to_thread(ws.find_paths_in_text, text)
+        uniq: list[Path] = []
+        for p in paths:
+            if p not in uniq:
+                uniq.append(p)
+        if not uniq:
+            if not is_err and re.search(r"다운로드|내려받|download|export|엑셀|excel", text, re.I):
+                text += (
+                    "\n\n[파일 감지] 아직 감시 폴더에 새 파일이 보이지 않습니다. 다운로드가 백그라운드로 진행 중일 수 있으니 "
+                    "wait_for_download 로 완료를 확인하세요."
+                )
+            return ToolOutcome(text, is_err)
+        statuses = [await file_status(p, ws, stable_wait=1.0) for p in uniq[:10]]
+        # 호출 중 잠깐 생겼다 사라진 임시 파일은 제외
+        statuses = [st for st in statuses if not (st["state"] in ("missing", "locked") and not Path(st["path"]).exists())]
+        if not statuses:
+            return ToolOutcome(text, is_err)
+        # 임시파일(.crdownload)과 그 완성본이 같이 잡히면 완성본만
+        names = {Path(st["path"]).name for st in statuses}
+        statuses = [
+            st for st in statuses
+            if not (Path(st["path"]).suffix.lower() in (".crdownload", ".part", ".tmp") and Path(st["path"]).stem in names)
+        ]
+        lines = ["", "[파일 감지 - 에이전트 자동 점검]"] + [format_status(st) for st in statuses]
+        if any(st["state"] == "downloading" for st in statuses):
+            lines.append("※ 아직 다운로드 중인 파일이 있습니다. wait_for_download 로 완료를 확인한 뒤 분석하세요.")
+        if any(st["state"] in ("corrupt", "suspicious", "empty") for st in statuses):
+            lines.append("※ 정상이 아닌 파일이 있습니다. 내용을 analyze_file 로 확인하고, 필요하면 다시 내려받으세요.")
+        elif any(st["state"] == "complete" for st in statuses):
+            lines.append("※ analyze_file 로 내용을 분석할 수 있습니다.")
+        return ToolOutcome(text + "\n".join(lines), is_err, statuses)
 
     def route_of(self, function_name: str) -> tuple[str, str] | None:
         r = self._routes.get(function_name)
@@ -451,6 +536,7 @@ def _spec(name: str, description: str, schema: dict[str, Any]) -> dict[str, Any]
 
 __all__ = [
     "MCPHub",
+    "ToolOutcome",
     "BuiltinTool",
     "ServerConnection",
     "ToolInfo",
