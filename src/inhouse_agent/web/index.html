@@ -53,6 +53,15 @@ pre{background:var(--code);padding:8px 10px;border-radius:8px;overflow:auto;max-
 .step.err{border-color:var(--err)}.step.run{border-color:var(--accent)}.step.ok{border-color:var(--ok)}
 .step summary{cursor:pointer;list-style:none;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .step summary::-webkit-details-marker{display:none}
+a.flink{color:var(--accent);text-decoration:none;border-bottom:1px dashed currentColor;word-break:break-all}
+a.flink:hover{border-bottom-style:solid}
+.fact{border:0;background:transparent;padding:0 3px;cursor:pointer;font-size:12px;opacity:.75}
+.fact:hover{opacity:1}
+.filechip a{text-decoration:none}
+.plan{border:1px solid var(--line);border-radius:10px;padding:8px 12px;background:var(--panel)}
+.plan li{list-style:none;margin:2px 0}
+.plan ul{padding:0;margin:4px 0 0}
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:8px 14px;border-radius:8px;z-index:50;font-size:13px}
 .filechip{display:inline-flex;gap:4px;align-items:center;font-size:12px;border:1px solid var(--line);border-radius:6px;padding:1px 6px;margin:2px 4px 0 0;cursor:pointer}
 .ask{border:2px solid var(--accent);border-radius:12px;padding:10px 12px;background:var(--soft)}
 .composer{display:flex;gap:8px;align-items:flex-end;padding-top:8px;border-top:1px solid var(--line)}
@@ -205,6 +214,7 @@ table.grid tbody tr{cursor:pointer}
         <button id="f-analyze-btn" disabled>분석</button>
         <button id="f-ask-btn" disabled title="조사 탭에서 에이전트에게 분석 요청">에이전트에게 요청</button>
         <a id="f-dl" class="hidden" target="_blank"><button>받기</button></a>
+        <button id="f-share" class="hidden" title="API 토큰 없이 열리는 기한부 링크">공유 링크</button>
       </div>
       <div id="f-status" style="margin-top:8px"></div>
       <div id="f-analysis" class="answer hidden" style="margin-top:8px"></div>
@@ -356,13 +366,15 @@ class RunView {
     on("ask", d => this.askBox(d));
     on("answer", d => { this.status.innerHTML = `<span class="badge b-run">실행 중…</span>`; if (d.timeout) this.add(`<div class="small muted">답변 시간 초과 - 기본값 사용</div>`); });
     on("error", d => this.add(`<div class="b-err small">${esc(d.error)}</div>`));
+    on("plan", d => this.plan(d));
     on("done", d => this.done(d));
     this.es.onerror = () => { if (this.es && this.es.readyState === 2) this.es = null; };
   }
   add(html) { const d = document.createElement("div"); d.innerHTML = html; this.box.appendChild(d); this.scroll(); return d; }
   scroll() { const el = this.log.closest(".runpane") || this.log; el.scrollTop = el.scrollHeight; }
   fileChips(files) {
-    return (files || []).map(f => `<span class="filechip" data-path="${esc(f.path)}" title="${esc((f.issues || []).join("\n"))}">📄 ${esc(f.name || f.path)} ${stateBadge(f.state)}</span>`).join("");
+    return (files || []).map(f => `<span class="filechip" data-path="${esc(f.path)}" title="${esc((f.issues || []).join("\n") || "클릭: 파일 탭에서 상태/분석 보기")}">📄 ${esc(f.name || f.path)} ${stateBadge(f.state)}`
+      + ` <a href="${esc(withToken("/api/files/download?path=" + encodeURIComponent(f.path)))}" title="내려받기" download>⬇</a></span>`).join("");
   }
   toolStart(d) {
     const el = document.createElement("details"); el.className = "step run";
@@ -370,12 +382,20 @@ class RunView {
     el.innerHTML = `<summary><span>🔧 <b>${esc(label)}</b></span><span class="small muted">${esc(JSON.stringify(d.arguments).slice(0, 140))}</span><span class="st badge b-run">실행 중</span></summary><div class="body small"><b>인자</b><pre>${esc(JSON.stringify(d.arguments, null, 2))}</pre></div>`;
     this.box.appendChild(el); this.steps[d.id] = el;
   }
+  plan(d) {
+    const icon = {done: "✅", in_progress: "⏳", skipped: "⏭", pending: "⬜"};
+    const html = `<b>📋 작업 계획</b> <span class="small muted">${d.steps.filter(s => s.status === "done").length}/${d.steps.length}</span>${d.note ? `<div class="small muted">${esc(d.note)}</div>` : ""}`
+      + `<ul>${d.steps.map(s => `<li>${icon[s.status] || "⬜"} ${s.status === "done" ? `<span class="muted">${esc(s.step)}</span>` : esc(s.step)}</li>`).join("")}</ul>`;
+    if (!this.planEl) { this.planEl = this.add(`<div class="plan"></div>`).firstChild; }
+    this.planEl.innerHTML = html;
+  }
   toolEnd(d) {
     let el = this.steps[d.id]; if (!el) { this.toolStart(d); el = this.steps[d.id]; }
     el.className = "step " + (d.is_error ? "err" : "ok");
     el.querySelector(".st").outerHTML = d.is_error ? `<span class="badge b-err">오류 ${d.elapsed}s</span>` : `<span class="badge b-ok">완료 ${d.elapsed}s</span>`;
     if (d.files && d.files.length) { const fc = document.createElement("div"); fc.innerHTML = this.fileChips(d.files); el.appendChild(fc); if (d.files.some(f => f.state !== "complete")) el.open = true; }
     el.querySelector(".body").insertAdjacentHTML("beforeend", `<b>결과</b><pre>${esc(d.result)}</pre>`);
+    linkifyPaths(el.querySelector(".body pre:last-child"));
     if (d.is_error) el.open = true;
   }
   askBox(d) {
@@ -401,15 +421,65 @@ class RunView {
       + (d.usage && d.usage.total_tokens ? ` <span class="small muted">토큰 ${d.usage.total_tokens.toLocaleString()}</span>` : "")
       + (d.saved_to ? ` <span class="small muted">저장: ${esc(d.saved_to)}</span>` : "");
     const ans = this.add(`<div class="answer">${md(d.output)}</div>`);
+    linkifyPaths(ans);
     if (d.files && d.files.length) ans.insertAdjacentHTML("beforeend", `<div class="small muted" style="margin-top:6px">사용한 파일: ${this.fileChips(d.files)}</div>`);
     this.onDone && this.onDone(d);
   }
   async cancel() { if (this.runId) await api(`/api/runs/${this.runId}/cancel`, {method: "POST"}); }
 }
 document.addEventListener("click", e => {
+  const copy = e.target.closest(".fcopy");
+  if (copy) { e.preventDefault(); copyText(copy.dataset.url, "공유 링크를 복사했습니다 (" + copy.dataset.hours + "시간 유효)"); return; }
+  const open = e.target.closest(".fopen");
+  if (open) { e.preventDefault(); showTab("files"); selectFile(open.dataset.path, true); return; }
+  if (e.target.closest("a")) return;  // ⬇ 내려받기 링크는 그대로
   const chip = e.target.closest(".filechip"); if (!chip) return;
   showTab("files"); selectFile(chip.dataset.path, true);
 });
+
+function toast(msg) {
+  const t = document.createElement("div"); t.className = "toast"; t.textContent = msg; document.body.appendChild(t);
+  setTimeout(() => t.remove(), 2500);
+}
+async function copyText(text, msg) {
+  try { await navigator.clipboard.writeText(text); toast(msg || "복사했습니다"); }
+  catch { window.prompt("아래 링크를 복사하세요", text); }  // http(비보안) 환경에서는 clipboard API 가 막힘
+}
+
+// 답변/결과 안의 파일 경로 → 클릭하면 내려받는 링크로 (서버가 실제 파일 목록과 대조 - 공백 있는 파일명도 인식)
+async function linkifyPaths(root) {
+  if (!root) return;
+  const full = root.textContent || "";
+  if (!/[\\/]/.test(full)) return;
+  let found;
+  try { found = await api("/api/files/scan", {json: {text: full}}); } catch { return; }
+  if (!found.length) return;
+  found.sort((x, y) => y.match.length - x.match.length);
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {acceptNode: n => n.parentElement.closest("a,button,textarea") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT});
+  const nodes = []; let n;
+  while ((n = walker.nextNode())) nodes.push(n);
+  for (const node of nodes) {
+    let text = node.nodeValue; const parts = []; let changed = false;
+    while (text) {
+      let best = null, bestIdx = -1;
+      for (const it of found) { const i = text.indexOf(it.match); if (i >= 0 && (bestIdx < 0 || i < bestIdx)) { best = it; bestIdx = i; } }
+      if (!best) { parts.push(text); break; }
+      parts.push(text.slice(0, bestIdx), best); text = text.slice(bestIdx + best.match.length); changed = true;
+    }
+    if (!changed) continue;
+    const frag = document.createDocumentFragment();
+    for (const pt of parts) {
+      if (typeof pt === "string") { if (pt) frag.append(pt); continue; }
+      const a = document.createElement("a"); a.className = "flink"; a.href = pt.href; a.setAttribute("download", pt.is_dir ? pt.name + ".zip" : pt.name);
+      a.title = `${pt.path}${pt.size != null ? " · " + (pt.size / 1024).toFixed(1) + "KB" : " (폴더 → zip)"} · 클릭하면 내려받기`;
+      a.textContent = (pt.is_dir ? "📁 " : "📎 ") + pt.match;
+      const c = document.createElement("button"); c.className = "fact fcopy"; c.textContent = "🔗"; c.title = "공유 링크 복사"; c.dataset.url = pt.share_url; c.dataset.hours = Math.round(pt.expires_in_hours);
+      const o = document.createElement("button"); o.className = "fact fopen"; o.textContent = "🔍"; o.title = "파일 탭에서 상태/분석 보기"; o.dataset.path = pt.path;
+      frag.append(a, c, o);
+    }
+    node.replaceWith(frag);
+  }
+}
 
 // ---------------- 조사 ----------------
 let chatSession = null, chatRun = null;
@@ -584,6 +654,7 @@ async function selectFile(path, analyze=false) {
   $("#f-name").textContent = path.split(/[\\/]/).pop();
   ["#f-status-btn", "#f-analyze-btn", "#f-ask-btn"].forEach(s => $(s).disabled = false);
   const dl = $("#f-dl"); dl.href = withToken("/api/files/download?path=" + encodeURIComponent(path)); dl.classList.remove("hidden");
+  $("#f-share").classList.remove("hidden");
   $("#f-analysis").classList.add("hidden");
   await showStatus();
   if (analyze) analyzeFile();
@@ -602,6 +673,10 @@ async function analyzeFile() {
   try { const r = await api("/api/files/analyze?path=" + encodeURIComponent(fSel)); box.innerHTML = (r.is_error ? `<div class="b-err">${esc(r.text)}</div>` : md(r.text)); }
   catch (e) { box.innerHTML = `<span class="b-err">${esc(e.message)}</span>`; }
 }
+$("#f-share").onclick = async () => {
+  try { const [it] = await api("/api/files/links", {json: {paths: [fSel]}}); if (!it.ok) throw new Error(it.error); copyText(it.share_url, `공유 링크를 복사했습니다 (${Math.round(it.expires_in_hours)}시간 유효)`); }
+  catch (e) { alert(e.message); }
+};
 $("#f-refresh").onclick = loadFiles; $("#f-where").onchange = loadFiles; $("#f-pattern").onchange = loadFiles;
 $("#f-status-btn").onclick = showStatus; $("#f-analyze-btn").onclick = analyzeFile;
 $("#f-ask-btn").onclick = () => { showTab("chat"); chatInput.value = `다음 파일을 분석해서 핵심 내용과 이상한 점을 정리해줘: ${fSel}`; chatInput.focus(); };

@@ -53,6 +53,40 @@ files:
   auto_detect: true            # MCP tool 호출 전후 다운로드 폴더를 비교해 새 파일 자동 점검
 
 # ---------------------------------------------------------------------
+# 웹 서버 / 파일 링크
+#   public_url: 다른 사람이 접속하는 주소. 설정하면 메일·메신저·웹훅·CLI 에 절대 다운로드 링크가 붙습니다.
+#   링크(/d/...)는 서명되어 위조할 수 없고 기한이 지나면 열리지 않습니다 (API 토큰 없이 열림).
+#   서명 키는 workspace/.link_secret 에 자동 생성 (여러 서버가 같은 키를 쓰려면 AGENT_LINK_SECRET 환경변수).
+# ---------------------------------------------------------------------
+server:
+  public_url: ""                # 예: http://agent.company.com:8080
+  link_expire_hours: 168        # 공유 링크 유효 시간 (기본 7일)
+
+# ---------------------------------------------------------------------
+# 범용 도구 (docs/agent_tools_analysis.md 참고)
+# ---------------------------------------------------------------------
+web_search:                     # 비우면 web_search tool 없음
+  provider: ""                  # searxng (사내 설치형 검색) | tavily
+  url: ""                       # searxng: http://searxng.company.com
+  api_key: ""                   # tavily 만
+http:
+  allow_unattended_write: false # 예약작업에서 http_request 의 POST/PUT/DELETE 허용 여부 (대화형은 매번 승인)
+notify:
+  allow_unattended: true        # 예약작업에서 send_email/send_message 허용 (수신자/채널 제한은 항상 적용)
+  email:                        # smtp_host 를 넣으면 send_email tool 활성화
+    smtp_host: ""
+    port: 25
+    starttls: false
+    ssl: false
+    username: ""
+    password: ${SMTP_PASSWORD:-}
+    from: "agent@company.com"
+    allowed_recipients: []      # 필수. 예: ["*@company.com"]
+    max_attach_mb: 20           # 넘으면 첨부 대신 본문 다운로드 링크
+  webhooks: {}                  # 채널이름: 웹훅URL → send_message tool 활성화
+    # 영업팀: ${TEAMS_SALES_WEBHOOK:-}
+
+# ---------------------------------------------------------------------
 # 다운로드 URL (MCP 가 파일 대신 링크를 줄 때 download_url tool 로 받기)
 #   사내 프록시는 HTTP(S)_PROXY / NO_PROXY 환경변수를 그대로 씁니다.
 # ---------------------------------------------------------------------

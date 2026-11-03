@@ -132,7 +132,7 @@ def make_builtin_tools(
         return f"{len(out)}개 파일을 {dest} 에 풀었습니다:\n" + "\n".join(ws.display(x) for x in out[:100])
 
     # ---------------- 저장 ----------------
-    async def save_file(args: dict[str, Any]) -> str:
+    async def save_file(args: dict[str, Any]) -> ToolOutcome:
         rel = str(args["path"]).lstrip("/\\")
         path = ws.resolve(f"files/{rel}" if not rel.startswith("files/") else rel, write=True)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -140,7 +140,8 @@ def make_builtin_tools(
         encoding = "utf-8-sig" if path.suffix.lower() == ".csv" and mode == "w" else "utf-8"  # 엑셀 호환 BOM
         with open(path, mode, encoding=encoding, newline="") as f:
             f.write(str(args.get("content", "")))
-        return f"저장 완료: {path}"
+        st = await file_status(path, ws, stable_wait=0)
+        return ToolOutcome(f"저장 완료: {path}", False, [st])
 
     tools = [
         BuiltinTool("get_current_time", "현재 날짜와 시각을 조회합니다. '오늘/어제/이번 주' 계산에 사용하세요.", _obj({}), get_current_time),

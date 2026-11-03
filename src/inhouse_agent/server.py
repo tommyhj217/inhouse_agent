@@ -72,6 +72,15 @@ class ToolTestRequest(BaseModel):
     code: str | None = None  # 저장 전 편집 중인 코드로 테스트
 
 
+class LinksRequest(BaseModel):
+    paths: list[str]
+    expire_hours: float | None = None
+
+
+class ScanRequest(BaseModel):
+    text: str
+
+
 class FetchRequest(BaseModel):
     url: str
     cookies: str | None = None
@@ -253,6 +262,20 @@ class RunManager:
                 return
 
 
+def _disposition(name: str, inline: bool = False) -> str:
+    """RFC 6266: 구형 클라이언트용 ASCII 이름 + 한글 이름(filename*) 함께."""
+    import urllib.parse
+
+    stem, dot, ext = name.rpartition(".")
+    if not dot:
+        stem, ext = name, ""
+    ascii_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem.encode("ascii", "ignore").decode()).strip("_.") or "download"
+    ascii_ext = re.sub(r"[^A-Za-z0-9]+", "", ext)
+    ascii_name = f"{ascii_stem}.{ascii_ext}" if ascii_ext else ascii_stem
+    kind = "inline" if inline else "attachment"
+    return f"{kind}; filename=\"{ascii_name}\"; filename*=UTF-8''{urllib.parse.quote(name)}"
+
+
 def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_scheduler: bool = True) -> FastAPI:
     rt = runtime or AgentRuntime(cfg)
     sched = AgentScheduler(rt)
@@ -304,6 +327,7 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
             "workspace": str(rt.workspace.root),
             "watch_dirs": [str(d) for d in rt.workspace.watch_dirs],
             "skills_dir": str(rt.skills.root),
+            "public_url": rt.links.public_url,
             "auth": bool(token),
         }
 
@@ -516,17 +540,121 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
         target.write_bytes(data)
         return {"ok": True, "path": str(target), "display": rt.workspace.display(target)}
 
+    def _send_path(p: Path, inline: bool = False) -> FileResponse:
+        """파일이면 그대로, 폴더면 zip 으로 묶어서 보냄."""
+        if p.is_dir():
+            import tempfile
+            import zipfile
+
+            from starlette.background import BackgroundTask
+
+            tmp = Path(tempfile.mkstemp(suffix=".zip", dir=rt.workspace.root)[1])
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+                for f in sorted(p.rglob("*")):
+                    if f.is_file() and not f.name.startswith("."):
+                        z.write(f, f"{p.name}/{f.relative_to(p)}")
+            return FileResponse(tmp, headers={"Content-Disposition": _disposition(f"{p.name}.zip")},
+                                media_type="application/zip", background=BackgroundTask(lambda: tmp.unlink(missing_ok=True)))
+        if not p.is_file():
+            raise HTTPException(404, "파일 없음")
+        import mimetypes
+
+        return FileResponse(p, headers={"Content-Disposition": _disposition(p.name, inline)},
+                            media_type=mimetypes.guess_type(p.name)[0] or "application/octet-stream")
+
     @app.get("/api/files/download", dependencies=A)
-    async def files_download(path: str) -> FileResponse:
+    async def files_download(path: str, inline: bool = False) -> FileResponse:
         from .files import FileAccessError
 
         try:
             p = rt.workspace.resolve(path)
         except FileAccessError as e:
             raise HTTPException(403, str(e)) from e
-        if not p.is_file():
-            raise HTTPException(404, "파일 없음")
-        return FileResponse(p, filename=p.name)
+        return _send_path(p, inline)
+
+    @app.post("/api/files/links", dependencies=A)
+    async def files_links(req: LinksRequest, request: Request) -> list[dict[str, Any]]:
+        """화면에 나온 경로들 → 실제 파일인지 확인하고 다운로드/공유 링크 생성."""
+        from .links import LinkError
+
+        base = rt.links.public_url or str(request.base_url).rstrip("/")
+        out = []
+        for raw in req.paths[:200]:
+            item: dict[str, Any] = {"input": raw, "ok": False}
+            try:
+                info = rt.links.describe(raw, req.expire_hours)
+                rel = info["url"] if not info["absolute"] else info["url"][len(rt.links.public_url):]
+                item.update(ok=True, path=info["path"], name=info["name"], is_dir=info["is_dir"], size=info["size"],
+                            href=rel, share_url=base + rel, expires_in_hours=info["expires_in_hours"])
+            except (LinkError, PermissionError, ValueError, OSError) as e:
+                item["error"] = str(e)
+            out.append(item)
+        return out
+
+    @app.post("/api/files/scan", dependencies=A)
+    async def files_scan(req: ScanRequest, request: Request) -> list[dict[str, Any]]:
+        """텍스트(답변/tool 결과)에 들어 있는 실제 파일 경로를 찾아 다운로드 링크와 함께 돌려줌.
+        파일명에 공백이 있어도 되도록, 정규식 대신 실제 파일 목록과 대조합니다."""
+        text = req.text[:300_000]
+        if not text.strip():
+            return []
+        norm = text.replace("\\", "/")
+        cands: list[Path] = list(rt.workspace.list_files("*"))
+        out_dir = cfg.output_path
+        if out_dir.is_dir():
+            cands += sorted((p for p in out_dir.rglob("*") if p.is_file()), key=lambda p: p.stat().st_mtime, reverse=True)[:300]
+        roots = [rt.workspace.root, *rt.workspace.watch_dirs, out_dir]
+        dirs: list[Path] = []
+        for p in cands:
+            for parent in p.parents:
+                if parent in roots or not any(r in parent.parents for r in roots):
+                    break
+                if parent not in dirs:
+                    dirs.append(parent)
+        cands += dirs
+        found: dict[str, Path] = {}
+        for p in cands:
+            forms = {str(p), str(p).replace("\\", "/"), rt.workspace.display(p)}
+            for f in forms:
+                if len(f) > 4 and (f in text or f in norm):
+                    found.setdefault(f, p)
+        # 긴 경로가 그 일부(짧은 상대경로)보다 우선
+        keys = sorted(found, key=len, reverse=True)
+        chosen: list[str] = []
+        rest = norm  # 긴 경로부터 지워 가며, 짧은 경로가 '따로' 나온 경우만 채택
+        for k in keys:
+            kk = k.replace("\\", "/")
+            if kk in rest:
+                chosen.append(k)
+                rest = rest.replace(kk, "\0")
+        base = rt.links.public_url or str(request.base_url).rstrip("/")
+        res = []
+        for k in chosen:
+            try:
+                info = rt.links.describe(found[k])
+            except Exception:  # noqa: BLE001
+                continue
+            rel = info["url"][len(rt.links.public_url):] if info["absolute"] else info["url"]
+            # 화면에 역슬래시 경로로 나와도 찾을 수 있도록 원래 표기도 함께
+            variants = [k] + ([k.replace("/", "\\")] if "/" in k and k.replace("/", "\\") in text else [])
+            for v in variants:
+                res.append({"match": v, "path": info["path"], "name": info["name"], "is_dir": info["is_dir"], "size": info["size"],
+                            "href": rel, "share_url": base + rel, "expires_in_hours": info["expires_in_hours"]})
+        return res
+
+    @app.get("/d/{token}/{name}")
+    @app.get("/d/{token}")
+    async def signed_download(token: str, name: str = "", inline: bool = False) -> FileResponse:
+        """서명 링크 (API 토큰 불필요, 기한 있음) - 메일/메신저 공유용."""
+        from .links import LinkError
+
+        try:
+            p = rt.links.verify(token)
+        except LinkError as e:
+            raise HTTPException(403, str(e)) from e
+        except PermissionError as e:
+            raise HTTPException(403, str(e)) from e
+        return _send_path(p, inline)
 
     @app.post("/api/files/fetch", dependencies=A)
     async def files_fetch(req: FetchRequest) -> dict[str, Any]:

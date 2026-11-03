@@ -33,6 +33,8 @@
 | 스킬 | `skills/<이름>/SKILL.md`에 업무 절차와 입력값을 정의합니다. 에이전트가 알아서 불러 쓰고, 예약작업에서도 실행할 수 있습니다. |
 | 다운로드 URL | MCP 결과에 있는 다운로드 링크를 감지해서 `download_url`로 받습니다. 한글 파일명(`filename*=`, 깨진 인코딩)을 복원하고, 리다이렉트, 사내 프록시/CA, 쿠키/헤더, 사이트별 인증 설정을 지원합니다. 링크인데 로그인 페이지가 받아지면 의심 상태로 표시합니다. |
 | 동적 도구 | 필요한 tool이 없으면 에이전트가 파이썬 코드로 tool을 만들고(`create_tool`) 테스트해서 바로 사용합니다. 일회성 계산은 `run_python`으로 처리합니다. 만든 도구는 `ctx.call_tool_data()`로 기존 MCP tool을 조합할 수 있고, `tools/`에 저장되어 계속 재사용됩니다. 승인 모드를 지원합니다. |
+| 파일 받기 / 공유 | 답변과 tool 결과에 나온 파일·폴더 경로를 클릭하면 바로 받습니다(폴더는 zip). 🔗를 누르면 API 토큰 없이 열리는 기한부 서명 링크가 복사됩니다. 메일, 메신저, 웹훅, CLI 결과에도 링크가 붙습니다. |
+| 범용 자동화 도구 | 공개 자동화 에이전트들의 도구를 분석해서 추가했습니다([분석 문서](docs/agent_tools_analysis.md)): 웹 읽기/검색, HTTP API, SQL, 표 비교, 엑셀·차트·zip 생성, 파일 내용 검색, 기억, 작업 계획, 메일/메신저 알림 |
 | 인터랙티브 UI | 스킬을 편집하면 입력 폼이 즉시 바뀌고, 바로 테스트 실행할 수 있습니다. 실행 과정은 실시간으로 표시되고, 에이전트의 질문(`ask_user`)에 화면에서 답할 수 있습니다. 결과를 보고 후속 지시를 내릴 수 있습니다. |
 | 사용 방식 | 대화형 CLI, 1회 실행 CLI, 웹 채팅 화면과 REST API(`serve`), 예약 데몬(`scheduler`) |
 | SDK 호환 | mcp SDK 1.x와 2.x, openai SDK 1.x 이상에서 테스트했습니다. |
@@ -334,7 +336,45 @@ def run(args, ctx):
 
 검토한 도구는 `tools/` 폴더째 GitHub에 커밋해서 다른 서버와 공유할 수 있습니다.
 
-## 8. 구조
+## 8. 결과 파일 받기 / 공유 링크
+
+- **웹 화면**: 답변이나 tool 결과에 실제로 있는 파일/폴더 경로가 나오면 📎 링크로 바뀝니다. 파일명에 공백이나 한글이 있어도 됩니다.
+  - 경로 클릭: 내려받기 (폴더는 zip으로 묶음)
+  - 🔗: 공유 링크 복사
+  - 🔍: 파일 탭에서 상태와 분석 보기
+  - 아래 파일 칩의 ⬇도 바로 내려받기입니다.
+- **서명 링크** `/d/<토큰>/<파일명>`:
+  - HMAC 서명과 만료 시간(기본 7일, `server.link_expire_hours`)이 있습니다.
+  - API 토큰 없이 열리고, 허용 폴더 밖의 파일은 링크를 만들 수도 열 수도 없습니다.
+  - 서명 키는 `workspace/.link_secret`에 자동 생성됩니다. 서버가 여러 대라면 `AGENT_LINK_SECRET` 환경변수로 같은 키를 쓰세요.
+- **외부 공유**: `server.public_url`(예: `http://agent.company.com:8080`)을 설정하면 다음 결과에 절대 URL 링크가 붙습니다.
+  - `get_download_link`, `send_email`, `send_message`
+  - 예약작업 웹훅
+  - CLI 결과 (`[파일 받기]`)
+- **CLI로 링크 만들기**: `inhouse-agent link files/reports/10월_매출.xlsx --hours 24`
+
+## 9. 범용 자동화 도구
+
+공개 자동화 에이전트(OpenAI Agents SDK, smolagents, Manus, n8n, LangChain, Claude Code)의 도구를 비교한 결과와,
+무엇을 넣고 무엇을 뺐는지(예: 셸 명령)는 [docs/agent_tools_analysis.md](docs/agent_tools_analysis.md)에 정리했습니다.
+
+| tool | 용도 | 활성 조건 / 안전장치 |
+|---|---|---|
+| `web_fetch` | 웹·사내 포털 페이지 본문과 링크 읽기 (EUC-KR 지원) | `downloads.allowed_hosts` 적용 |
+| `web_search` | 검색 (SearXNG 사내 설치형 / Tavily) | `web_search.provider`를 설정해야 활성화 |
+| `http_request` | 사내 REST API 호출 | GET 이외의 요청은 승인 필요. 무인 실행에서는 `http.allow_unattended_write`일 때만 허용 |
+| `sql_query` | 엑셀/CSV 여러 개를 SQL로 조인·집계하고 결과를 csv/xlsx로 저장 | SELECT만 허용. 코드값(00123)은 문자로 유지 |
+| `compare_tables` | 이전 자료와 비교 (추가/삭제/값 변경) | |
+| `write_excel` | 서식이 적용된 xlsx 보고서 (머리글, 틀 고정, 필터, 천단위) | |
+| `make_chart` | 막대/선/원 차트 PNG | matplotlib 필요. 한글은 맑은 고딕/나눔고딕이 있어야 표시됨 |
+| `create_zip` / `get_download_link` | 결과 묶기, 공유 링크 | |
+| `search_files` | 파일 내용 검색 (엑셀/PDF/Word 포함) | |
+| `remember` / `recall` / `forget` | 실행 간 기억. 키 목록은 시스템 프롬프트에 자동으로 들어감 | `workspace/memory.json` |
+| `update_plan` | 작업 계획과 진행 상황을 화면에 체크리스트로 표시 | |
+| `send_email` | 사내 SMTP 메일 (첨부와 다운로드 링크) | `notify.email.smtp_host`와 `allowed_recipients`가 필요. 대화형에서는 승인 |
+| `send_message` | Teams/Slack 웹훅 | `notify.webhooks`에 등록된 채널로만 발송 |
+
+## 10. 구조
 
 ```
 src/inhouse_agent/
@@ -346,7 +386,9 @@ src/inhouse_agent/
   skills.py     SKILL.md 파싱, 입력값 처리, 저장소(버전 백업)
   interaction.py ask_user 를 실행 중인 UI(웹/CLI)와 연결
   builtins.py   내장 tool (파일, 분석, 스킬, ask_user, 저장, download_url, create_tool, run_python)
-  downloader.py 다운로드 URL 받기 (한글 파일명, 프록시/CA, 쿠키, 호스트 제한)
+  downloader.py 다운로드 URL 받기 / 일반 HTTP 요청 (한글 파일명, 프록시/CA, 쿠키, 호스트 제한)
+  links.py      서명된 다운로드 링크 (/d/...)
+  toolkit.py    범용 도구 (web_fetch, http_request, sql_query, write_excel, make_chart, send_email ...)
   dynamic_tools.py 동적 도구 저장소, 정적 검사, 승인, 자식 프로세스 실행(+tool 호출 중계)
   _tool_runner.py  동적 도구를 실행하는 자식 프로세스
   agent.py      LLM ↔ tool 루프, 시스템 프롬프트, 이력 관리
@@ -365,7 +407,7 @@ tests/                          통합 테스트 (실제 MCP 서버, 가짜 Azur
   현재 시각과 서버 목록, 서버 설명은 자동으로 붙습니다.
 - 결과를 디버깅할 때는 `outputs/<작업>/_trace/*.json`에서 LLM이 어떤 tool을 어떤 인자로 불렀는지 확인할 수 있습니다.
 
-## 9. 테스트
+## 11. 테스트
 
 ```bash
 pip install -e ".[server,dev]"
@@ -384,4 +426,6 @@ pytest -q
 - 스킬 파싱/검증/버전 백업, 스킬 실행 중 ask_user 답변 반영과 다운로드 감지
 - 웹 API 흐름: 스킬 생성/저장 → 실행 → SSE 이벤트 → 질문 답변 → 후속 지시 → 파일 업로드/분석
 - 다운로드: 한글 파일명 복원, 리다이렉트, 404, 크기 제한, 호스트 제한, 링크로컬 차단, 사이트별 헤더/쿠키, 로그인 페이지 감지, 링크 감지/자동 받기
+- 링크: 서명/위조/만료/허용폴더, 경로 인식(공백·한글 파일명, 폴더), 토큰 없이 서명 링크로 받기, 폴더 zip
+- 범용 도구: web_fetch(EUC-KR, 상대 링크), http_request 승인, web_search, sql_query 조인/저장, compare_tables, write_excel 서식, make_chart, create_zip, search_files, 기억/계획 이벤트, 메일(수신자 제한/첨부/링크/거부), 메신저
 - 동적 도구: 정적 검사, 승인/거부/비대화형 거절, 테스트 실패 시 미등록, 같은 실행 안에서 생성→호출, 재시작 후 재사용, 재귀 호출 금지, 제한 시간, 비밀 환경변수 미전달, mode off, 웹 API

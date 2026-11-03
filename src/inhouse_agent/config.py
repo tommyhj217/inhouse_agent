@@ -272,6 +272,7 @@ class AppConfig:
     skills_dir: str = "skills"
     downloads: dict[str, Any] = field(default_factory=dict)
     dynamic_tools: dict[str, Any] = field(default_factory=dict)
+    raw: dict[str, Any] = field(default_factory=dict)  # server / web_search / http / notify 등 원본 섹션
 
     @property
     def workspace_path(self) -> Path:
@@ -361,6 +362,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         skills_dir=str((raw.get("skills") or {}).get("dir") or "skills"),
         downloads=dict(raw.get("downloads") or {}),
         dynamic_tools=dict(raw.get("dynamic_tools") or {}),
+        raw=raw,
     )
     try:  # 형식 오류를 시작 시점에 알림
         from .downloader import DownloadConfig

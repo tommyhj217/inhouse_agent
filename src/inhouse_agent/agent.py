@@ -54,6 +54,14 @@ DEFAULT_SYSTEM_PROMPT = """당신은 사내 업무 자료 수집·분석 에이�
    - create_tool 에는 반드시 test_args 를 넣어 실제로 돌려 보고, 실패하면 오류(traceback)를 보고 고쳐서 다시 만드세요.
    - 같은 기능의 custom__ 도구가 이미 있으면 새로 만들지 말고 그것을 쓰세요.
 
+결과 파일 / 범용 도구:
+- 만든 파일(save_file, write_excel, make_chart, create_zip, sql_query save_as 등)과 받은 파일은 최종 답변에 전체 경로를 꼭 적으세요.
+  웹 화면에서 사용자가 경로를 클릭해 바로 받을 수 있습니다. 메일/메신저로 공유할 때는 get_download_link 의 링크를 쓰세요.
+- 3단계 이상 걸리는 작업은 update_plan 으로 계획을 세우고 진행 상황을 갱신하세요.
+- 여러 파일 조인·복잡한 집계는 sql_query, 이전 자료와의 비교는 compare_tables, 보고서는 write_excel/make_chart 를 쓰세요.
+- 웹 페이지는 web_fetch 로 빠르게 읽고, 사내 API 는 http_request 로 호출하세요.
+- 다음에도 쓸 요령(사이트별 조회 방법, 사용자 선호 형식 등)은 remember 로 저장하고, 작업 전에 recall 로 확인하세요.
+
 스킬/대화 규칙:
 10. 요청이 아래 '등록된 스킬' 설명과 맞으면 먼저 use_skill 로 지침을 불러와 그 절차를 따르세요.
 11. 조건이 애매하거나 여러 선택지 중 골라야 하면 ask_user 로 확인하세요. 단, 꼭 필요할 때만 쓰세요.
@@ -113,6 +121,14 @@ class Agent:
             parts.append(
                 "파일 작업 폴더: " + str(ws.root) + "\n다운로드 감시 폴더: " + ", ".join(str(d) for d in ws.watch_dirs)
             )
+        mem = ws.root / "memory.json" if ws is not None else None
+        if mem is not None and mem.is_file():
+            try:
+                keys = list(json.loads(mem.read_text(encoding="utf-8")))
+            except ValueError:
+                keys = []
+            if keys:
+                parts.append(f"저장된 기억 {len(keys)}개 (recall 로 조회): " + ", ".join(keys[:30]))
         if self.skills is not None:
             catalog = self.skills.catalog_text()
             if catalog:
@@ -184,6 +200,8 @@ class Agent:
                     await r
             except Exception:  # noqa: BLE001
                 log.exception("on_event 콜백 오류")
+
+        ctx.meta["emit"] = emit  # update_plan 등 내장 tool 이 화면에 진행 상황을 보낼 수 있게
 
         def result(output: str, reason: str, it: int) -> AgentResult:
             files: dict[str, dict[str, Any]] = {}

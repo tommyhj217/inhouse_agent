@@ -20,6 +20,8 @@ from .config import AppConfig, ScheduleConfig
 from .downloader import DownloadConfig, Downloader
 from .dynamic_tools import DynamicToolManager, DynamicToolsConfig
 from .files import FileWorkspace
+from .links import LinkSigner
+from .toolkit import ToolkitConfig, make_toolkit
 from .interaction import AskFn
 from .llm import AzureChatModel, ChatModel
 from .mcp_hub import MCPHub
@@ -70,10 +72,14 @@ class AgentRuntime:
         self.downloader = Downloader(DownloadConfig.from_dict(cfg.downloads), self.workspace)
         dyn_cfg = DynamicToolsConfig.from_dict(cfg.dynamic_tools)
         self.dynamic = DynamicToolManager(dyn_cfg, cfg.resolve_path(dyn_cfg.dir), self.workspace)
+        self.toolkit_cfg = ToolkitConfig.from_raw(cfg.raw)
+        self.links = LinkSigner(self.workspace, self.toolkit_cfg.public_url, self.toolkit_cfg.link_expire_hours)
+        builtin_tools = make_builtin_tools(self.workspace, cfg.agent.timezone, self.skills, self.downloader, self.dynamic)
+        builtin_tools += make_toolkit(self.workspace, self.downloader, self.links, self.toolkit_cfg, cfg.agent.timezone)
         self.hub = MCPHub(
             cfg.mcp_servers,
             log_dir=cfg.log_path,
-            builtins=make_builtin_tools(self.workspace, cfg.agent.timezone, self.skills, self.downloader, self.dynamic),
+            builtins=builtin_tools,
             workspace=self.workspace,
             auto_detect=cfg.files.auto_detect,
         )
@@ -137,7 +143,7 @@ class AgentRuntime:
             path = self.save_result(job.name, prompt, result, started_at, job.output_format)
             log.info("예약작업 '%s' 종료 (%s, %.1fs) → %s", job.name, result.stopped_reason, result.elapsed, path)
             if job.webhook_url:
-                await asyncio.to_thread(_post_webhook, job.webhook_url, job.name, result, path)
+                await asyncio.to_thread(_post_webhook, job.webhook_url, job.name, result, path, self.file_links(result, path))
             return result, path
 
     async def run_skill(
@@ -161,6 +167,19 @@ class AgentRuntime:
             label = prompt or f"[스킬 실행] {name} 입력값={json.dumps(inputs or {}, ensure_ascii=False)}"
             path = self.save_result(f"skill_{name}", label, result)
         return result, path
+
+    def file_links(self, result: AgentResult, saved: Path | None = None) -> list[tuple[str, str]]:
+        """결과 파일들의 (이름, 다운로드 링크). public_url 이 없으면 빈 목록 (외부 공유 불가)."""
+        if not self.links.public_url:
+            return []
+        out = []
+        paths = [Path(f["path"]) for f in result.files if f.get("path")] + ([saved] if saved else [])
+        for p in dict.fromkeys(paths):
+            try:
+                out.append((p.name, self.links.url(p)))
+            except Exception:  # noqa: BLE001
+                continue
+        return out
 
     def save_result(
         self,
@@ -236,10 +255,12 @@ class AgentRuntime:
         return path
 
 
-def _post_webhook(url: str, name: str, result: AgentResult, path: Path) -> None:
+def _post_webhook(url: str, name: str, result: AgentResult, path: Path, links: list[tuple[str, str]] | None = None) -> None:
     """Teams/Slack 호환 단순 웹훅({"text": ...}) 전송."""
     status = "성공" if result.success else f"실패({result.stopped_reason})"
     text = f"[{name}] 예약작업 {status}\n저장: {path}\n\n{result.output[:3500]}"
+    if links:
+        text += "\n\n[파일 받기]\n" + "\n".join(f"- {n}: {u}" for n, u in links)
     req = urllib.request.Request(
         url,
         data=json.dumps({"text": text}, ensure_ascii=False).encode("utf-8"),

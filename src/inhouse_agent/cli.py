@@ -9,6 +9,7 @@
     inhouse-agent skills list|show|new|validate|run   # 스킬 관리/테스트
     inhouse-agent files list|status|analyze|query|wait  # 파일 점검 (LLM 없이)
     inhouse-agent fetch <URL> [--cookies]    # 다운로드 URL 받기
+    inhouse-agent link <경로>                # 파일 공유용 다운로드 링크
     inhouse-agent ctools list|show|test|delete  # 동적 도구 관리
     inhouse-agent scheduler                  # 예약작업 데몬
     inhouse-agent serve --port 8080          # 웹/API 서버 + 예약작업
@@ -121,9 +122,11 @@ async def cmd_run(cfg: AppConfig, args: argparse.Namespace) -> int:
         if not args.quiet:
             print()
         print(result.output)
+        path = None
         if args.save:
             path = rt.save_result(args.save, prompt, result)
             print(f"\n[저장] {path}", file=sys.stderr)
+        _print_links(rt, result, path)
     return 0 if result.success else 2
 
 
@@ -138,6 +141,15 @@ async def _cli_ask(question: str, options: list[str] | None, default: str | None
     if options and ans.isdigit() and 1 <= int(ans) <= len(options):
         ans = options[int(ans) - 1]
     return ans or (default or "")
+
+
+def _print_links(rt: AgentRuntime, result: Any, saved: Any = None) -> None:
+    """결과 파일 다운로드 링크 출력 (server.public_url 이 설정된 경우)."""
+    links = rt.file_links(result, saved)
+    if links:
+        print("\n[파일 받기]")
+        for name, url in links:
+            print(f"  {name}: {url}")
 
 
 def _parse_inputs(items: list[str] | None) -> dict[str, str]:
@@ -230,7 +242,9 @@ async def cmd_chat(cfg: AppConfig, args: argparse.Namespace) -> int:
                 print(f"오류: {e}")
                 continue
             last = (line, result)
-            print(f"\n에이전트> {result.output}\n")
+            print(f"\n에이전트> {result.output}")
+            _print_links(rt, result)
+            print()
     return 0
 
 
@@ -260,6 +274,7 @@ async def cmd_jobs(cfg: AppConfig, args: argparse.Namespace) -> int:
         print()
         print(result.output)
         print(f"\n[저장] {path}")
+        _print_links(rt, result, path)
     return 0 if result.success else 2
 
 
@@ -311,6 +326,7 @@ async def cmd_skills(cfg: AppConfig, args: argparse.Namespace) -> int:
         print()
         print(result.output)
         print(f"\n[저장] {path}")
+        _print_links(rt, result, path)
     return 0 if result.success else 2
 
 
@@ -387,6 +403,21 @@ async def cmd_ctools(cfg: AppConfig, args: argparse.Namespace) -> int:
             print(f"삭제(→ {dyn.root / '.trash'}): {args.name}")
             return 0
     return 1
+
+
+async def cmd_link(cfg: AppConfig, args: argparse.Namespace) -> int:
+    from .files import FileWorkspace
+    from .links import LinkSigner
+    from .toolkit import ToolkitConfig
+
+    tk = ToolkitConfig.from_raw(cfg.raw)
+    ws = FileWorkspace(cfg.workspace_path, watch_dirs=[cfg.resolve_path(d) for d in cfg.files.watch_dirs],
+                       extra_read_dirs=[cfg.output_path] + [cfg.resolve_path(d) for d in cfg.files.extra_read_dirs])
+    info = LinkSigner(ws, tk.public_url, tk.link_expire_hours).describe(args.path, args.hours)
+    print(info["url"])
+    if not info["absolute"]:
+        print("※ server.public_url 이 없어 상대 링크입니다 (예: http://agent-server:8080 을 설정하세요).", file=sys.stderr)
+    return 0
 
 
 async def cmd_fetch(cfg: AppConfig, args: argparse.Namespace) -> int:
@@ -529,6 +560,10 @@ def build_parser() -> argparse.ArgumentParser:
     x = cts.add_parser("delete")
     x.add_argument("name")
 
+    x = sub.add_parser("link", help="파일 공유용 다운로드 링크 만들기 (server.public_url 필요)")
+    x.add_argument("path")
+    x.add_argument("--hours", type=float, help="유효 시간")
+
     x = sub.add_parser("fetch", help="다운로드 URL 받기 + 상태 점검")
     x.add_argument("url")
     x.add_argument("--cookies", help="'A=1; B=2'")
@@ -551,7 +586,7 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigError, OSError) as e:
         print(f"설정 오류: {e}", file=sys.stderr)
         return 1
-    setup_logging(cfg, args.log_level, console=args.cmd not in ("chat", "skills", "ctools", "fetch"))
+    setup_logging(cfg, args.log_level, console=args.cmd not in ("chat", "skills", "ctools", "fetch", "link"))
 
     if args.cmd == "serve":
         return cmd_serve(cfg, args)
@@ -565,6 +600,7 @@ def main(argv: list[str] | None = None) -> int:
         "files": cmd_files,
         "ctools": cmd_ctools,
         "fetch": cmd_fetch,
+        "link": cmd_link,
         "scheduler": cmd_scheduler,
     }
     try:

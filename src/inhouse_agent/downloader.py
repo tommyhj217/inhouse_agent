@@ -198,6 +198,69 @@ class Downloader:
         return headers, cookies
 
     # ------------------------------------------------------------------
+    def request(
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        cookies: dict[str, str] | str | None = None,
+        json_body: Any = None,
+        form: dict[str, Any] | None = None,
+        body: str | None = None,
+        timeout: float | None = None,
+        max_bytes: int = 5 * 1024 * 1024,
+    ) -> dict[str, Any]:
+        """일반 HTTP 요청 (http_request / web_fetch / web_search 용). 응답 본문은 max_bytes 까지만 읽음.
+
+        반환: {status, reason, headers, body(bytes), truncated, final_url, elapsed}
+        HTTP 오류 응답(4xx/5xx)도 예외 없이 status 로 돌려줌.
+        """
+        import json as _json
+
+        if params:
+            sep = "&" if urllib.parse.urlparse(url).query else "?"
+            url = url + sep + urllib.parse.urlencode({k: v for k, v in params.items() if v is not None}, doseq=True)
+        u = self.check_url(url)
+        site_headers, site_cookies = self._site_rules((u.hostname or "").lower())
+        hdrs = {"User-Agent": self.cfg.user_agent, "Accept": "*/*", **site_headers, **(headers or {})}
+        ck = dict(site_cookies)
+        ck.update(parse_cookie_string(cookies) if isinstance(cookies, str) else (cookies or {}))
+        if ck:
+            hdrs["Cookie"] = "; ".join(f"{k}={v}" for k, v in ck.items())
+        data: bytes | None = None
+        if json_body is not None:
+            data = _json.dumps(json_body, ensure_ascii=False).encode()
+            hdrs.setdefault("Content-Type", "application/json; charset=utf-8")
+        elif form is not None:
+            data = urllib.parse.urlencode(form, doseq=True).encode()
+            hdrs.setdefault("Content-Type", "application/x-www-form-urlencoded")
+        elif body is not None:
+            data = str(body).encode()
+        opener = urllib.request.build_opener(
+            urllib.request.HTTPSHandler(context=self._ssl_context()), urllib.request.HTTPCookieProcessor()
+        )
+        req = urllib.request.Request(url, data=data, headers=hdrs, method=method.upper())
+        t0 = time.monotonic()
+        try:
+            resp = opener.open(req, timeout=timeout or self.cfg.timeout)
+        except urllib.error.HTTPError as e:
+            resp = e  # 오류 응답도 본문을 읽어서 돌려줌
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            raise DownloadError(f"연결 실패: {getattr(e, 'reason', e)}") from e
+        with resp:
+            raw = resp.read(max_bytes + 1)
+            return {
+                "status": getattr(resp, "status", None) or resp.getcode(),
+                "reason": getattr(resp, "reason", ""),
+                "headers": {k: v for k, v in resp.headers.items()},
+                "body": raw[:max_bytes],
+                "truncated": len(raw) > max_bytes,
+                "final_url": resp.geturl(),
+                "elapsed": round(time.monotonic() - t0, 2),
+            }
+
     def download(
         self,
         url: str,
