@@ -579,18 +579,19 @@ def make_toolkit(ws: FileWorkspace, downloader: Any, signer: Any, cfg: ToolkitCo
     )
 
     # ======================= 기억 / 계획 =======================
-    mem_path = ws.root / "memory.json"
+    def mem_path() -> Path:  # 호출 시점의 사용자 작업폴더 기준
+        return Path(ws.root) / "memory.json"
 
     def mem_load() -> dict[str, Any]:
         try:
-            return json.loads(mem_path.read_text(encoding="utf-8"))
+            return json.loads(mem_path().read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
 
     def mem_save(d: dict[str, Any]) -> None:
-        tmp = mem_path.with_suffix(".tmp")
+        tmp = mem_path().with_suffix(".tmp")
         tmp.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
-        tmp.replace(mem_path)
+        tmp.replace(mem_path())
 
     async def remember(args: dict[str, Any]) -> str:
         d = mem_load()
@@ -653,6 +654,81 @@ def make_toolkit(ws: FileWorkspace, downloader: Any, signer: Any, cfg: ToolkitCo
             update_plan,
         )
     )
+
+    # ======================= 이미지 / 이전 작업 =======================
+    async def view_image(args: dict[str, Any]) -> str:
+        from .images import ImageError, image_part, is_image
+
+        p = ws.resolve(args["path"])
+        if not p.is_file() or not is_image(p):
+            return f"오류: 이미지 파일이 아닙니다: {p}"
+        try:
+            await asyncio.to_thread(image_part, p)  # 열 수 있는지 미리 확인
+        except ImageError as e:
+            return f"오류: {e}"
+        ctx = current_run.get()
+        if ctx is None:
+            return "오류: 실행 중이 아니라 이미지를 첨부할 수 없습니다."
+        ctx.meta.setdefault("pending_images", []).append(str(p))
+        return f"이미지를 다음 메시지로 첨부합니다: {p.name} - 바로 이어서 내용을 확인할 수 있습니다."
+
+    tools.append(
+        BuiltinTool(
+            "view_image",
+            "저장된 이미지 파일(MCP 화면 캡처, 다운로드 이미지, 이전 대화 첨부)을 직접 봅니다. 호출하면 다음 단계에서 이미지가 보입니다.",
+            _obj({"path": {"type": "string"}}, ["path"]),
+            view_image,
+        )
+    )
+
+    async def list_past_work(args: dict[str, Any]) -> str:
+        from .users import SessionStore
+
+        q = str(args.get("query") or "").lower()
+        items = SessionStore(ws).list(200)
+        if q:
+            items = [i for i in items if q in i["title"].lower() or q in i["last_output"].lower() or any(q in f.lower() for f in i["files"])]
+        if not items:
+            return "이전 작업이 없습니다." if not q else f"'{q}' 관련 이전 작업이 없습니다."
+        rows = []
+        for i in items[: int(args.get("limit") or 20)]:
+            when = datetime.fromtimestamp(i["updated"] or 0).strftime("%Y-%m-%d %H:%M")
+            rows.append(f"- [{i['id']}] {when} {i['title']} (대화 {i['turns']}회)" + (f"\n  파일: {', '.join(i['files'][-5:])}" if i["files"] else ""))
+        return "\n".join(rows)
+
+    async def read_past_work(args: dict[str, Any]) -> str:
+        from .users import SessionStore, UserError
+
+        try:
+            d = SessionStore(ws).load(str(args["session_id"]))
+        except UserError as e:
+            return f"오류: {e}"
+        out = [f"# {d.get('title')} [{d.get('id')}]" + (f" (스킬: {d['skill']} {json.dumps(d.get('inputs') or {}, ensure_ascii=False)})" if d.get("skill") else "")]
+        for i, t in enumerate(d.get("turns", [])[-int(args.get("last_turns") or 5):], 1):
+            out.append(f"\n## 요청 {i}: {t.get('prompt')}")
+            if t.get("images"):
+                out.append("첨부 이미지: " + ", ".join(t["images"]))
+            if t.get("tools"):
+                out.append("사용 tool: " + ", ".join(t["tools"]))
+            if t.get("files"):
+                out.append("파일: " + ", ".join(t["files"]))
+            out.append("결과:\n" + str(t.get("output", ""))[:4000])
+        return "\n".join(out)
+
+    tools += [
+        BuiltinTool(
+            "list_past_work",
+            "이 사용자가 예전에 했던 작업(대화) 목록을 찾습니다 (제목/결과/파일명 검색).",
+            _obj({"query": {"type": "string"}, "limit": {"type": "integer"}}),
+            list_past_work,
+        ),
+        BuiltinTool(
+            "read_past_work",
+            "이전 작업의 요청·결과·만든 파일을 읽습니다. '지난번 그 보고서 이어서' 같은 요청에 사용.",
+            _obj({"session_id": {"type": "string"}, "last_turns": {"type": "integer"}}, ["session_id"]),
+            read_past_work,
+        ),
+    ]
 
     # ======================= 알림 =======================
     ncfg = cfg.notify

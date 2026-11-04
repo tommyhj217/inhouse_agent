@@ -41,7 +41,27 @@ main{padding:16px;max-width:1400px;margin:0 auto}
 pre,code{font-family:ui-monospace,Consolas,"D2Coding",monospace;font-size:12.5px}
 pre{background:var(--code);padding:8px 10px;border-radius:8px;overflow:auto;max-height:360px;white-space:pre-wrap;word-break:break-word;margin:6px 0}
 /* 대화 */
-.chat{display:flex;flex-direction:column;height:calc(100vh - 110px);min-height:420px}
+.chatwrap{display:grid;grid-template-columns:250px minmax(0,1fr);gap:12px;height:calc(100vh - 110px);min-height:420px}
+.chatwrap>.side{display:flex;flex-direction:column;min-height:0}
+.chatwrap>.side .list{flex:1;overflow:auto}
+.sess .t{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sess .m{font-size:11px;color:var(--muted)}
+.sess .acts{display:none;gap:2px}
+.sess:hover .acts,.sess.active .acts{display:inline-flex}
+.chat{display:flex;flex-direction:column;height:100%;min-height:0}
+.thumbs{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.thumb{position:relative;width:72px;height:72px;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--code)}
+.thumb img{width:100%;height:100%;object-fit:cover;display:block;cursor:zoom-in}
+.thumb .x{position:absolute;top:2px;right:2px;border:0;border-radius:50%;width:20px;height:20px;padding:0;line-height:18px;background:rgba(0,0,0,.6);color:#fff;font-size:12px}
+.thumb.up{opacity:.5}
+.msg-user .thumbs{justify-content:flex-end}
+.drop{outline:2px dashed var(--accent);outline-offset:-6px}
+.userchip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:3px 10px;font-size:13px;cursor:pointer;background:var(--panel)}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:60;padding:16px}
+.modal .card{max-width:380px;width:100%}
+.lightbox{position:fixed;inset:0;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;z-index:70;cursor:zoom-out}
+.lightbox img{max-width:95vw;max-height:92vh}
+.chat{display:flex;flex-direction:column;height:100%;min-height:0}
 .log{flex:1;overflow:auto;display:flex;flex-direction:column;gap:10px;padding:4px 2px 12px}
 .msg-user{align-self:flex-end;background:var(--soft);border-radius:12px;padding:8px 12px;max-width:80%;white-space:pre-wrap}
 .answer{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 14px;overflow:auto}
@@ -93,6 +113,11 @@ table.grid tbody tr{cursor:pointer}
 .ask pre{max-height:280px}
 .status-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}
 .hidden{display:none!important}
+@media (max-width:800px){
+  .chatwrap{grid-template-columns:1fr;height:auto}
+  .chatwrap>.side{max-height:180px}
+  .chat{height:calc(100vh - 300px);min-height:420px}
+}
 @media (max-width:1000px){
   .tools{grid-template-columns:1fr;height:auto}
   .tools>.card{min-height:auto}
@@ -115,6 +140,7 @@ table.grid tbody tr{cursor:pointer}
     <button data-tab="status">상태</button>
   </nav>
   <div class="right">
+    <span id="userchip" class="userchip" title="사용자 바꾸기">👤 <span id="userlabel">사용자 ID 입력</span></span>
     <input id="token" type="password" placeholder="API 토큰" style="width:130px" title="AGENT_API_TOKEN 을 설정한 경우 입력">
     <button id="theme" title="밝게/어둡게">◐</button>
   </div>
@@ -123,25 +149,34 @@ table.grid tbody tr{cursor:pointer}
 <main>
 <!-- ===================== 조사 ===================== -->
 <section id="tab-chat" class="tab active">
+ <div class="chatwrap">
+  <div class="card side">
+    <div class="row"><b class="grow">내 작업</b><button id="sess-new" title="새 대화">＋ 새 대화</button></div>
+    <input id="sess-q" placeholder="작업 검색" style="margin-top:6px">
+    <div id="sess-list" class="list"></div>
+  </div>
   <div class="chat">
     <div class="row small muted" style="margin-bottom:6px">
       <span id="chat-session">새 대화</span>
       <span class="grow"></span>
       <label class="row small">사용할 서버 <select id="chat-servers"><option value="">전체</option></select></label>
-      <button id="chat-new">새 대화</button>
     </div>
     <div id="chat-log" class="log">
       <div class="muted small">예) "그룹웨어에서 어제 공지 엑셀을 내려받아 부서별 건수를 집계해줘"<br>
       실행 중에는 tool 호출과 다운로드한 파일의 상태가 실시간으로 표시됩니다. 에이전트가 확인을 요청하면 여기서 답할 수 있습니다.</div>
     </div>
+    <div id="chat-thumbs" class="thumbs"></div>
     <div class="composer">
-      <textarea id="chat-input" placeholder="요청을 입력하세요 (Enter 전송, Shift+Enter 줄바꿈)"></textarea>
+      <button id="chat-img" title="이미지 첨부 (붙여넣기 Ctrl+V / 끌어놓기도 됩니다)">🖼</button>
+      <input id="chat-img-file" type="file" accept="image/*" multiple class="hidden">
+      <textarea id="chat-input" placeholder="요청을 입력하세요 (Enter 전송, Shift+Enter 줄바꿈 · 이미지는 붙여넣기/끌어놓기)"></textarea>
       <div style="display:grid;gap:6px">
         <button id="chat-send" class="primary">전송</button>
         <button id="chat-cancel" class="danger hidden">중단</button>
       </div>
     </div>
   </div>
+ </div>
 </section>
 
 <!-- ===================== 스킬 ===================== -->
@@ -286,9 +321,11 @@ $("#theme").onclick = () => {
   document.documentElement.dataset.theme = next; store.set("agent_theme", next);
 };
 
+let currentUser = store.get("agent_user", "");
 async function api(path, opts={}) {
   const headers = Object.assign({}, opts.headers || {});
   if (tokenEl.value) headers["Authorization"] = "Bearer " + tokenEl.value;
+  if (currentUser) headers["X-Agent-User"] = encodeURIComponent(currentUser);
   if (opts.json !== undefined) { headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(opts.json); }
   const r = await fetch(path, {method: opts.method || (opts.body ? "POST" : "GET"), headers, body: opts.body});
   const ct = r.headers.get("content-type") || "";
@@ -296,7 +333,11 @@ async function api(path, opts={}) {
   if (!r.ok) throw new Error((data && data.detail) || r.status);
   return data;
 }
-const withToken = url => tokenEl.value ? url + (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(tokenEl.value) : url;
+const withToken = url => {  // EventSource / 링크는 헤더를 못 붙이므로 쿼리로
+  const q = []; if (tokenEl.value) q.push("token=" + encodeURIComponent(tokenEl.value)); if (currentUser) q.push("user=" + encodeURIComponent(currentUser));
+  return q.length ? url + (url.includes("?") ? "&" : "?") + q.join("&") : url;
+};
+const fileUrl = (path, inline) => withToken("/api/files/download?path=" + encodeURIComponent(path) + (inline ? "&inline=true" : ""));
 
 // 아주 단순한 마크다운 렌더러 (표/제목/목록/굵게/코드)
 function md(src) {
@@ -491,23 +532,130 @@ async function loadServerOptions() {
   } catch {}
 }
 async function sendChat(text) {
-  text = (text ?? chatInput.value).trim(); if (!text || chatRun) return;
+  text = (text ?? chatInput.value).trim();
+  if (pendingImages.some(p => !p.path)) { toast("이미지 올리는 중입니다…"); return; }
+  const imgs = pendingImages.map(p => p.path);
+  if ((!text && !imgs.length) || chatRun) return;
+  if (!text) text = "첨부한 이미지를 확인해줘";
   chatInput.value = "";
-  chatLog.insertAdjacentHTML("beforeend", `<div class="msg-user">${esc(text)}</div>`);
+  chatLog.insertAdjacentHTML("beforeend", `<div class="msg-user">${esc(text)}${thumbsHtml(imgs)}</div>`);
+  pendingImages = []; renderPending();
   const srv = $("#chat-servers").value;
   const servers = srv ? [srv] : [];
   $("#chat-send").disabled = true; $("#chat-cancel").classList.remove("hidden");
-  const view = new RunView(chatLog, {onDone: () => { chatRun = null; $("#chat-send").disabled = false; $("#chat-cancel").classList.add("hidden"); }});
+  const view = new RunView(chatLog, {onDone: () => { chatRun = null; $("#chat-send").disabled = false; $("#chat-cancel").classList.add("hidden"); loadSessions(); }});
   chatRun = view;
   try {
-    const run = await view.start({prompt: text, session_id: chatSession, servers: servers.length ? servers : null});
+    const run = await view.start({prompt: text, session_id: chatSession, servers: servers.length ? servers : null, images: imgs});
     chatSession = run.session_id; $("#chat-session").textContent = "대화 " + chatSession.slice(0, 8);
   } catch (e) { chatLog.insertAdjacentHTML("beforeend", `<div class="b-err">오류: ${esc(e.message)}</div>`); chatRun = null; $("#chat-send").disabled = false; $("#chat-cancel").classList.add("hidden"); }
 }
 $("#chat-send").onclick = () => sendChat();
 $("#chat-cancel").onclick = () => chatRun && chatRun.cancel();
 chatInput.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendChat(); } });
-$("#chat-new").onclick = () => { chatSession = null; chatLog.innerHTML = ""; $("#chat-session").textContent = "새 대화"; };
+function newChat() { chatSession = null; chatLog.innerHTML = ""; $("#chat-session").textContent = "새 대화"; document.querySelectorAll("#sess-list .item").forEach(x => x.classList.remove("active")); }
+$("#sess-new").onclick = newChat;
+
+// ---- 이미지 첨부 (선택 / 붙여넣기 / 끌어놓기)
+let pendingImages = [];  // {url(미리보기), path(업로드 후), name}
+function thumbsHtml(paths) {
+  if (!paths || !paths.length) return "";
+  return `<div class="thumbs">${paths.map(p => `<div class="thumb"><img src="${esc(fileUrl(p, true))}" data-full="${esc(fileUrl(p, true))}" alt="${esc(p.split(/[\\/]/).pop())}" title="${esc(p)}"></div>`).join("")}</div>`;
+}
+function renderPending() {
+  $("#chat-thumbs").innerHTML = pendingImages.map((p, i) => `<div class="thumb ${p.path ? "" : "up"}" title="${esc(p.name)}"><img src="${p.url}" data-full="${p.url}"><button class="x" data-i="${i}" title="빼기">×</button></div>`).join("");
+  $("#chat-thumbs").querySelectorAll(".x").forEach(b => b.onclick = e => { e.stopPropagation(); const [p] = pendingImages.splice(+b.dataset.i, 1); URL.revokeObjectURL(p.url); renderPending(); });
+}
+async function addImages(files) {
+  for (const f of files) {
+    if (!f.type.startsWith("image/")) { toast("이미지 파일만 첨부할 수 있습니다: " + f.name); continue; }
+    if (pendingImages.length >= 10) { toast("이미지는 한 번에 10장까지"); break; }
+    const item = {url: URL.createObjectURL(f), path: null, name: f.name || "붙여넣은 이미지.png"};
+    pendingImages.push(item); renderPending();
+    try {
+      const r = await api("/api/images/upload?name=" + encodeURIComponent(item.name), {method: "POST", body: f});
+      item.path = r.path;
+    } catch (e) { pendingImages = pendingImages.filter(x => x !== item); toast("이미지 업로드 실패: " + e.message); }
+    renderPending();
+  }
+}
+$("#chat-img").onclick = () => $("#chat-img-file").click();
+$("#chat-img-file").onchange = e => { addImages([...e.target.files]); e.target.value = ""; };
+chatInput.addEventListener("paste", e => {
+  const files = [...(e.clipboardData?.items || [])].filter(i => i.kind === "file" && i.type.startsWith("image/")).map(i => {
+    const f = i.getAsFile(); return new File([f], f.name && f.name !== "image.png" ? f.name : `붙여넣기_${Date.now()}.png`, {type: f.type});
+  });
+  if (files.length) { e.preventDefault(); addImages(files); }
+});
+const chatBox = $("#tab-chat .chat");
+["dragenter", "dragover"].forEach(t => chatBox.addEventListener(t, e => { if ([...e.dataTransfer.types].includes("Files")) { e.preventDefault(); chatBox.classList.add("drop"); } }));
+["dragleave", "drop"].forEach(t => chatBox.addEventListener(t, e => { if (t === "dragleave" && chatBox.contains(e.relatedTarget)) return; chatBox.classList.remove("drop"); }));
+chatBox.addEventListener("drop", e => { e.preventDefault(); addImages([...e.dataTransfer.files]); });
+document.addEventListener("click", e => {
+  const img = e.target.closest(".thumb img"); if (!img) return;
+  const lb = document.createElement("div"); lb.className = "lightbox"; lb.innerHTML = `<img src="${img.dataset.full}">`; lb.onclick = () => lb.remove(); document.body.appendChild(lb);
+});
+
+// ---- 내 작업 (저장된 대화) : 클릭하면 불러와서 이어서
+async function loadSessions() {
+  if (!currentUser) { $("#sess-list").innerHTML = `<div class="small muted">사용자 ID 를 입력하면 작업이 저장되고 다음에 이어서 할 수 있습니다.</div>`; }
+  try {
+    const items = await api("/api/sessions" + ($("#sess-q").value ? "?q=" + encodeURIComponent($("#sess-q").value) : ""));
+    if (!currentUser && !items.length) return;
+    $("#sess-list").innerHTML = items.map(x => `<div class="item sess ${x.id === chatSession ? "active" : ""}" data-id="${esc(x.id)}">
+        <div class="row" style="gap:4px;flex-wrap:nowrap"><div class="t grow" title="${esc(x.title)}">${x.skill ? "🧩 " : ""}${esc(x.title)}</div>
+        <span class="acts"><button class="fact sren" title="이름 바꾸기">✏️</button><button class="fact sdel" title="삭제">🗑</button></span></div>
+        <div class="m">${new Date((x.updated || 0) * 1000).toLocaleString()} · ${x.turns}회${x.files.length ? " · 파일 " + x.files.length : ""}</div></div>`).join("")
+      || `<div class="small muted">저장된 작업이 없습니다.</div>`;
+    document.querySelectorAll("#sess-list .sess").forEach(el => {
+      el.onclick = e => { if (!e.target.closest(".acts")) openSession(el.dataset.id); };
+      el.querySelector(".sren").onclick = async () => { const t = prompt("작업 이름", el.querySelector(".t").textContent.replace(/^🧩 /, "")); if (t) { await api(`/api/sessions/${el.dataset.id}`, {method: "PATCH", json: {title: t}}); loadSessions(); } };
+      el.querySelector(".sdel").onclick = async () => { if (confirm("이 작업 기록을 삭제할까요?")) { await api(`/api/sessions/${el.dataset.id}`, {method: "DELETE"}); if (chatSession === el.dataset.id) newChat(); loadSessions(); } };
+    });
+  } catch (e) { $("#sess-list").innerHTML = `<div class="small b-err">${esc(e.message)}</div>`; }
+}
+let sqTimer; $("#sess-q").addEventListener("input", () => { clearTimeout(sqTimer); sqTimer = setTimeout(loadSessions, 300); });
+async function openSession(id) {
+  if (chatRun) { toast("실행 중에는 다른 작업을 열 수 없습니다"); return; }
+  let d; try { d = await api(`/api/sessions/${id}`); } catch (e) { toast(e.message); return; }
+  chatSession = id; chatLog.innerHTML = "";
+  $("#chat-session").textContent = `${d.title} · 이어서 진행합니다`;
+  chatLog.insertAdjacentHTML("beforeend", `<div class="small muted">📂 ${new Date(d.created * 1000).toLocaleString()} 에 시작한 작업${d.skill ? ` (스킬 ${esc(d.skill)})` : ""} - 아래에 이어서 요청하면 이전 대화와 파일을 기억한 채로 계속합니다.</div>`);
+  for (const t of d.turns || []) {
+    chatLog.insertAdjacentHTML("beforeend", `<div class="msg-user">${esc(t.prompt)}${thumbsHtml(t.images)}</div>`);
+    const box = document.createElement("div"); box.style.display = "grid"; box.style.gap = "6px";
+    box.innerHTML = (t.tools && t.tools.length ? `<div class="small muted">🔧 ${esc(t.tools.join(", "))}</div>` : "")
+      + `<div class="answer">${md(t.output)}</div>`
+      + (t.files && t.files.length ? `<div class="small muted">파일: ${t.files.map(f => `<span class="filechip" data-path="${esc(f)}">📄 ${esc(f.split(/[\\/]/).pop())} <a href="${esc(fileUrl(f))}" download>⬇</a></span>`).join("")}</div>` : "");
+    chatLog.appendChild(box); linkifyPaths(box.querySelector(".answer"));
+  }
+  chatLog.scrollTop = chatLog.scrollHeight;
+  document.querySelectorAll("#sess-list .sess").forEach(x => x.classList.toggle("active", x.dataset.id === id));
+  chatInput.focus();
+}
+
+// ---- 사용자 ID
+function setUser(uid) {
+  currentUser = (uid || "").trim(); store.set("agent_user", currentUser);
+  $("#userlabel").textContent = currentUser || "사용자 ID 입력";
+  newChat(); loadSessions(); if (typeof loadFiles === "function" && document.querySelector("#tab-files.active")) loadFiles();
+}
+function askUser(force) {
+  const m = document.createElement("div"); m.className = "modal";
+  m.innerHTML = `<div class="card"><b>사용자 ID</b><div class="small muted" style="margin:6px 0">사번이나 사내 ID 를 입력하세요. 사용자별 작업폴더가 만들어지고, 했던 작업을 다음에 이어서 할 수 있습니다.</div>
+    <div class="row"><input id="uid-in" class="grow" value="${esc(currentUser)}" placeholder="예) kim.hj 또는 20231234"><button id="uid-ok" class="primary">확인</button></div>
+    <div id="uid-err" class="small b-err"></div>${force ? "" : '<div class="small" style="margin-top:6px"><a href="#" id="uid-none">사용자 없이 쓰기 (공용 폴더)</a></div>'}</div>`;
+  document.body.appendChild(m);
+  const inp = m.querySelector("#uid-in"); inp.focus(); inp.select();
+  const ok = async () => {
+    const v = inp.value.trim(); if (!v) { m.querySelector("#uid-err").textContent = "ID 를 입력하세요"; return; }
+    const prev = currentUser; currentUser = v;
+    try { await api("/api/me"); m.remove(); setUser(v); } catch (e) { currentUser = prev; m.querySelector("#uid-err").textContent = e.message; }
+  };
+  m.querySelector("#uid-ok").onclick = ok; inp.onkeydown = e => { if (e.key === "Enter") ok(); };
+  const none = m.querySelector("#uid-none"); if (none) none.onclick = e => { e.preventDefault(); m.remove(); setUser(""); };
+}
+$("#userchip").onclick = () => askUser(false);
 
 // ---------------- 스킬 ----------------
 let skCurrent = null, skSaved = "", skParsed = null, skSession = null, skRun = null, skFiles = [];
@@ -789,6 +937,15 @@ async function loadStatus() {
 $("#st-refresh").onclick = loadStatus;
 
 // 시작
+(async () => {
+  $("#userlabel").textContent = currentUser || "사용자 ID 입력";
+  try {
+    const info = await api("/api/info");
+    if (!info.users.enabled) $("#userchip").classList.add("hidden");
+    else if (!currentUser && info.users.require) askUser(true);
+  } catch (e) { if (String(e.message).includes("사용자 ID")) askUser(true); }
+  loadSessions();
+})();
 loadServerOptions();
 showTab(store.get("agent_tab", "chat"));
 window.addEventListener("beforeunload", e => { if ((skCurrent && editor.value !== skSaved) || (tCurrent && tSaved && tFields() !== tSaved)) { e.preventDefault(); e.returnValue = ""; } });

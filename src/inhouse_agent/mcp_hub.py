@@ -581,6 +581,21 @@ class MCPHub:
             text += "\n\n[원격 MCP 파일 처리]\n" + "\n".join(notes)
         return text, fetched
 
+    async def _claim(self, st: dict[str, Any]) -> dict[str, Any]:
+        """사용자 실행이면, 공용 다운로드 폴더에 완성된 파일을 그 사용자의 downloads 로 옮김."""
+        claim = getattr(self.workspace, "claim", None)
+        if claim is None or st.get("state") not in ("complete", "suspicious", "corrupt", "empty"):
+            return st
+        from .files import file_status
+
+        old = Path(st["path"])
+        new = await asyncio.to_thread(claim, old)
+        if Path(new) == old:
+            return st
+        st2 = await file_status(Path(new), self.workspace, stable_wait=0)
+        st2.setdefault("issues", []).append(f"공용 다운로드 폴더에서 사용자 폴더로 옮김 (원래: {old})")
+        return st2
+
     @staticmethod
     def _download_links(text: str) -> list[str]:
         from .downloader import find_urls
@@ -648,6 +663,7 @@ class MCPHub:
             st for st in statuses
             if not (Path(st["path"]).suffix.lower() in (".crdownload", ".part", ".tmp") and Path(st["path"]).stem in names)
         ]
+        statuses = [await self._claim(st) for st in statuses]
         lines = ["", "[파일 감지 - 에이전트 자동 점검]"] + [format_status(st) for st in statuses]
         if any(st["state"] == "downloading" for st in statuses):
             lines.append("※ 아직 다운로드 중인 파일이 있습니다. wait_for_download 로 완료를 확인한 뒤 분석하세요.")

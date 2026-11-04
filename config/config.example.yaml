@@ -23,6 +23,7 @@ llm:
   reasoning_effort:                               # low | medium | high (추론 모델만, 비우면 전송 안 함)
   timeout: 180
   max_retries: 3
+  vision: true                                    # 배포 모델이 이미지 입력을 지원하는지 (채팅 이미지 첨부). 미지원이면 false
   extra_headers:
     # Ocp-Apim-Subscription-Key: ${APIM_SUBSCRIPTION_KEY:-}
 
@@ -52,6 +53,18 @@ files:
   max_file_mb: 200
   auto_detect: true            # MCP tool 호출 전후 다운로드 폴더를 비교해 새 파일 자동 점검
   wait_timeout: 300            # wait_for_download 기본 대기 시간(초)
+
+# ---------------------------------------------------------------------
+# 사용자별 작업폴더 (workspace/users/<ID>/ : downloads, uploads, files, results, sessions, memory.json)
+#   웹 화면 오른쪽 위에서 ID 입력, CLI 는 -u <ID>. 대화는 sessions/ 에 저장되어 '내 작업' 에서 이어서 진행.
+#   ※ ID 는 인증이 아닙니다(사내 식별용). 접근 통제가 필요하면 AGENT_API_TOKEN 과 함께 쓰세요.
+# ---------------------------------------------------------------------
+users:
+  enabled: true
+  require: false                # true 면 ID 없이는 API 사용 불가 (화면에서 ID 를 먼저 물어봄)
+  allowed: []                   # 허용 ID 패턴 (비우면 모두). 예: ["2023*", "*.hj"]
+  claim_downloads: move         # 공용 다운로드 폴더(MCP 저장 위치)에 생긴 파일을 요청한 사용자 폴더로: move | copy | none
+  recent_sessions_in_prompt: 5  # 시스템 프롬프트에 넣을 '최근 작업' 개수
 
 # ---------------------------------------------------------------------
 # 웹 서버 / 파일 링크
@@ -208,6 +221,7 @@ schedules:
     description: "매월 1일 지난달 매출 보고서 (스킬 사용)"
     cron: "10 9 1 * *"
     skill: monthly_sales_report      # 스킬로 실행 (prompt 생략 가능)
+    # user: kim.hj                   # 이 사용자의 작업폴더에서 실행 (결과: workspace/users/kim.hj/results/)
     inputs:
       month: "{last_month}"
       dept: 전체

@@ -25,6 +25,7 @@ from .config import AppConfig
 from .runtime import AgentRuntime
 from .scheduler import AgentScheduler
 from .skills import SkillError
+from .users import UserError, current_user
 
 try:
     from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
@@ -51,6 +52,11 @@ class RunRequest(BaseModel):
     skill: str | None = None
     inputs: dict[str, Any] | None = None
     new_session: bool = False
+    images: list[str] | None = None  # /api/images/upload 로 올린 이미지 경로
+
+
+class SessionPatch(BaseModel):
+    title: str
 
 
 class AnswerRequest(BaseModel):
@@ -102,6 +108,7 @@ class Session:
     skill: str | None = None
     inputs: dict[str, Any] | None = None
     servers: list[str] | None = None
+    user: str | None = None
 
 
 @dataclass
@@ -118,6 +125,7 @@ class Run:
     question: dict[str, Any] | None = None
     answer_future: asyncio.Future[str] | None = None
     saved_to: str | None = None
+    user: str | None = None
     cond: asyncio.Condition = field(default_factory=asyncio.Condition)
 
     async def push(self, kind: str, data: dict[str, Any]) -> None:
@@ -143,23 +151,51 @@ class Run:
 class RunManager:
     def __init__(self, rt: AgentRuntime):
         self.rt = rt
-        self.sessions: dict[str, Session] = {}
+        self.sessions: dict[tuple[str | None, str], Session] = {}  # (사용자, 세션ID)
         self.runs: dict[str, Run] = {}
 
     def _gc(self) -> None:
         now = time.time()
-        for sid in [k for k, s in self.sessions.items() if now - s.touched > SESSION_TTL and not s.lock.locked()]:
-            self.sessions.pop(sid, None)
+        for key in [k for k, s in self.sessions.items() if now - s.touched > SESSION_TTL and not s.lock.locked()]:
+            self.sessions.pop(key, None)  # 디스크에 저장돼 있으므로 다음에 다시 불러옴
         done = sorted((r for r in self.runs.values() if r.finished), key=lambda r: r.finished or 0)
         for r in done[:-200]:
             self.runs.pop(r.id, None)
 
     def session(self, sid: str | None) -> Session:
-        sid = sid or uuid.uuid4().hex
-        return self.sessions.setdefault(sid, Session(sid))
+        """현재 사용자의 세션. 메모리에 없으면 저장된 세션을 불러와 이어서 진행."""
+        user = current_user.get()
+        store = self.rt.sessions()
+        sid = sid or store.new_id()
+        key = (user, sid)
+        sess = self.sessions.get(key)
+        if sess is None:
+            sess = Session(sid, user=user)
+            if store.exists(sid):
+                d = store.load(sid)
+                sess.messages = d.get("messages") or []
+                sess.skill, sess.inputs, sess.servers = d.get("skill"), d.get("inputs"), d.get("servers")
+            self.sessions[key] = sess
+        return sess
+
+    def get_run(self, run_id: str) -> Run | None:
+        run = self.runs.get(run_id)
+        return run if run is not None and run.user == current_user.get() else None  # 다른 사용자 실행은 안 보임
+
+    def _check_images(self, paths: list[str] | None) -> list[str]:
+        from .images import is_image
+
+        out = []
+        for p in paths or []:
+            rp = self.rt.workspace.resolve(p)
+            if not rp.is_file() or not is_image(rp):
+                raise SkillError(f"이미지 파일이 아닙니다: {p}")
+            out.append(str(rp))
+        return out[:10]
 
     async def start(self, req: RunRequest) -> Run:
         self._gc()
+        images = self._check_images(req.images)
         sess = self.session(None if req.new_session else req.session_id)
         if req.skill:
             self.rt.skills.get(req.skill)  # 존재/형식 확인 (오류는 400)
@@ -173,12 +209,12 @@ class RunManager:
             sess.servers = req.servers
         kind = "skill" if sess.skill else "chat"
         title = (req.prompt or f"[스킬] {sess.skill}")[:80]
-        run = Run(uuid.uuid4().hex[:12], sess.id, kind, title)
+        run = Run(uuid.uuid4().hex[:12], sess.id, kind, title, user=sess.user)
         self.runs[run.id] = run
-        run.task = asyncio.create_task(self._execute(run, sess, req.prompt))
+        run.task = asyncio.create_task(self._execute(run, sess, req.prompt, images))
         return run
 
-    async def _execute(self, run: Run, sess: Session, prompt: str) -> None:
+    async def _execute(self, run: Run, sess: Session, prompt: str, images: list[str] | None = None) -> None:
         async def on_event(kind: str, data: dict[str, Any]) -> None:
             await run.push(kind, data)
 
@@ -199,14 +235,16 @@ class RunManager:
                 run.status = "running"
             return answer
 
-        await run.push("start", {"kind": run.kind, "prompt": prompt, "skill": sess.skill, "inputs": sess.inputs, "session_id": sess.id})
+        await run.push("start", {"kind": run.kind, "prompt": prompt, "skill": sess.skill, "inputs": sess.inputs,
+                                 "session_id": sess.id, "images": images or [], "user": sess.user})
+        result = None
         try:
             async with sess.lock:
                 sess.touched = time.time()
                 if sess.skill:
                     result, path = await self.rt.run_skill(
                         sess.skill, sess.inputs, prompt, on_event=on_event, ask=ask,
-                        messages=sess.messages if sess.messages else None, save=True,
+                        messages=sess.messages if sess.messages else None, save=True, images=images,
                     )
                     if not sess.messages:
                         sess.messages = result.messages
@@ -214,7 +252,9 @@ class RunManager:
                 else:
                     if not sess.messages:
                         sess.messages = self.rt.agent.new_conversation(sess.servers)
-                    result = await self.rt.agent.run(prompt, messages=sess.messages, servers=sess.servers, on_event=on_event, ask=ask)
+                    result = await self.rt.agent.run(
+                        prompt, messages=sess.messages, servers=sess.servers, on_event=on_event, ask=ask, images=images
+                    )
             run.status = result.stopped_reason
             await run.push(
                 "done",
@@ -239,6 +279,32 @@ class RunManager:
             await run.push("done", {"status": "error", "output": f"오류: {type(e).__name__}: {e}"})
         finally:
             run.finished = time.time()
+            self._persist(run, sess, prompt, images, result)
+
+    def _persist(self, run: Run, sess: Session, prompt: str, images: list[str] | None, result: Any) -> None:
+        """대화를 사용자 작업폴더에 저장 → 나중에 목록에서 골라 이어서 진행."""
+        done = next((e for e in reversed(run.events) if e["type"] == "done"), {})
+        turn = {
+            "time": time.time(),
+            "prompt": prompt or (f"[스킬 실행] {sess.skill} {json.dumps(sess.inputs or {}, ensure_ascii=False)}" if sess.skill else ""),
+            "images": images or [],
+            "status": run.status,
+            "output": done.get("output", ""),
+            "tools": [f"{e['server']}.{e['tool']}" + ("(오류)" if e.get("is_error") else "") for e in run.events if e["type"] == "tool_end"],
+            "files": [f["path"] for f in (done.get("files") or []) if f.get("path")],
+            "saved_to": run.saved_to,
+            "run_id": run.id,
+        }
+        try:
+            token = current_user.set(sess.user)
+            try:
+                self.rt.sessions().save(sess.id, sess.messages, turn=turn, skill=sess.skill, inputs=sess.inputs, servers=sess.servers)
+            finally:
+                current_user.reset(token)
+        except Exception:  # noqa: BLE001
+            import logging
+
+            logging.getLogger(__name__).exception("세션 저장 실패: %s", sess.id)
 
     async def stream(self, run: Run, after: int = 0):
         sent = after
@@ -276,6 +342,50 @@ def _disposition(name: str, inline: bool = False) -> str:
     return f"{kind}; filename=\"{ascii_name}\"; filename*=UTF-8''{urllib.parse.quote(name)}"
 
 
+class UserMiddleware:
+    """요청의 사용자 ID(X-Agent-User 헤더 또는 ?user=)를 current_user 로 설정 (순수 ASGI - 백그라운드 실행까지 전달됨)."""
+
+    def __init__(self, app: Any, runtime: AgentRuntime):
+        self.app = app
+        self.rt = runtime
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        import urllib.parse
+
+        headers = {k.decode().lower(): v.decode("utf-8", "replace") for k, v in scope.get("headers", [])}
+        raw = headers.get("x-agent-user") or ""
+        if raw:
+            raw = urllib.parse.unquote(raw)  # 한글 ID 는 헤더에 인코딩해서 보냄
+        if not raw:
+            q = urllib.parse.parse_qs(scope.get("query_string", b"").decode())
+            raw = (q.get("user") or [""])[0]
+        path = scope.get("path", "")
+        uid = None
+        if raw and self.rt.users_cfg.enabled:
+            try:
+                uid = self.rt.users.check(raw)
+            except UserError as e:
+                await _json_error(send, 400, str(e))
+                return
+        elif self.rt.users_cfg.require and path.startswith("/api/") and path not in ("/api/info",):
+            await _json_error(send, 401, "사용자 ID 가 필요합니다 (화면 오른쪽 위에 입력).")
+            return
+        token = current_user.set(uid)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            current_user.reset(token)
+
+
+async def _json_error(send: Any, status: int, detail: str) -> None:
+    body = json.dumps({"detail": detail}, ensure_ascii=False).encode()
+    await send({"type": "http.response.start", "status": status, "headers": [(b"content-type", b"application/json; charset=utf-8"), (b"content-length", str(len(body)).encode())]})
+    await send({"type": "http.response.body", "body": body})
+
+
 def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_scheduler: bool = True) -> FastAPI:
     rt = runtime or AgentRuntime(cfg)
     sched = AgentScheduler(rt)
@@ -298,6 +408,7 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
             await rt.close()
 
     app = FastAPI(title="사내 자료수집 에이전트", lifespan=lifespan)
+    app.add_middleware(UserMiddleware, runtime=rt)
     app.state.runtime = rt
     app.state.runs = mgr
 
@@ -328,8 +439,84 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
             "watch_dirs": [str(d) for d in rt.workspace.watch_dirs],
             "skills_dir": str(rt.skills.root),
             "public_url": rt.links.public_url,
+            "users": {"enabled": rt.users_cfg.enabled, "require": rt.users_cfg.require},
+            "user": current_user.get(),
             "auth": bool(token),
         }
+
+    # ---------------- 사용자 / 세션 ----------------
+    @app.get("/api/me", dependencies=A)
+    async def me() -> dict[str, Any]:
+        user = current_user.get()
+        ws = rt.workspace
+        return {
+            "user": user,
+            "workspace": str(ws.root),
+            "users_enabled": rt.users_cfg.enabled,
+            "require": rt.users_cfg.require,
+            "sessions": len(rt.sessions().list(1000)),
+        }
+
+    @app.get("/api/sessions", dependencies=A)
+    async def sessions_list(q: str = "") -> list[dict[str, Any]]:
+        items = rt.sessions().list(300)
+        if q:
+            ql = q.lower()
+            items = [i for i in items if ql in i["title"].lower() or ql in i["last_output"].lower()]
+        return items
+
+    @app.get("/api/sessions/{sid}", dependencies=A)
+    async def session_get(sid: str) -> dict[str, Any]:
+        try:
+            d = rt.sessions().load(sid)
+        except UserError as e:
+            raise HTTPException(404, str(e)) from e
+        d.pop("messages", None)  # 화면에는 대화 기록(turns)만
+        return d
+
+    @app.patch("/api/sessions/{sid}", dependencies=A)
+    async def session_rename(sid: str, req: SessionPatch) -> dict[str, Any]:
+        try:
+            rt.sessions().rename(sid, req.title)
+        except UserError as e:
+            raise HTTPException(404, str(e)) from e
+        return {"ok": True}
+
+    @app.delete("/api/sessions/{sid}", dependencies=A)
+    async def session_delete(sid: str) -> dict[str, Any]:
+        try:
+            rt.sessions().delete(sid)
+        except UserError as e:
+            raise HTTPException(400, str(e)) from e
+        mgr.sessions.pop((current_user.get(), sid), None)
+        return {"ok": True}
+
+    @app.post("/api/images/upload", dependencies=A)
+    async def image_upload(request: Request, name: str = "image.png") -> dict[str, Any]:
+        """채팅 이미지 첨부 (붙여넣기/끌어놓기/선택) → 사용자 uploads/images/ 에 저장."""
+        from .images import IMAGE_EXT
+
+        data = await request.body()
+        if not data:
+            raise HTTPException(400, "빈 파일입니다.")
+        if len(data) > 20 * 1024 * 1024:
+            raise HTTPException(413, "이미지는 20MB 이하만 올릴 수 있습니다.")
+        stem = re.sub(r'[\\/:*?"<>|\s]+', "_", Path(name).stem).strip("_") or "image"
+        ext = Path(name).suffix.lower()
+        if ext not in IMAGE_EXT:
+            ext = ".png"
+        folder = Path(rt.workspace.uploads) / "images"
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / f"{time.strftime('%Y%m%d_%H%M%S')}_{stem[:40]}{ext}"
+        target.write_bytes(data)
+        from .images import ImageError, image_part
+
+        try:
+            await asyncio.to_thread(image_part, target)  # 실제 이미지인지 확인
+        except ImageError as e:
+            target.unlink(missing_ok=True)
+            raise HTTPException(400, str(e)) from e
+        return {"ok": True, "path": str(target), "display": rt.workspace.display(target), "name": target.name}
 
     # ---------------- 서버/tool ----------------
     @app.get("/api/servers", dependencies=A)
@@ -357,16 +544,17 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
             raise HTTPException(400, "prompt 또는 skill 이 필요합니다.")
         try:
             run = await mgr.start(req)
-        except SkillError as e:
+        except (SkillError, UserError, PermissionError) as e:
             raise HTTPException(400, str(e)) from e
         return run.info()
 
     @app.get("/api/runs", dependencies=A)
     async def list_runs() -> list[dict[str, Any]]:
-        return [r.info() for r in sorted(mgr.runs.values(), key=lambda r: r.created, reverse=True)[:100]]
+        me = current_user.get()
+        return [r.info() for r in sorted(mgr.runs.values(), key=lambda r: r.created, reverse=True) if r.user == me][:100]
 
     def _run(run_id: str) -> Run:
-        run = mgr.runs.get(run_id)
+        run = mgr.get_run(run_id)
         if run is None:
             raise HTTPException(404, "실행을 찾을 수 없습니다.")
         return run
@@ -426,7 +614,7 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
 
     @app.delete("/api/chat/{session_id}", dependencies=A)
     async def reset(session_id: str) -> dict[str, Any]:
-        mgr.sessions.pop(session_id, None)
+        mgr.sessions.pop((current_user.get(), session_id), None)
         return {"ok": True}
 
     # ---------------- 스킬 ----------------
@@ -493,7 +681,7 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
 
     @app.get("/api/skills/{name}/results", dependencies=A)
     async def skill_results(name: str) -> list[dict[str, Any]]:
-        d = cfg.output_path / f"skill_{name}"
+        d = rt.results_path() / f"skill_{name}"
         if not d.is_dir():
             return []
         out = []
@@ -600,7 +788,7 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
             return []
         norm = text.replace("\\", "/")
         cands: list[Path] = list(rt.workspace.list_files("*"))
-        out_dir = cfg.output_path
+        out_dir = rt.results_path()
         if out_dir.is_dir():
             cands += sorted((p for p in out_dir.rglob("*") if p.is_file()), key=lambda p: p.stat().st_mtime, reverse=True)[:300]
         roots = [rt.workspace.root, *rt.workspace.watch_dirs, out_dir]

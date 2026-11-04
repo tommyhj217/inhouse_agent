@@ -22,6 +22,7 @@ from .dynamic_tools import DynamicToolManager, DynamicToolsConfig
 from .files import FileWorkspace
 from .links import LinkSigner
 from .toolkit import ToolkitConfig, make_toolkit
+from .users import SessionStore, UserWorkspaces, UsersConfig, WorkspaceProxy, current_user
 from .interaction import AskFn
 from .llm import AzureChatModel, ChatModel
 from .mcp_hub import MCPHub
@@ -66,12 +67,16 @@ class AgentRuntime:
         from .remote_files import RemoteFilesConfig
 
         shared = [t for s in cfg.mcp_servers.values() if s.enabled for t in RemoteFilesConfig.from_dict(s.remote_files).local_targets()]
-        self.workspace = FileWorkspace(
+        self.base_workspace = FileWorkspace(
             cfg.workspace_path,
             watch_dirs=[cfg.resolve_path(d) for d in cfg.files.watch_dirs] + [cfg.resolve_path(str(t)) for t in shared],
             extra_read_dirs=[cfg.output_path] + [cfg.resolve_path(d) for d in cfg.files.extra_read_dirs],
             max_file_mb=cfg.files.max_file_mb,
         )
+        # 사용자별 작업폴더: 도구들은 proxy 를 통해 '실행 중인 사용자'의 폴더를 씀
+        self.users_cfg = UsersConfig.from_dict(cfg.raw.get("users"))
+        self.users = UserWorkspaces(self.base_workspace, self.users_cfg)
+        self.workspace: Any = WorkspaceProxy(self.users)
         self.skills = SkillStore(cfg.skills_path)
         self.downloader = Downloader(DownloadConfig.from_dict(cfg.downloads), self.workspace)
         dyn_cfg = DynamicToolsConfig.from_dict(cfg.dynamic_tools)
@@ -158,7 +163,15 @@ class AgentRuntime:
     def agent(self) -> Agent:
         if self._agent is None:
             self._agent = Agent(self.llm, self.hub, self.cfg.agent, self.skills)
+            self._agent.recent_sessions_in_prompt = self.users_cfg.recent_sessions_in_prompt
         return self._agent
+
+    def sessions(self) -> SessionStore:
+        """현재 사용자(없으면 공용)의 대화 세션 저장소."""
+        return SessionStore(self.workspace)
+
+    def results_path(self) -> Path:
+        return Path(self.workspace.root) / "results" if self.workspace.is_user else self.cfg.output_path
 
     async def __aenter__(self) -> "AgentRuntime":
         await self.start()
@@ -183,6 +196,15 @@ class AgentRuntime:
     # ------------------------------------------------------------------
     async def run_job(self, job: ScheduleConfig, on_event: EventCallback | None = None) -> tuple[AgentResult, Path]:
         """예약작업 1건 실행 → 결과 파일 저장 → (선택) 웹훅 알림."""
+        if job.user:  # 지정한 사용자의 작업폴더에서 실행
+            token = current_user.set(self.users.check(job.user))
+            try:
+                return await self._run_job(job, on_event)
+            finally:
+                current_user.reset(token)
+        return await self._run_job(job, on_event)
+
+    async def _run_job(self, job: ScheduleConfig, on_event: EventCallback | None = None) -> tuple[AgentResult, Path]:
         lock = self._job_locks.setdefault(job.name, asyncio.Lock())
         async with lock:
             tz = job.timezone or self.cfg.agent.timezone
@@ -213,11 +235,12 @@ class AgentRuntime:
         ask: AskFn | None = None,
         messages: list[dict[str, Any]] | None = None,
         save: bool = True,
+        images: list[str] | None = None,
     ) -> tuple[AgentResult, Path | None]:
-        """스킬 1회 실행 (테스트용). 결과는 outputs/skill_<이름>/ 에 저장."""
+        """스킬 1회 실행 (테스트용). 결과는 outputs/skill_<이름>/ (사용자면 그 사용자의 results/) 에 저장."""
         skill = self.skills.get(name)
         result = await self.agent.run(
-            prompt, messages=messages, on_event=on_event, ask=ask, skill=skill, skill_inputs=inputs
+            prompt, messages=messages, on_event=on_event, ask=ask, skill=skill, skill_inputs=inputs, images=images
         )
         path = None
         if save:
@@ -248,7 +271,7 @@ class AgentRuntime:
     ) -> Path:
         started_at = started_at or datetime.now(ZoneInfo(self.cfg.agent.timezone))
         safe = re.sub(r"[^\w.-]", "_", name)
-        out_dir = self.cfg.output_path / safe
+        out_dir = self.results_path() / safe
         out_dir.mkdir(parents=True, exist_ok=True)
         stamp = started_at.strftime("%Y%m%d_%H%M%S")
         ext = {"md": "md", "txt": "txt", "json": "json"}.get(fmt, "md")

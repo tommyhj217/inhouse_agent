@@ -47,6 +47,20 @@ class ChatModel(Protocol):
     ) -> LLMResponse: ...
 
 
+def _api_messages(messages: list[dict[str, Any]], vision: bool) -> list[dict[str, Any]]:
+    """API 로 보낼 형태: 내부용 키(_로 시작) 제거, 비전 미지원 배포면 이미지를 텍스트 안내로."""
+    out = []
+    for m in messages:
+        m = {k: v for k, v in m.items() if not k.startswith("_")}
+        if isinstance(m.get("content"), list) and not vision:
+            m["content"] = "\n".join(
+                p.get("text", "") if p.get("type") == "text" else "(이미지가 첨부되었지만 현재 모델 배포는 이미지를 볼 수 없습니다: llm.vision=false)"
+                for p in m["content"]
+            )
+        out.append(m)
+    return out
+
+
 class AzureChatModel:
     """AsyncAzureOpenAI 기반 ChatModel 구현."""
 
@@ -88,7 +102,7 @@ class AzureChatModel:
         parallel_tool_calls: bool | None = None,
     ) -> LLMResponse:
         cfg = self.cfg
-        params: dict[str, Any] = {"model": cfg.deployment, "messages": messages}
+        params: dict[str, Any] = {"model": cfg.deployment, "messages": _api_messages(messages, cfg.vision)}
         if tools:
             params["tools"] = tools
             if tool_choice:

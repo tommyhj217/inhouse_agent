@@ -56,6 +56,13 @@ DEFAULT_SYSTEM_PROMPT = """당신은 사내 업무 자료 수집·분석 에이�
    - create_tool 에는 반드시 test_args 를 넣어 실제로 돌려 보고, 실패하면 오류(traceback)를 보고 고쳐서 다시 만드세요.
    - 같은 기능의 custom__ 도구가 이미 있으면 새로 만들지 말고 그것을 쓰세요.
 
+이미지:
+- 사용자가 첨부한 이미지는 직접 보고 판단하세요 (화면 캡처, 표 사진, 오류 화면 등).
+- 파일로 저장된 이미지(MCP 캡처, 다운로드 이미지, 이전 대화의 첨부)를 봐야 하면 view_image 로 불러오세요.
+
+이전 작업 이어가기:
+- '지난번', '이전에 했던', '그 파일' 같은 요청은 시스템 프롬프트의 '최근 작업' 과 list_past_work / read_past_work 로 확인하세요.
+
 결과 파일 / 범용 도구:
 - 만든 파일(save_file, write_excel, make_chart, create_zip, sql_query save_as 등)과 받은 파일은 최종 답변에 전체 경로를 꼭 적으세요.
   웹 화면에서 사용자가 경로를 클릭해 바로 받을 수 있습니다. 메일/메신저로 공유할 때는 get_download_link 의 링크를 쓰세요.
@@ -109,6 +116,8 @@ class Agent:
         self.hub = hub
         self.cfg = cfg
         self.skills = skills
+        self.recent_sessions_in_prompt = 5
+        self.image_max_side = 2048
 
     # ------------------------------------------------------------------
     def build_system_prompt(self, servers: list[str] | None = None, extra: str | None = None) -> str:
@@ -131,6 +140,15 @@ class Agent:
                 keys = []
             if keys:
                 parts.append(f"저장된 기억 {len(keys)}개 (recall 로 조회): " + ", ".join(keys[:30]))
+        user = getattr(ws, "user", None) if ws is not None else None
+        if user:
+            from .users import SessionStore
+
+            recent = SessionStore(ws).recent_summary(self.recent_sessions_in_prompt)
+            parts.append(
+                f"현재 사용자: {user} (이 사용자의 작업폴더에서만 작업합니다)"
+                + (f"\n이 사용자의 최근 작업 (자세한 내용은 read_past_work):\n{recent}" if recent else "")
+            )
         if self.skills is not None:
             catalog = self.skills.catalog_text()
             if catalog:
@@ -164,6 +182,7 @@ class Agent:
         ask: AskFn | None = None,
         skill: "Skill | None" = None,
         skill_inputs: dict[str, Any] | None = None,
+        images: list[str] | None = None,
     ) -> AgentResult:
         """프롬프트 1건 처리. messages 를 주면 이어지는 대화로 처리하고 그 리스트를 갱신합니다.
 
@@ -184,7 +203,14 @@ class Agent:
         elif messages and messages[0].get("role") == "system":
             # 대화가 길어져도 현재 시각/서버/스킬 상태는 최신으로 유지
             messages[0] = {"role": "system", "content": self.build_system_prompt(servers, extra_system)}
-        messages.append({"role": "user", "content": prompt})
+        from .images import downgrade_old_images, user_content
+
+        downgrade_old_images(messages, keep_last=0)  # 이전 턴 이미지는 텍스트 참조로 (토큰 절약)
+        if images:
+            content, used = user_content(prompt, images, self.image_max_side)
+            messages.append({"role": "user", "content": content, "_images": used})
+        else:
+            messages.append({"role": "user", "content": prompt})
         self._trim_history(messages)
 
         ctx = RunContext(ask=ask, interactive=ask is not None)
@@ -241,6 +267,15 @@ class Agent:
                 for tc, ev in zip(resp.tool_calls, tool_results):
                     events.append(ev)
                     messages.append({"role": "tool", "tool_call_id": tc.id, "content": ev.result})
+                pending = ctx.meta.pop("pending_images", None)
+                if pending:  # view_image: tool 결과에는 이미지를 못 넣으므로 다음 user 메시지로 첨부
+                    from .images import ImageError
+
+                    try:
+                        content, used = user_content("(view_image 요청으로 첨부한 이미지입니다. 내용을 보고 작업을 계속하세요.)", pending, self.image_max_side)
+                        messages.append({"role": "user", "content": content, "_images": used})
+                    except ImageError as e:
+                        messages.append({"role": "user", "content": f"(이미지를 첨부하지 못했습니다: {e})"})
 
             messages.append(
                 {

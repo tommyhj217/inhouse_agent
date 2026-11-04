@@ -76,6 +76,16 @@ def make_builtin_tools(
         since = time.time() - float(newer) * 60 if newer is not None else None
         directory = ws.resolve(args["directory"]) if args.get("directory") else None
         st = await wait_for_download(ws, str(args.get("pattern") or "*"), timeout, since, directory)
+        claim = getattr(ws, "claim", None)
+        if claim is not None and st.get("state") == "complete" and st.get("path"):
+            from pathlib import Path as _P
+
+            new = await asyncio.to_thread(claim, _P(st["path"]))
+            if str(new) != st["path"]:
+                moved = await file_status(_P(new), ws, stable_wait=0)
+                moved["issues"] = moved.get("issues", []) + [f"공용 다운로드 폴더에서 사용자 폴더로 옮김 (원래: {st['path']})"]
+                moved["waited_sec"] = st.get("waited_sec")
+                st = moved
         return ToolOutcome(format_status(st) + "\n" + json.dumps(st, ensure_ascii=False, indent=1), st["state"] == "timeout", [st])
 
     async def list_downloads(args: dict[str, Any]) -> str:

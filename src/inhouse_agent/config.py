@@ -87,6 +87,8 @@ class LLMConfig:
     max_retries: int = 3
     extra_headers: dict[str, str] = field(default_factory=dict)
     extra_body: dict[str, Any] = field(default_factory=dict)
+    vision: bool = True
+    """배포 모델이 이미지 입력을 지원하는지 (미지원이면 이미지를 텍스트 안내로 바꿔 보냄)"""
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "LLMConfig":
@@ -107,6 +109,7 @@ class LLMConfig:
             max_retries=_to_int(d.get("max_retries"), 3) or 0,
             extra_headers={k: str(v) for k, v in (d.get("extra_headers") or {}).items() if _none_if_blank(v) is not None},
             extra_body=dict(d.get("extra_body") or {}),
+            vision=_to_bool(d.get("vision"), True),
         )
 
     def validate(self) -> None:
@@ -215,6 +218,8 @@ class ScheduleConfig:
     description: str = ""
     skill: str | None = None
     inputs: dict[str, Any] = field(default_factory=dict)
+    user: str | None = None
+    """이 사용자의 작업폴더에서 실행 (생략 시 공용 workspace)"""
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "ScheduleConfig":
@@ -237,6 +242,7 @@ class ScheduleConfig:
             description=str(d.get("description") or ""),
             skill=_none_if_blank(d.get("skill")),
             inputs=dict(d.get("inputs") or {}),
+            user=_none_if_blank(d.get("user")),
         )
 
 

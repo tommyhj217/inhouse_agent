@@ -11,6 +11,8 @@
     inhouse-agent fetch <URL> [--cookies]    # 다운로드 URL 받기
     inhouse-agent link <경로>                # 파일 공유용 다운로드 링크
     inhouse-agent ctools list|show|test|delete  # 동적 도구 관리
+    inhouse-agent -u <ID> chat [--resume 작업ID]  # 사용자별 작업폴더 / 이전 작업 이어서
+    inhouse-agent -u <ID> sessions           # 저장된 작업 목록
     inhouse-agent scheduler                  # 예약작업 데몬
     inhouse-agent serve --port 8080          # 웹/API 서버 + 예약작업
 """
@@ -22,6 +24,7 @@ import asyncio
 import json
 import signal
 import sys
+import time
 from typing import Any
 
 from .config import AppConfig, ConfigError, load_config
@@ -167,11 +170,24 @@ async def cmd_chat(cfg: AppConfig, args: argparse.Namespace) -> int:
     async with AgentRuntime(cfg) as rt:
         _warn_failed(rt)
         print("사내 자료수집 에이전트 - 대화형 모드")
-        print("명령: /tools  /servers  /files  /skills  /skill <이름> [k=v ...]  /noskill  /reset  /save <이름>  /reconnect <서버>  /exit\n")
+        print("명령: /tools  /servers  /files  /skills  /skill <이름> [k=v ...]  /noskill  /image <경로>  /sessions  /reset  /save <이름>  /reconnect <서버>  /exit\n")
         skill = rt.skills.get(args.skill) if getattr(args, "skill", None) else None
         skill_inputs: dict[str, str] = _parse_inputs(getattr(args, "input", None))
         messages = rt.agent.new_conversation(servers)
         last = None
+        store = rt.sessions()
+        sid = store.new_id()
+        images: list[str] = []
+        if rt.workspace.user:
+            print(f"[사용자] {rt.workspace.user} · 작업폴더 {rt.workspace.root}")
+        if getattr(args, "resume", None):
+            d = store.load(args.resume)
+            sid, messages = d["id"], d.get("messages") or messages
+            if d.get("skill") and not skill:
+                skill, skill_inputs = rt.skills.get(d["skill"]), d.get("inputs") or {}
+            print(f"[이어서] {d.get('title')} (대화 {len(d.get('turns', []))}회)")
+            for t in d.get("turns", [])[-2:]:
+                print(f"  나> {t.get('prompt')}\n  에이전트> {str(t.get('output', ''))[:300]}")
         if skill:
             print(f"[스킬 모드] {skill.name}: {skill.description}")
         while True:
@@ -205,6 +221,23 @@ async def cmd_chat(cfg: AppConfig, args: argparse.Namespace) -> int:
                         continue
                     messages = rt.agent.new_conversation(servers)
                     print(f"[스킬 모드] {skill.name}: {skill.description}\n  입력: {[i.name for i in skill.inputs]} · 빈 줄 대신 '실행' 이라고 입력하면 바로 실행합니다.")
+                elif cmd == "/image":
+                    from .images import is_image
+
+                    try:
+                        ip = rt.workspace.resolve(rest.strip())
+                    except PermissionError as e:
+                        print(f"오류: {e}")
+                        continue
+                    if not ip.is_file() or not is_image(ip):
+                        print(f"이미지 파일이 아닙니다: {ip}")
+                    else:
+                        images.append(str(ip))
+                        print(f"다음 요청에 첨부: {ip.name} (총 {len(images)}장)")
+                elif cmd == "/sessions":
+                    for it in store.list(15):
+                        print(f"- {it['id']}  {it['title']}  ({it['turns']}회)")
+                    print("이어서 하려면: inhouse-agent chat --resume <ID>")
                 elif cmd == "/noskill":
                     skill = None
                     messages = rt.agent.new_conversation(servers)
@@ -236,11 +269,16 @@ async def cmd_chat(cfg: AppConfig, args: argparse.Namespace) -> int:
                 result = await rt.agent.run(
                     "" if (skill and line == "실행") else line,
                     messages=messages, servers=servers, on_event=_print_event(args.verbose), ask=_cli_ask,
-                    skill=skill, skill_inputs=skill_inputs,
+                    skill=skill, skill_inputs=skill_inputs, images=images or None,
                 )
             except Exception as e:  # noqa: BLE001 - 스킬 입력 오류 등
                 print(f"오류: {e}")
                 continue
+            store.save(sid, messages, skill=skill.name if skill else None, inputs=skill_inputs or None, servers=servers, turn={
+                "time": time.time(), "prompt": line, "images": images, "status": result.stopped_reason, "output": result.output,
+                "tools": [f"{e.server}.{e.tool}" for e in result.tool_events], "files": [f["path"] for f in result.files if f.get("path")],
+            })
+            images = []
             last = (line, result)
             print(f"\n에이전트> {result.output}")
             _print_links(rt, result)
@@ -433,6 +471,22 @@ async def cmd_fetch(cfg: AppConfig, args: argparse.Namespace) -> int:
         return 1 if out.is_error else 0
 
 
+async def cmd_sessions(cfg: AppConfig, args: argparse.Namespace) -> int:
+    from datetime import datetime
+
+    rt = AgentRuntime(cfg)
+    items = rt.sessions().list(200)
+    if args.query:
+        items = [i for i in items if args.query.lower() in i["title"].lower()]
+    who = rt.workspace.user or "(공용)"
+    print(f"사용자 {who} · 작업 {len(items)}개 · {rt.workspace.root / 'sessions'}")
+    for i in items:
+        print(f"- {i['id']}  {datetime.fromtimestamp(i['updated'] or 0):%Y-%m-%d %H:%M}  {i['title']}  ({i['turns']}회)")
+    if items:
+        print("\n이어서 하려면: inhouse-agent" + (f" -u {rt.workspace.user}" if rt.workspace.user else "") + " chat --resume <ID>")
+    return 0
+
+
 async def cmd_scheduler(cfg: AppConfig, args: argparse.Namespace) -> int:
     from .scheduler import AgentScheduler
 
@@ -481,6 +535,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="inhouse-agent", description="사내 사이트 MCP 자료수집 에이전트")
     p.add_argument("-c", "--config", help="설정 파일 경로 (기본: ./config/config.yaml)")
     p.add_argument("--log-level", default="INFO")
+    p.add_argument("-u", "--user", help="사용자 ID (사용자별 작업폴더 workspace/users/<ID> 에서 실행)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("check", help="Azure OpenAI / MCP 서버 연결 점검")
@@ -492,6 +547,7 @@ def build_parser() -> argparse.ArgumentParser:
     c = sub.add_parser("chat", help="대화형 모드")
     c.add_argument("-s", "--servers", help="사용할 MCP 서버 제한 (쉼표 구분)")
     c.add_argument("--skill", help="스킬 모드로 시작")
+    c.add_argument("--resume", metavar="작업ID", help="저장된 작업(대화)을 이어서 (inhouse-agent sessions 로 확인)")
     c.add_argument("-i", "--input", action="append", help="스킬 입력값 key=value (여러 번)")
     c.add_argument("-v", "--verbose", action="store_true")
 
@@ -569,6 +625,9 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--cookies", help="'A=1; B=2'")
     x.add_argument("--filename")
 
+    x = sub.add_parser("sessions", help="저장된 작업(대화) 목록")
+    x.add_argument("-q", "--query")
+
     sub.add_parser("scheduler", help="예약작업 데몬 실행")
 
     s = sub.add_parser("serve", help="웹/API 서버 (+예약작업)")
@@ -586,7 +645,15 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigError, OSError) as e:
         print(f"설정 오류: {e}", file=sys.stderr)
         return 1
-    setup_logging(cfg, args.log_level, console=args.cmd not in ("chat", "skills", "ctools", "fetch", "link"))
+    setup_logging(cfg, args.log_level, console=args.cmd not in ("chat", "skills", "ctools", "fetch", "link", "sessions"))
+    if args.user:
+        from .users import UserError, current_user, normalize_user
+
+        try:
+            current_user.set(normalize_user(args.user))  # asyncio.run 안의 작업까지 전달됨
+        except UserError as e:
+            print(f"오류: {e}", file=sys.stderr)
+            return 1
 
     if args.cmd == "serve":
         return cmd_serve(cfg, args)
@@ -601,6 +668,7 @@ def main(argv: list[str] | None = None) -> int:
         "ctools": cmd_ctools,
         "fetch": cmd_fetch,
         "link": cmd_link,
+        "sessions": cmd_sessions,
         "scheduler": cmd_scheduler,
     }
     try:

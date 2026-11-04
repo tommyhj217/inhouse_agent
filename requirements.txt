@@ -9,6 +9,8 @@ pypdf>=4
 xlrd>=2.0
 # 차트 (make_chart)
 matplotlib>=3.7
+# 채팅 이미지 축소/변환
+pillow>=10
 tzdata; platform_system == 'Windows'
 # 웹/API 서버 (serve 명령)
 fastapi>=0.110

@@ -35,6 +35,8 @@
 | 동적 도구 | 필요한 tool이 없으면 에이전트가 파이썬 코드로 tool을 만들고(`create_tool`) 테스트해서 바로 사용합니다. 일회성 계산은 `run_python`으로 처리합니다. 만든 도구는 `ctx.call_tool_data()`로 기존 MCP tool을 조합할 수 있고, `tools/`에 저장되어 계속 재사용됩니다. 승인 모드를 지원합니다. |
 | 파일 받기 / 공유 | 답변과 tool 결과에 나온 파일·폴더 경로를 클릭하면 바로 받습니다(폴더는 zip). 🔗를 누르면 API 토큰 없이 열리는 기한부 서명 링크가 복사됩니다. 메일, 메신저, 웹훅, CLI 결과에도 링크가 붙습니다. |
 | 범용 자동화 도구 | 공개 자동화 에이전트들의 도구를 분석해서 추가했습니다([분석 문서](docs/agent_tools_analysis.md)): 웹 읽기/검색, HTTP API, SQL, 표 비교, 엑셀·차트·zip 생성, 파일 내용 검색, 기억, 작업 계획, 메일/메신저 알림 |
+| 사용자별 작업폴더 / 이어서 하기 | 사용자 ID별로 `workspace/users/<ID>/` 폴더를 따로 씁니다. 대화는 자동으로 저장되어 "내 작업" 목록에서 골라 이어서 진행할 수 있고, 서버를 다시 켜도 유지됩니다. 에이전트가 최근 작업을 기억합니다. |
+| 채팅 이미지 | 🖼 버튼, 붙여넣기(Ctrl+V), 끌어놓기로 첨부합니다. 비전 모델이 직접 보고, 저장된 이미지(MCP 캡처 등)는 `view_image`로 봅니다. |
 | 인터랙티브 UI | 스킬을 편집하면 입력 폼이 즉시 바뀌고, 바로 테스트 실행할 수 있습니다. 실행 과정은 실시간으로 표시되고, 에이전트의 질문(`ask_user`)에 화면에서 답할 수 있습니다. 결과를 보고 후속 지시를 내릴 수 있습니다. |
 | 사용 방식 | 대화형 CLI, 1회 실행 CLI, 웹 채팅 화면과 REST API(`serve`), 예약 데몬(`scheduler`) |
 | SDK 호환 | mcp SDK 1.x와 2.x, openai SDK 1.x 이상에서 테스트했습니다. |
@@ -364,7 +366,42 @@ def run(args, ctx):
 
 검토한 도구는 `tools/` 폴더째 GitHub에 커밋해서 다른 서버와 공유할 수 있습니다.
 
-## 8. 결과 파일 받기 / 공유 링크
+## 8. 사용자별 작업폴더 / 이전 작업 이어서 하기 / 이미지
+
+**사용자 ID**
+
+- 웹 화면 오른쪽 위 👤에 사번이나 사내 ID를 입력합니다. 브라우저에 기억되어 다음 접속에도 유지됩니다.
+- CLI는 `inhouse-agent -u <ID> chat`처럼 씁니다.
+- 한글 ID도 됩니다. 쓸 수 있는 문자는 한글/영문/숫자와 `. _ - @`입니다.
+- `users.require: true`로 설정하면 ID 없이는 쓸 수 없고, `users.allowed`로 허용할 ID 패턴을 제한할 수 있습니다.
+
+**작업폴더**: `workspace/users/<ID>/`
+
+```
+downloads/  uploads/images/  files/  results/  sessions/  memory.json
+```
+
+- 모든 도구(파일 저장·분석·다운로드·기억·동적 도구 실행 폴더)가 이 사용자의 폴더를 씁니다. 다른 사용자의 파일은 열 수 없습니다.
+- MCP 연결, 스킬, 동적 도구는 모두가 공유합니다.
+- MCP가 공용 다운로드 폴더(`AGENT_DOWNLOAD_DIR`)에 저장한 파일은, 다운로드가 끝나면 요청한 사용자의 `downloads/`로 옮겨집니다 (`users.claim_downloads: move | copy | none`).
+- 예약작업에 `user: <ID>`를 넣으면 그 사용자 폴더에서 실행되고, 결과는 `users/<ID>/results/`에 저장됩니다.
+
+**이어서 하기**
+
+- 대화는 요청마다 `sessions/<작업ID>.json`에 저장됩니다. 저장되는 내용은 LLM 대화 이력, 요청/결과/사용 tool/파일/첨부 이미지입니다.
+- 웹: 조사 탭 왼쪽 **내 작업**에서 검색, 이름 바꾸기, 삭제를 하고, 작업을 클릭하면 이전 대화가 다시 표시됩니다. 그대로 이어서 요청하면 이전 대화와 파일을 기억한 채로 계속합니다.
+- CLI: `inhouse-agent -u kim sessions`로 목록을 보고, `inhouse-agent -u kim chat --resume <작업ID>`로 이어서 합니다.
+- 에이전트는 시스템 프롬프트로 이 사용자의 최근 작업 목록을 받습니다. "지난번 그 보고서"처럼 요청하면 `list_past_work`/`read_past_work`로 이전 작업 내용을 찾아 이어서 합니다.
+
+**채팅 이미지**
+
+- 🖼 버튼, 붙여넣기(Ctrl+V, 화면 캡처), 채팅창에 끌어놓기로 첨부합니다. 한 번에 최대 10장이고, 썸네일을 클릭하면 크게 보입니다.
+- 이미지는 `uploads/images/`에 저장되고, 긴 변 2048px로 줄여 비전 모델에 보냅니다.
+- 다음 요청부터는 이전 이미지를 경로 텍스트로 바꿔서 보내 토큰을 아낍니다. 다시 봐야 하면 에이전트가 `view_image`로 불러옵니다.
+- `view_image`로는 MCP 화면 캡처나 다운로드한 이미지도 에이전트가 직접 볼 수 있습니다.
+- 배포 모델이 이미지를 지원하지 않으면 `llm.vision: false`로 설정하세요. 그러면 이미지 대신 안내 문구를 보냅니다.
+
+## 9. 결과 파일 받기 / 공유 링크
 
 - **웹 화면**: 답변이나 tool 결과에 실제로 있는 파일/폴더 경로가 나오면 📎 링크로 바뀝니다. 파일명에 공백이나 한글이 있어도 됩니다.
   - 경로 클릭: 내려받기 (폴더는 zip으로 묶음)
@@ -381,7 +418,7 @@ def run(args, ctx):
   - CLI 결과 (`[파일 받기]`)
 - **CLI로 링크 만들기**: `inhouse-agent link files/reports/10월_매출.xlsx --hours 24`
 
-## 9. 범용 자동화 도구
+## 10. 범용 자동화 도구
 
 공개 자동화 에이전트(OpenAI Agents SDK, smolagents, Manus, n8n, LangChain, Claude Code)의 도구를 비교한 결과와,
 무엇을 넣고 무엇을 뺐는지(예: 셸 명령)는 [docs/agent_tools_analysis.md](docs/agent_tools_analysis.md)에 정리했습니다.
@@ -402,7 +439,7 @@ def run(args, ctx):
 | `send_email` | 사내 SMTP 메일 (첨부와 다운로드 링크) | `notify.email.smtp_host`와 `allowed_recipients`가 필요. 대화형에서는 승인 |
 | `send_message` | Teams/Slack 웹훅 | `notify.webhooks`에 등록된 채널로만 발송 |
 
-## 10. 구조
+## 11. 구조
 
 ```
 src/inhouse_agent/
@@ -416,6 +453,8 @@ src/inhouse_agent/
   builtins.py   내장 tool (파일, 분석, 스킬, ask_user, 저장, download_url, create_tool, run_python)
   downloader.py 다운로드 URL 받기 / 일반 HTTP 요청 (한글 파일명, 프록시/CA, 쿠키, 호스트 제한)
   links.py      서명된 다운로드 링크 (/d/...)
+  users.py      사용자별 작업폴더(WorkspaceProxy), 대화 세션 저장/이어서 하기
+  images.py     채팅 이미지 → 비전 모델 입력 (축소/변환, 이전 이미지 정리)
   remote_files.py 원격 MCP 서버 파일 가져오기 (path_map, fetch_tool, resource, localhost 링크 변환)
   toolkit.py    범용 도구 (web_fetch, http_request, sql_query, write_excel, make_chart, send_email ...)
   dynamic_tools.py 동적 도구 저장소, 정적 검사, 승인, 자식 프로세스 실행(+tool 호출 중계)
@@ -436,7 +475,7 @@ tests/                          통합 테스트 (실제 MCP 서버, 가짜 Azur
   현재 시각과 서버 목록, 서버 설명은 자동으로 붙습니다.
 - 결과를 디버깅할 때는 `outputs/<작업>/_trace/*.json`에서 LLM이 어떤 tool을 어떤 인자로 불렀는지 확인할 수 있습니다.
 
-## 11. 테스트
+## 12. 테스트
 
 ```bash
 pip install -e ".[server,dev]"
@@ -455,6 +494,9 @@ pytest -q
 - 스킬 파싱/검증/버전 백업, 스킬 실행 중 ask_user 답변 반영과 다운로드 감지
 - 웹 API 흐름: 스킬 생성/저장 → 실행 → SSE 이벤트 → 질문 답변 → 후속 지시 → 파일 업로드/분석
 - 다운로드: 한글 파일명 복원, 리다이렉트, 404, 크기 제한, 호스트 제한, 링크로컬 차단, 사이트별 헤더/쿠키, 로그인 페이지 감지, 링크 감지/자동 받기
+- 사용자: ID 검증, 사용자 간 파일/기억/세션/실행 분리, 공용 다운로드 → 사용자 폴더 이동, ID 필수/허용 목록, 예약작업 user
+- 이어서 하기: 세션 저장(이미지 데이터 대신 경로) → 서버 재시작 후 같은 세션으로 이어서(이전 대화 전달), 이름 변경/삭제, list/read_past_work
+- 이미지: 업로드 검증, 큰 이미지 축소, content 배열 구성, 이전 턴 이미지 정리, view_image 주입, 내부 키 제거, vision=false
 - 원격 MCP: 별도 프로세스 HTTP 서버로 원격 PC 흉내 → fetch_tool / path_map(공유폴더, URL) / MCP resource / 설정 없음 안내 / fetch_remote_file 대기 / localhost 링크 변환(LAN IP 접속)
 - 링크: 서명/위조/만료/허용폴더, 경로 인식(공백·한글 파일명, 폴더), 토큰 없이 서명 링크로 받기, 폴더 zip
 - 범용 도구: web_fetch(EUC-KR, 상대 링크), http_request 승인, web_search, sql_query 조인/저장, compare_tables, write_excel 서식, make_chart, create_zip, search_files, 기억/계획 이벤트, 메일(수신자 제한/첨부/링크/거부), 메신저
