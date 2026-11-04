@@ -25,7 +25,7 @@ inputs:
 # 절차
 1. `download_sales_excel` 로 {month} 엑셀 다운로드를 요청한다.
 2. 결과의 [파일 감지] 를 확인한다.
-   - 다운로드 중이거나 감지된 파일이 없으면 `wait_for_download` (pattern: `매출현황_{month}*.xlsx`, timeout_sec: 60) 로 완료를 기다린다.
+   - 다운로드 중이거나 감지된 파일이 없으면 `wait_for_download` (pattern: `매출현황_{month}*.xlsx`) 로 완료를 기다린다.
    - 파일이 손상/의심 상태면 1번을 한 번만 다시 시도하고, 그래도 안 되면 원인을 보고하고 멈춘다.
 3. `analyze_file` 로 시트 구조(열 이름, 행 수)를 확인한다.
 4. confirm_dept 가 true 이면 `ask_user` 로 "어느 부서를 집계할까요?" 를 묻는다 (선택지: 전체, 인사팀, 총무팀, IT운영팀, 기본값 {dept}). 아니면 {dept} 를 쓴다.

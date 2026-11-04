@@ -218,7 +218,7 @@ def _file_server() -> str:
             self.send_response(404)
             self.end_headers()
 
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    srv = ThreadingHTTPServer((os.environ.get("SAMPLE_HOST", "127.0.0.1"), 0), H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     _HTTP["base"] = f"http://127.0.0.1:{srv.server_address[1]}"
     return _HTTP["base"]
@@ -242,6 +242,51 @@ def get_session_cookie() -> str:
     return DEMO_SESSION
 
 
+# ---------------------------------------------------------------------------
+# 원격 MCP 시나리오: MCP 서버가 다른 PC 에서 돌고, 파일을 '그 PC 의 디스크'에 저장하는 경우
+#   REMOTE_DIR = 원격 PC 의 저장 폴더 (에이전트 PC 에서는 보이지 않는 경로)
+# ---------------------------------------------------------------------------
+REMOTE_DIR = Path(os.environ.get("REMOTE_DIR", "./remote_disk")).resolve()
+
+
+@mcp.tool()
+def export_report_on_server(month: str) -> str:
+    """ERP 보고서를 MCP 서버 PC 에 엑셀로 저장하고 그 경로를 알려줍니다. month: YYYY-MM"""
+    out = REMOTE_DIR / "exports"
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / f"원격 매출 보고서_{month}.xlsx"
+    _write_xlsx(path, month)
+    return f"서버에 저장했습니다: {path}"
+
+
+@mcp.tool()
+def read_server_file(path: str) -> list:
+    """MCP 서버 PC 에 있는 파일 내용을 돌려줍니다 (에이전트가 원격 파일을 가져갈 때 사용)."""
+    p = Path(path).resolve()
+    if REMOTE_DIR not in p.parents or not p.is_file():
+        raise ToolError(f"파일이 없거나 허용되지 않은 경로입니다: {path}")
+    blob = base64.b64encode(p.read_bytes()).decode()
+    return [EmbeddedResource(type="resource", resource=BlobResourceContents(uri=p.as_uri(), mimeType="application/octet-stream", blob=blob))]
+
+
+@mcp.tool()
+def export_csv_as_resource() -> str:
+    """공지 목록을 CSV 로 내보내고 서버 경로를 알려줍니다 (파일은 MCP resource 로도 제공)."""
+    return "내보내기 완료: /srv/mcp/exports/notice_list.csv"
+
+
+@mcp.resource("file:///srv/mcp/exports/notice_list.csv", mime_type="text/csv")
+def notice_list_resource() -> str:
+    return "번호,제목,부서\n1,보안 점검 안내,IT운영팀\n2,연말정산,인사팀\n"
+
+
+@mcp.tool()
+def get_local_download_link(month: str) -> str:
+    """서버 PC 기준(localhost) 다운로드 링크를 돌려줍니다 (원격 MCP 가 흔히 주는 형태)."""
+    port = _file_server().rsplit(":", 1)[1]
+    return f"다운로드: http://localhost:{port}/files/download?month={month}"
+
+
 if __name__ == "__main__":
     import sys
 
@@ -249,10 +294,21 @@ if __name__ == "__main__":
     # python sample_mcp_server.py --http 8001 → http://127.0.0.1:8001/mcp (Streamable HTTP)
     if len(sys.argv) >= 3 and sys.argv[1] == "--http":
         port = int(sys.argv[2])
+        host = os.environ.get("SAMPLE_HOST", "127.0.0.1")  # 다른 PC 에서 접속하게 하려면 0.0.0.0
         try:
-            mcp.run("streamable-http", host="127.0.0.1", port=port)  # mcp >= 2
-        except TypeError:
-            mcp.settings.host, mcp.settings.port = "127.0.0.1", port  # mcp 1.x
+            mcp.run("streamable-http", host=host, port=port)  # mcp >= 2
+        except TypeError:  # mcp 1.x
+            mcp.settings.host, mcp.settings.port = host, port
+            if host not in ("127.0.0.1", "localhost"):
+                # mcp 1.x FastMCP 는 기본 host(127.0.0.1)로 만들면 DNS rebinding 보호가 켜져
+                # 다른 PC 에서 IP/호스트명으로 접속하면 421 Misdirected Request 가 납니다.
+                # 운영에서는 접속에 쓰는 주소만 허용하세요: SAMPLE_ALLOWED_HOSTS="10.0.0.5:*,mcp.company.com:*"
+                from mcp.server.transport_security import TransportSecuritySettings
+
+                allowed = [h.strip() for h in os.environ.get("SAMPLE_ALLOWED_HOSTS", "").split(",") if h.strip()]
+                mcp.settings.transport_security = TransportSecuritySettings(
+                    enable_dns_rebinding_protection=bool(allowed), allowed_hosts=allowed, allowed_origins=[]
+                )
             mcp.run("streamable-http")
     else:
         mcp.run()

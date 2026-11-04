@@ -163,6 +163,10 @@ class MCPServerConfig:
     connect_timeout: float = 60.0
     tool_timeout: float = 300.0
     retry_on_failure: bool = True
+    remote: Any = "auto"
+    """MCP 서버가 다른 PC 인지: auto(URL 호스트로 판단) | true | false"""
+    remote_files: dict[str, Any] = field(default_factory=dict)
+    """원격 서버 파일 가져오기 설정 (path_map / fetch_tool / use_resources / rewrite_localhost)"""
 
     @classmethod
     def from_dict(cls, name: str, d: dict[str, Any]) -> "MCPServerConfig":
@@ -186,6 +190,8 @@ class MCPServerConfig:
             connect_timeout=_to_float(d.get("connect_timeout"), 60.0) or 60.0,
             tool_timeout=_to_float(d.get("tool_timeout"), 300.0) or 300.0,
             retry_on_failure=_to_bool(d.get("retry_on_failure"), True),
+            remote=d.get("remote", "auto"),
+            remote_files=dict(d.get("remote_files") or {}),
         )
         if cfg.transport not in ("stdio", "http", "sse"):
             raise ConfigError(f"mcp_servers.{name}.transport 는 stdio/http/sse 중 하나여야 합니다: {cfg.transport}")
@@ -247,6 +253,8 @@ class FilesConfig:
     """stdio MCP 서버에 AGENT_DOWNLOAD_DIR / AGENT_WORKSPACE 환경변수를 넘겨줄지."""
     auto_detect: bool = True
     """MCP tool 호출 전후로 다운로드 폴더를 비교해 새 파일을 자동 감지·점검할지."""
+    wait_timeout: float = 300.0
+    """wait_for_download 기본 대기 시간(초)."""
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "FilesConfig":
@@ -258,6 +266,7 @@ class FilesConfig:
             max_file_mb=_to_int(d.get("max_file_mb"), 200) or 200,
             inject_env=_to_bool(d.get("inject_env"), True),
             auto_detect=_to_bool(d.get("auto_detect"), True),
+            wait_timeout=_to_float(d.get("wait_timeout"), 300.0) or 300.0,
         )
 
 

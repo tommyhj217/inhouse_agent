@@ -43,6 +43,7 @@ def make_builtin_tools(
     skills: SkillStore | None = None,
     downloader: "Downloader | None" = None,
     dyn: "DynamicToolManager | None" = None,
+    wait_timeout: float = 300.0,
 ) -> list[BuiltinTool]:
     tz = ZoneInfo(timezone)
 
@@ -70,7 +71,7 @@ def make_builtin_tools(
         return ToolOutcome(format_status(st) + "\n" + json.dumps(st, ensure_ascii=False, indent=1), False, [st])
 
     async def wait_tool(args: dict[str, Any]) -> ToolOutcome:
-        timeout = min(float(args.get("timeout_sec") or 120), 1800)
+        timeout = min(float(args.get("timeout_sec") or wait_timeout), 1800)
         newer = args.get("newer_than_minutes")
         since = time.time() - float(newer) * 60 if newer is not None else None
         directory = ws.resolve(args["directory"]) if args.get("directory") else None
@@ -173,7 +174,7 @@ def make_builtin_tools(
             _obj(
                 {
                     "pattern": {"type": "string", "description": "파일명 패턴 예: *.xlsx, 매출*.csv (기본 *)"},
-                    "timeout_sec": {"type": "number", "description": "최대 대기 시간(기본 120초)"},
+                    "timeout_sec": {"type": "number", "description": f"최대 대기 시간(기본 {wait_timeout:.0f}초, 최대 1800초)"},
                     "newer_than_minutes": {"type": "number", "description": "최근 N분 안에 생긴 파일만 (기본 10분)"},
                     "directory": {"type": "string", "description": "특정 폴더만 감시(선택)"},
                 }

@@ -62,9 +62,13 @@ class AgentRuntime:
         self.cfg = cfg
         self._llm: ChatModel | None = llm
         self.start_results: dict[str, str | None] = {}
+        # 원격 MCP 의 path_map 이 가리키는 공유폴더도 다운로드 감시/읽기 대상에 포함
+        from .remote_files import RemoteFilesConfig
+
+        shared = [t for s in cfg.mcp_servers.values() if s.enabled for t in RemoteFilesConfig.from_dict(s.remote_files).local_targets()]
         self.workspace = FileWorkspace(
             cfg.workspace_path,
-            watch_dirs=[cfg.resolve_path(d) for d in cfg.files.watch_dirs],
+            watch_dirs=[cfg.resolve_path(d) for d in cfg.files.watch_dirs] + [cfg.resolve_path(str(t)) for t in shared],
             extra_read_dirs=[cfg.output_path] + [cfg.resolve_path(d) for d in cfg.files.extra_read_dirs],
             max_file_mb=cfg.files.max_file_mb,
         )
@@ -74,7 +78,9 @@ class AgentRuntime:
         self.dynamic = DynamicToolManager(dyn_cfg, cfg.resolve_path(dyn_cfg.dir), self.workspace)
         self.toolkit_cfg = ToolkitConfig.from_raw(cfg.raw)
         self.links = LinkSigner(self.workspace, self.toolkit_cfg.public_url, self.toolkit_cfg.link_expire_hours)
-        builtin_tools = make_builtin_tools(self.workspace, cfg.agent.timezone, self.skills, self.downloader, self.dynamic)
+        builtin_tools = make_builtin_tools(
+            self.workspace, cfg.agent.timezone, self.skills, self.downloader, self.dynamic, wait_timeout=cfg.files.wait_timeout
+        )
         builtin_tools += make_toolkit(self.workspace, self.downloader, self.links, self.toolkit_cfg, cfg.agent.timezone)
         self.hub = MCPHub(
             cfg.mcp_servers,
@@ -84,11 +90,62 @@ class AgentRuntime:
             auto_detect=cfg.files.auto_detect,
         )
         self.hub.downloader = self.downloader
+        if any(c.is_remote for c in self.hub.connections.values()):
+            self.hub.builtins.append(self._fetch_remote_tool())
         self.dynamic.hub = self.hub
         if dyn_cfg.mode != "off":
             self.dynamic.register_all()  # 저장해 둔 동적 도구 등록
         self._agent: Agent | None = None
         self._job_locks: dict[str, asyncio.Lock] = {}
+
+    def _fetch_remote_tool(self) -> Any:
+        """원격 MCP 서버 PC 의 파일을 에이전트 PC 로 가져오는 tool (자동 처리가 안 됐거나 나중에 생긴 파일용)."""
+        from .files import file_status, format_status
+        from .mcp_hub import BuiltinTool, ToolOutcome
+        from .remote_files import RemoteFileFetcher
+
+        remotes = [n for n, c in self.hub.connections.items() if c.is_remote]
+        max_wait = self.cfg.files.wait_timeout
+
+        async def fetch_remote_file(args: dict[str, Any]) -> ToolOutcome:
+            name = str(args.get("server") or "")
+            conn = self.hub.connections.get(name)
+            if conn is None or not conn.is_remote:
+                return ToolOutcome(f"오류: 원격 MCP 서버가 아닙니다: {name} (원격 서버: {', '.join(remotes)})", True)
+            wait = min(float(args.get("wait_sec") or 0), max(max_wait, 1800))
+            deadline = asyncio.get_running_loop().time() + wait
+            tries = 0
+            while True:
+                tries += 1
+                p, how = await RemoteFileFetcher(self.hub).fetch(conn, str(args["path"]), explicit=True)
+                if p is not None or asyncio.get_running_loop().time() >= deadline:
+                    break
+                await asyncio.sleep(3)  # 원격에서 아직 받는 중일 수 있음
+            if p is None:
+                return ToolOutcome(f"오류: 가져오지 못했습니다 ({tries}회 시도): {how}", True)
+            st = await file_status(p, self.workspace, stable_wait=0)
+            text = f"원격 파일을 가져왔습니다: {args['path']}\n→ {p} ({how})\n{format_status(st)}"
+            try:
+                text += f"\n다운로드 링크: {self.links.url(p)}"
+            except Exception:  # noqa: BLE001
+                pass
+            return ToolOutcome(text, False, [st])
+
+        return BuiltinTool(
+            "fetch_remote_file",
+            "원격 MCP 서버 PC 에 있는 파일(결과에 나온 서버 경로)을 에이전트 PC 로 가져옵니다. "
+            f"원격 서버: {', '.join(remotes)}. 원격에서 아직 다운로드 중이면 wait_sec 로 최대 대기 시간을 주세요.",
+            {
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string", "enum": remotes},
+                    "path": {"type": "string", "description": "원격 서버 기준 파일 경로 또는 file:// URI"},
+                    "wait_sec": {"type": "number", "description": f"파일이 생길 때까지 재시도할 최대 초 (기본 0 = 1회, 권장 최대 {max_wait:.0f})"},
+                },
+                "required": ["server", "path"],
+            },
+            fetch_remote_file,
+        )
 
     @property
     def llm(self) -> ChatModel:

@@ -213,6 +213,10 @@ class ServerConnection:
         self._conn_lock = asyncio.Lock()
         self.last_error: str | None = None
         self.last_data: Any = None
+        from .remote_files import RemoteFilesConfig, is_remote
+
+        self.remote_files = RemoteFilesConfig.from_dict(cfg.remote_files)
+        self.is_remote = is_remote(cfg)
 
     @property
     def name(self) -> str:
@@ -332,6 +336,21 @@ class ServerConnection:
         async with self._conn_lock:
             await self._stop_locked()
             await self._start_locked()
+
+    async def read_resource_to_file(self, uri: str, saver: BlobSaver) -> Path | None:
+        """MCP resources/read 로 파일 내용을 받아 저장 (원격 서버 파일 가져오기용)."""
+        from .files import decode_b64
+
+        async with self._lock:
+            if not self.connected:
+                await self.start()
+            res = await asyncio.wait_for(self.session.read_resource(uri), timeout=self.cfg.tool_timeout)
+        for c in _dump(res).get("contents") or []:
+            if c.get("blob"):
+                return saver(decode_b64(c["blob"]), uri, c.get("mimeType"))
+            if "text" in c:
+                return saver(c["text"].encode("utf-8"), uri, c.get("mimeType"))
+        return None
 
     async def call(self, tool: str, arguments: dict[str, Any], saver: BlobSaver | None = None) -> tuple[str, bool, list[Path]]:
         async with self._lock:
@@ -522,9 +541,45 @@ class MCPHub:
         data = conn.last_data if not is_err else None  # 서버 단위 lock 안에서 설정됨
         if ws is None:
             return ToolOutcome(text, is_err, data=data)
-        out = await self._inspect_files(text, is_err, saved, before)
+        if conn.is_remote:
+            text, fetched = await self._handle_remote(conn, text, is_err)
+            saved = saved + fetched
+        out = await self._inspect_files(text, is_err, saved, before, remote=conn.is_remote)
         out.data = data
         return out
+
+    async def _handle_remote(self, conn: ServerConnection, text: str, is_err: bool) -> tuple[str, list[Path]]:
+        """원격 MCP 결과: localhost 링크를 서버 주소로 바꾸고, 원격 경로의 파일을 가져옴."""
+        from .remote_files import RemoteFileFetcher, find_remote_paths, rewrite_localhost
+
+        rcfg = conn.remote_files
+        notes: list[str] = []
+        if rcfg.rewrite_localhost and conn.cfg.url:
+            text, changes = rewrite_localhost(text, conn.cfg.url)
+            import urllib.parse
+
+            # 원래 URL 을 그대로 적으면 링크 감지에 다시 잡히므로 '호스트:포트' 만 표시
+            pairs = dict.fromkeys((urllib.parse.urlparse(o).netloc, urllib.parse.urlparse(n).netloc) for o, n in changes)
+            for o, n in list(pairs)[:5]:
+                notes.append(f"- 링크 주소 변환: {o} → {n} (원격 서버 기준 localhost 를 MCP 서버 주소로)")
+        fetched: list[Path] = []
+        if rcfg.auto_fetch and not is_err:
+            for rp in find_remote_paths(text)[: rcfg.max_files]:
+                try:  # 에이전트 PC 에도 같은 경로가 있으면(공유 드라이브 등) 그대로 사용
+                    lp = self.workspace.resolve(rp)
+                    if lp.exists():
+                        continue
+                except (PermissionError, ValueError, OSError):
+                    pass
+                p, how = await RemoteFileFetcher(self).fetch(conn, rp)
+                if p is not None:
+                    fetched.append(p)
+                    notes.append(f"- {rp}\n  → {p} ({how})")
+                else:
+                    notes.append(f"- {rp}\n  → 가져오지 못함: {how}")
+        if notes:
+            text += "\n\n[원격 MCP 파일 처리]\n" + "\n".join(notes)
+        return text, fetched
 
     @staticmethod
     def _download_links(text: str) -> list[str]:
@@ -537,7 +592,9 @@ class MCPHub:
                 links.append(m.group(1))
         return links
 
-    async def _inspect_files(self, text: str, is_err: bool, saved: list[Path], before: dict[str, Any] | None) -> ToolOutcome:
+    async def _inspect_files(
+        self, text: str, is_err: bool, saved: list[Path], before: dict[str, Any] | None, remote: bool = False
+    ) -> ToolOutcome:
         """tool 호출로 생긴 파일(저장된 blob / 다운로드 폴더 변화 / 결과에 적힌 경로)을 찾아 상태를 점검."""
         from .files import file_status, format_status
 
@@ -568,10 +625,17 @@ class MCPHub:
             text += "\n\n[다운로드 링크 감지] " + " , ".join(links) + "\n※ download_url tool 로 받으세요 (로그인이 필요하면 cookies 인자 사용)."
         if not uniq:
             if not links and not is_err and re.search(r"다운로드|내려받|download|export|엑셀|excel", text, re.I):
-                text += (
-                    "\n\n[파일 감지] 아직 감시 폴더에 새 파일이 보이지 않습니다. 다운로드가 백그라운드로 진행 중일 수 있으니 "
-                    "wait_for_download 로 완료를 확인하세요."
-                )
+                if remote:
+                    text += (
+                        "\n\n[파일 감지] 원격 MCP 서버 PC 에서 받은 파일은 에이전트 PC 다운로드 폴더에 보이지 않습니다. "
+                        "결과에 서버 경로가 나오면 fetch_remote_file 로 가져오세요. "
+                        "(공유폴더 path_map 이 설정되어 있으면 wait_for_download 로 기다릴 수 있습니다)"
+                    )
+                else:
+                    text += (
+                        "\n\n[파일 감지] 아직 감시 폴더에 새 파일이 보이지 않습니다. 다운로드가 백그라운드로 진행 중일 수 있으니 "
+                        "wait_for_download 로 완료를 확인하세요."
+                    )
             return ToolOutcome(text, is_err)
         statuses = [await file_status(p, ws, stable_wait=1.0) for p in uniq[:10]]
         # 호출 중 잠깐 생겼다 사라진 임시 파일은 제외

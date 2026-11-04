@@ -401,7 +401,7 @@ def _human(n: int) -> str:
 async def wait_for_download(
     ws: FileWorkspace,
     pattern: str = "*",
-    timeout: float = 120.0,
+    timeout: float = 300.0,
     newer_than: float | None = None,
     directory: Path | None = None,
     poll: float = 1.0,

@@ -348,7 +348,7 @@ async def cmd_files(cfg: AppConfig, args: argparse.Namespace) -> int:
             print(f"- {ws.display(p)}\t{p.stat().st_size:,} bytes")
         return 0
     if fc == "wait":
-        st = await wait_for_download(ws, args.pattern, args.timeout)
+        st = await wait_for_download(ws, args.pattern, args.timeout or cfg.files.wait_timeout)
         print(format_status(st))
         return 0 if st["state"] == "complete" else 1
     p = ws.resolve(args.path)
@@ -547,7 +547,7 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--limit", type=int, default=50)
     x = fls.add_parser("wait", help="다운로드 완료 대기")
     x.add_argument("pattern", nargs="?", default="*")
-    x.add_argument("--timeout", type=float, default=120)
+    x.add_argument("--timeout", type=float, help="최대 대기 초 (기본: files.wait_timeout = 300)")
 
     ct = sub.add_parser("ctools", help="동적 도구(에이전트가 만든 tool) 관리")
     cts = ct.add_subparsers(dest="ctools_cmd", required=True)

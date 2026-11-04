@@ -153,7 +153,7 @@ inhouse-agent files list "*.xlsx" --recent 60
 inhouse-agent files status downloads/매출현황_2026-10.xlsx
 inhouse-agent files analyze downloads/매출현황_2026-10.xlsx
 inhouse-agent files query downloads/매출현황_2026-10.xlsx --group-by 부서 --agg sum:금액,count
-inhouse-agent files wait "*.xlsx" --timeout 60
+inhouse-agent files wait "*.xlsx"             # 기본 300초 (--timeout 으로 변경)
 ```
 
 ### 웹 UI (`serve` 실행 후 http://<서버>:8080/)
@@ -197,7 +197,8 @@ inhouse-agent files wait "*.xlsx" --timeout 60
 | tool | 용도 |
 |---|---|
 | `file_status` | 파일 1개의 상태를 상세히 점검합니다. |
-| `wait_for_download` | 패턴에 맞는 파일이 완료될 때까지 기다립니다. |
+| `wait_for_download` | 패턴에 맞는 파일이 완료될 때까지 기다립니다 (기본 300초, `files.wait_timeout`). |
+| `fetch_remote_file` | 원격 MCP 서버 PC의 파일을 가져옵니다 (원격 서버가 있을 때만). |
 | `list_downloads` | 최근 파일 목록을 보여줍니다. |
 | `analyze_file` | 구조, 통계, 샘플 행, 문서 텍스트를 뽑습니다. |
 | `query_table` | 필터, 정렬, 그룹 집계를 정확하게 계산합니다. |
@@ -208,6 +209,33 @@ inhouse-agent files wait "*.xlsx" --timeout 60
 | `use_skill` / `read_skill_file` | 스킬 지침과 참고 파일을 불러옵니다. |
 
 파일 접근은 workspace, 감시 폴더, `extra_read_dirs`, outputs 안으로만 제한되고, 쓰기는 workspace 안에서만 됩니다.
+
+### 원격 MCP 서버(다른 PC)의 파일 받기
+
+MCP 서버가 다른 PC에서 돌면, 그 서버가 알려주는 경로(`C:\mcp\downloads\a.xlsx`)와 `http://localhost:9000/...` 링크는
+에이전트 PC에서 그대로 쓸 수 없습니다. 에이전트는 다음과 같이 처리합니다.
+
+- **원격 서버 판단**: `remote: auto`(기본)면 `url`의 호스트가 localhost나 자기 PC가 아닐 때 원격 서버로 봅니다.
+- **결과에 원격 경로가 나오면 자동으로 파일을 가져옵니다**. 아래 순서로 시도하고, 받은 파일은 `workspace/downloads/<서버이름>/`에 저장한 뒤 상태를 점검합니다.
+  1. `path_map`: 원격 경로를 공유폴더(SMB)나 URL로 바꿉니다. 공유폴더는 다운로드 감시 폴더에 자동으로 들어가므로 `wait_for_download`도 됩니다.
+  2. `fetch_tool`: 원격 MCP의 "파일 내용 돌려주기" tool을 호출합니다 (EmbeddedResource blob 또는 `{"base64": ...}`).
+  3. `use_resources`: MCP `resources/read`로 `file:///경로`를 읽습니다.
+- **localhost 링크**: 결과의 `http://localhost:포트/...`를 MCP 서버 주소로 바꾼 뒤 `[다운로드 링크 감지]`에 보여줍니다.
+- **나중에 생기는 파일**: 원격에서 아직 받는 중이거나 나중에 생긴 파일은 `fetch_remote_file(server, path, wait_sec)`로 가져옵니다.
+- **설정이 없을 때**: 가져올 방법이 없으면 이유와 필요한 설정(`remote_files`)을 결과에 알려줍니다. 원격 서버인데 "로컬 폴더를 기다리라"는 안내는 하지 않습니다.
+
+설정 예는 `config/config.example.yaml`의 `groupware_remote`를 참고하세요.
+
+> ⚠️ **mcp SDK 1.x(FastMCP)로 만든 MCP 서버를 다른 PC에서 접속하면 `421 Misdirected Request`가 날 수 있습니다.**
+> FastMCP를 기본 host(127.0.0.1)로 만들면 DNS rebinding 보호가 켜져서 `localhost` Host만 허용하기 때문입니다.
+> MCP 서버 쪽에서 접속에 쓰는 주소를 허용하세요.
+> ```python
+> from mcp.server.transport_security import TransportSecuritySettings
+> mcp = FastMCP("gw", host="0.0.0.0", port=8001,
+>               transport_security=TransportSecuritySettings(
+>                   enable_dns_rebinding_protection=True, allowed_hosts=["10.0.0.5:*", "mcp.company.com:*"]))
+> ```
+웹컨트롤 MCP를 직접 고칠 수 있다면 **`fetch_tool`을 하나 만들어 두는 방법이 가장 간단하고 확실합니다** (`examples/sample_mcp_server.py`의 `read_server_file` 참고).
 
 ## 5. 스킬
 
@@ -388,6 +416,7 @@ src/inhouse_agent/
   builtins.py   내장 tool (파일, 분석, 스킬, ask_user, 저장, download_url, create_tool, run_python)
   downloader.py 다운로드 URL 받기 / 일반 HTTP 요청 (한글 파일명, 프록시/CA, 쿠키, 호스트 제한)
   links.py      서명된 다운로드 링크 (/d/...)
+  remote_files.py 원격 MCP 서버 파일 가져오기 (path_map, fetch_tool, resource, localhost 링크 변환)
   toolkit.py    범용 도구 (web_fetch, http_request, sql_query, write_excel, make_chart, send_email ...)
   dynamic_tools.py 동적 도구 저장소, 정적 검사, 승인, 자식 프로세스 실행(+tool 호출 중계)
   _tool_runner.py  동적 도구를 실행하는 자식 프로세스
@@ -426,6 +455,7 @@ pytest -q
 - 스킬 파싱/검증/버전 백업, 스킬 실행 중 ask_user 답변 반영과 다운로드 감지
 - 웹 API 흐름: 스킬 생성/저장 → 실행 → SSE 이벤트 → 질문 답변 → 후속 지시 → 파일 업로드/분석
 - 다운로드: 한글 파일명 복원, 리다이렉트, 404, 크기 제한, 호스트 제한, 링크로컬 차단, 사이트별 헤더/쿠키, 로그인 페이지 감지, 링크 감지/자동 받기
+- 원격 MCP: 별도 프로세스 HTTP 서버로 원격 PC 흉내 → fetch_tool / path_map(공유폴더, URL) / MCP resource / 설정 없음 안내 / fetch_remote_file 대기 / localhost 링크 변환(LAN IP 접속)
 - 링크: 서명/위조/만료/허용폴더, 경로 인식(공백·한글 파일명, 폴더), 토큰 없이 서명 링크로 받기, 폴더 zip
 - 범용 도구: web_fetch(EUC-KR, 상대 링크), http_request 승인, web_search, sql_query 조인/저장, compare_tables, write_excel 서식, make_chart, create_zip, search_files, 기억/계획 이벤트, 메일(수신자 제한/첨부/링크/거부), 메신저
 - 동적 도구: 정적 검사, 승인/거부/비대화형 거절, 테스트 실패 시 미등록, 같은 실행 안에서 생성→호출, 재시작 후 재사용, 재귀 호출 금지, 제한 시간, 비밀 환경변수 미전달, mode off, 웹 API
