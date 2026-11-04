@@ -60,6 +60,15 @@ DEFAULT_SYSTEM_PROMPT = """당신은 사내 업무 자료 수집·분석 에이�
 - 사용자가 첨부한 이미지는 직접 보고 판단하세요 (화면 캡처, 표 사진, 오류 화면 등).
 - 파일로 저장된 이미지(MCP 캡처, 다운로드 이미지, 이전 대화의 첨부)를 봐야 하면 view_image 로 불러오세요.
 
+과거 자료 학습 / 규칙 (스스로 분석 → 규칙화 → 검증 → 갱신):
+- 과거 자료를 배우라는 요청: rulebook_create → rulebook_learn(좋은 예시) → doc_structure 로 각 장의 실제 내용을 읽고
+  자동 후보를 검토(의미 없는 후보 deprecated, 중요도 조정) → 기계 검사로 못 잡는 기준은 judgment 규칙으로 추가 → rulebook_reflect.
+- 새 제품·기술 분석 요청(예: 뮤즈, AI 비서): rulebook_outline 으로 장별 계획 → 장마다 필요한 자료 조사 →
+  write_pptx(과거 보고서를 template 으로)/write_excel 작성 → rulebook_validate → 어긴 규칙 고쳐 다시 검증 → judgment 규칙 판정(rulebook_judge)
+  → rulebook_record_product 로 핵심 사실 기록.
+- 규칙이 현실과 안 맞으면(좋은 자료인데 어김, 새 기술이라 장이 더 필요함 등) 근거와 함께 rulebook_update_rule/add_rule 로 고치세요.
+  규칙을 바꿀 때는 반드시 이유(reason)를 남기고, 사용자가 승인한 결과물만 label=exemplar 로 학습하세요.
+
 이전 작업 이어가기:
 - '지난번', '이전에 했던', '그 파일' 같은 요청은 시스템 프롬프트의 '최근 작업' 과 list_past_work / read_past_work 로 확인하세요.
 
@@ -117,6 +126,7 @@ class Agent:
         self.cfg = cfg
         self.skills = skills
         self.recent_sessions_in_prompt = 5
+        self.rules_path: Any = None
         self.image_max_side = 2048
 
     # ------------------------------------------------------------------
@@ -149,6 +159,13 @@ class Agent:
                 f"현재 사용자: {user} (이 사용자의 작업폴더에서만 작업합니다)"
                 + (f"\n이 사용자의 최근 작업 (자세한 내용은 read_past_work):\n{recent}" if recent else "")
             )
+        if self.rules_path is not None:
+            from .rulebook import RulebookStore
+
+            books = RulebookStore(self.rules_path).list()
+            if books:
+                parts.append("규칙집 (과거 자료에서 배운 장별 구성·규칙 - 보고서 작성/검토 시 rulebook_outline, rulebook_validate):\n" + "\n".join(
+                    f"- {b['name']}: {b['description']} (v{b['version']}, 좋은 예시 {b['exemplars']}건, 활성 규칙 {b['rules'].get('active', 0)}개)" for b in books))
         if self.skills is not None:
             catalog = self.skills.catalog_text()
             if catalog:

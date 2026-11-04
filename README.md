@@ -37,6 +37,7 @@
 | 범용 자동화 도구 | 공개 자동화 에이전트들의 도구를 분석해서 추가했습니다([분석 문서](docs/agent_tools_analysis.md)): 웹 읽기/검색, HTTP API, SQL, 표 비교, 엑셀·차트·zip 생성, 파일 내용 검색, 기억, 작업 계획, 메일/메신저 알림 |
 | 사용자별 작업폴더 / 이어서 하기 | 사용자 ID별로 `workspace/users/<ID>/` 폴더를 따로 씁니다. 대화는 자동으로 저장되어 "내 작업" 목록에서 골라 이어서 진행할 수 있고, 서버를 다시 켜도 유지됩니다. 에이전트가 최근 작업을 기억합니다. |
 | 채팅 이미지 | 🖼 버튼, 붙여넣기(Ctrl+V), 끌어놓기로 첨부합니다. 비전 모델이 직접 보고, 저장된 이미지(MCP 캡처 등)는 `view_image`로 봅니다. |
+| 과거 자료 학습 / 규칙 | 과거 보고서(PPT/엑셀/Word/PDF)를 장별로 분석해 장별 구성과 규칙을 만듭니다. 새 제품(예: 뮤즈, AI 비서)을 분석해 같은 형식의 PPT를 만들고 규칙으로 검증합니다. 검증 결과와 승인된 결과물로 규칙을 스스로 고쳐 나가고, 버전과 변경 기록을 남깁니다. |
 | 인터랙티브 UI | 스킬을 편집하면 입력 폼이 즉시 바뀌고, 바로 테스트 실행할 수 있습니다. 실행 과정은 실시간으로 표시되고, 에이전트의 질문(`ask_user`)에 화면에서 답할 수 있습니다. 결과를 보고 후속 지시를 내릴 수 있습니다. |
 | 사용 방식 | 대화형 CLI, 1회 실행 CLI, 웹 채팅 화면과 REST API(`serve`), 예약 데몬(`scheduler`) |
 | SDK 호환 | mcp SDK 1.x와 2.x, openai SDK 1.x 이상에서 테스트했습니다. |
@@ -401,7 +402,84 @@ downloads/  uploads/images/  files/  results/  sessions/  memory.json
 - `view_image`로는 MCP 화면 캡처나 다운로드한 이미지도 에이전트가 직접 볼 수 있습니다.
 - 배포 모델이 이미지를 지원하지 않으면 `llm.vision: false`로 설정하세요. 그러면 이미지 대신 안내 문구를 보냅니다.
 
-## 9. 결과 파일 받기 / 공유 링크
+## 9. 과거 자료 학습 → 규칙 → 검증 → 규칙 갱신
+
+```
+과거 자료(PPT/Excel) ─▶ ① 장별 구조 추출 ─▶ ② 장별 구성(blueprint) 도출 + 규칙 후보 자동 발굴
+                                              │
+                    LLM 이 근거를 보고 규칙 추가/수정 ◀┘ (각 규칙은 과거 자료에서 '지지율'을 계산)
+                                              ▼
+새 제품(뮤즈, AI 비서 …) ─▶ ③ 장별 계획(outline) ─▶ 조사(MCP/웹) ─▶ PPT/Excel 작성 ─▶ ④ 규칙으로 검증
+                                              ▼
+                     ⑤ 회고(reflect): 좋은 자료인데 어긴 규칙 → 완화/폐기, 새 패턴 → 규칙 추가
+                     승인된 결과물은 다시 '좋은 예시'로 학습 → 규칙 지지율 자동 갱신 (버전·변경기록 보관)
+```
+
+**① 장 구조 추출** (`doc_structure`)
+
+| 형식 | 추출하는 내용 |
+|---|---|
+| PPT | 슬라이드마다 제목, 본문(수준), 표(열·행 수), 차트(종류·계열·항목), 이미지 수, 노트 |
+| 엑셀 | 시트마다 열, 숫자 열, 빈칸 비율 |
+| Word / PDF | 제목 단위 / 페이지 단위 |
+
+**② 학습** (`rulebook_learn`)
+
+- 좋은 예시들의 장 제목을 비슷한 것끼리 묶어 **장별 구성**을 만듭니다. 장마다 다음 정보가 들어갑니다.
+  - 몇 %의 자료에 나오는지, 평균 위치
+  - 장마다 필요한 형식(표/차트/이미지 비율), 공통 표 열, 핵심어, 평균 분량, 예시
+- 제목은 공백을 없앤 글자 단위로 비교하고, "현황·분석" 같은 흔한 말을 뺀 비교도 함께 씁니다. 그래서 "3. 경쟁사 비교", "경쟁사비교 분석", "경쟁 현황 비교"가 같은 장으로 묶입니다.
+- 제품명처럼 자료마다 바뀌는 부분은 빼고, 공통 부분(예: "기술 분석 보고서")을 장 이름으로 씁니다.
+- 장별 구성에서 기계적으로 검사할 수 있는 **규칙 후보**를 자동으로 뽑습니다. 필수 장, 장의 표/차트, 표 열, 핵심어, 순서, 분량, 엑셀 시트/열이 대상입니다.
+- 모든 규칙의 **지지율**(좋은 예시 중 그 규칙을 지킨 비율)을 다시 계산하고, 상태를 자동으로 바꿉니다.
+  - 후보 → 활성: 지지율 75% 이상, 근거 자료 2건 이상
+  - 활성 → 재검토: 지지율 50% 이하
+- 사람이나 에이전트가 상태를 직접 정하면 🔒 잠겨서 자동으로 바뀌지 않습니다. 통계보다 팀 기준이 우선합니다.
+
+**규칙 유형**
+
+| 유형 | 검사 내용 |
+|---|---|
+| `section_required` / `section_order` | 장 존재 / 장 순서 |
+| `section_element` | 장 안의 표·차트·이미지 |
+| `table_columns` | 표 열 |
+| `section_keywords` | 핵심어 |
+| `section_length` | 분량 |
+| `text_regex` | 정규식 (예: 출처 표기) |
+| `slide_count` | 전체 장 수 |
+| `excel_sheet` / `excel_columns` / `excel_values` | 엑셀 시트 / 열 / 값의 빈칸·범위 |
+| `judgment` | LLM이 판단 (예: "시사점이 앞 장 데이터로 뒷받침되는가"). `rulebook_judge`로 판정을 기록하고, 판정도 지지율에 반영됩니다. |
+
+**③④ 새 제품 분석** (`product_analysis` 스킬)
+
+1. `rulebook_outline`으로 장별 계획을 받습니다. 장마다 필요한 형식, 표 열, 다룰 내용, 지킬 규칙, 과거 예시가 들어 있습니다.
+2. 장마다 필요한 자료를 조사합니다.
+3. `write_pptx`로 PPT를 만듭니다. 과거 보고서를 template으로 주면 같은 디자인을 씁니다.
+4. `rulebook_validate`로 검증합니다. 장별 체크리스트, 어긴 규칙, 점수(must 3 / should 2 / nice 1 가중)가 나옵니다.
+5. 어긴 규칙을 고치고 다시 검증한 뒤, `rulebook_record_product`로 제품의 핵심 사실을 기록합니다. 이 기록은 다음 제품과 비교하는 데 씁니다.
+
+**⑤ 스스로 점검** (`rulebook_reflect`)
+
+다음을 찾아 개선을 제안합니다. 에이전트는 근거를 `doc_structure`로 확인한 뒤 `rulebook_update_rule`/`rulebook_add_rule`로 반영하고, 반드시 이유를 남깁니다.
+
+- 좋은 예시도 어기는 규칙 (너무 엄격함)
+- 근거 없는 규칙
+- 규칙이 없는 자주 나오는 장
+- 새 자료에서 자주 빠지는 장
+- 아직 판정되지 않은 판단형 규칙
+
+**저장과 공유**
+
+- 규칙집은 `rulebooks/<이름>/`에 저장되고 모든 사용자가 공유합니다.
+  ```
+  rulebook.json  corpus/  validations/  products.json  changelog.jsonl  .history/
+  ```
+- 규칙마다 버전과 변경 이력(누가, 왜)이 남고, 규칙집 전체 버전 백업도 보관됩니다.
+- 사용자가 승인한 결과물을 `label=exemplar`로 검증하거나 학습하면 좋은 예시에 추가됩니다. 그러면 규칙 지지율이 다시 계산되어, 규칙이 실제 작성 관행을 따라가게 됩니다.
+- 웹 UI **규칙** 탭에서 장별 구성, 규칙(상태·중요도·문장 바로 수정), 검증(장별 체크리스트), 점검, 제품, 변경 기록을 보고 자료 학습, 문서 검증, 엑셀 내보내기를 합니다. 🤖 버튼은 에이전트에게 작업을 넘깁니다.
+- 스킬: `learn_rules`(과거 자료 학습과 규칙 정리), `product_analysis`(새 제품 분석, 검증, 규칙 갱신)
+
+## 10. 결과 파일 받기 / 공유 링크
 
 - **웹 화면**: 답변이나 tool 결과에 실제로 있는 파일/폴더 경로가 나오면 📎 링크로 바뀝니다. 파일명에 공백이나 한글이 있어도 됩니다.
   - 경로 클릭: 내려받기 (폴더는 zip으로 묶음)
@@ -418,7 +496,7 @@ downloads/  uploads/images/  files/  results/  sessions/  memory.json
   - CLI 결과 (`[파일 받기]`)
 - **CLI로 링크 만들기**: `inhouse-agent link files/reports/10월_매출.xlsx --hours 24`
 
-## 10. 범용 자동화 도구
+## 11. 범용 자동화 도구
 
 공개 자동화 에이전트(OpenAI Agents SDK, smolagents, Manus, n8n, LangChain, Claude Code)의 도구를 비교한 결과와,
 무엇을 넣고 무엇을 뺐는지(예: 셸 명령)는 [docs/agent_tools_analysis.md](docs/agent_tools_analysis.md)에 정리했습니다.
@@ -439,7 +517,7 @@ downloads/  uploads/images/  files/  results/  sessions/  memory.json
 | `send_email` | 사내 SMTP 메일 (첨부와 다운로드 링크) | `notify.email.smtp_host`와 `allowed_recipients`가 필요. 대화형에서는 승인 |
 | `send_message` | Teams/Slack 웹훅 | `notify.webhooks`에 등록된 채널로만 발송 |
 
-## 11. 구조
+## 12. 구조
 
 ```
 src/inhouse_agent/
@@ -454,6 +532,10 @@ src/inhouse_agent/
   downloader.py 다운로드 URL 받기 / 일반 HTTP 요청 (한글 파일명, 프록시/CA, 쿠키, 호스트 제한)
   links.py      서명된 다운로드 링크 (/d/...)
   users.py      사용자별 작업폴더(WorkspaceProxy), 대화 세션 저장/이어서 하기
+  docstruct.py  PPT/엑셀/Word/PDF 장(슬라이드/시트) 단위 구조 추출
+  rulebook.py   장별 구성 도출, 규칙 후보 발굴, 규칙 검사·지지율·상태 자동 변경, 검증, 점검(reflect), 버전/변경기록
+  rules_tools.py 규칙집 tool (learn/add/update/validate/judge/outline/reflect/record_product/export) + write_pptx
+  pptxgen.py    PPT 생성 (과거 보고서 템플릿 디자인 사용)
   images.py     채팅 이미지 → 비전 모델 입력 (축소/변환, 이전 이미지 정리)
   remote_files.py 원격 MCP 서버 파일 가져오기 (path_map, fetch_tool, resource, localhost 링크 변환)
   toolkit.py    범용 도구 (web_fetch, http_request, sql_query, write_excel, make_chart, send_email ...)
@@ -475,7 +557,7 @@ tests/                          통합 테스트 (실제 MCP 서버, 가짜 Azur
   현재 시각과 서버 목록, 서버 설명은 자동으로 붙습니다.
 - 결과를 디버깅할 때는 `outputs/<작업>/_trace/*.json`에서 LLM이 어떤 tool을 어떤 인자로 불렀는지 확인할 수 있습니다.
 
-## 12. 테스트
+## 13. 테스트
 
 ```bash
 pip install -e ".[server,dev]"
@@ -494,6 +576,8 @@ pytest -q
 - 스킬 파싱/검증/버전 백업, 스킬 실행 중 ask_user 답변 반영과 다운로드 감지
 - 웹 API 흐름: 스킬 생성/저장 → 실행 → SSE 이벤트 → 질문 답변 → 후속 지시 → 파일 업로드/분석
 - 다운로드: 한글 파일명 복원, 리다이렉트, 404, 크기 제한, 호스트 제한, 링크로컬 차단, 사이트별 헤더/쿠키, 로그인 페이지 감지, 링크 감지/자동 받기
+- 규칙집: 슬라이드 구조(표/차트/노트, python-pptx 없이도), 제목 유사도, 장별 구성(공통 이름), 후보 발굴·중복 방지, PPT/엑셀 분리,
+  검증 체크리스트, 판단형 판정, 승인 자료 학습 → 자동 재검토, 잠금 우선, 점검 제안, 장별 계획, PPT 생성(템플릿) → 검증 100점, tool/API 경로
 - 사용자: ID 검증, 사용자 간 파일/기억/세션/실행 분리, 공용 다운로드 → 사용자 폴더 이동, ID 필수/허용 목록, 예약작업 user
 - 이어서 하기: 세션 저장(이미지 데이터 대신 경로) → 서버 재시작 후 같은 세션으로 이어서(이전 대화 전달), 이름 변경/삭제, list/read_past_work
 - 이미지: 업로드 검증, 큰 이미지 축소, content 배열 구성, 이전 턴 이미지 정리, view_image 주입, 내부 키 제거, vision=false

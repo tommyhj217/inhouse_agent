@@ -14,3 +14,5 @@ tools/.drafts/
 tools/.trash/
 tools/.history/
 workspace/.link_secret
+rulebooks/*/.history/
+rulebooks/*/*.tmp

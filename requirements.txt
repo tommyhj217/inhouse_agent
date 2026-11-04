@@ -11,6 +11,8 @@ xlrd>=2.0
 matplotlib>=3.7
 # 채팅 이미지 축소/변환
 pillow>=10
+# PPT 분석/생성 (규칙 학습, write_pptx)
+python-pptx>=0.6.21
 tzdata; platform_system == 'Windows'
 # 웹/API 서버 (serve 명령)
 fastapi>=0.110

@@ -111,6 +111,14 @@ table.grid tbody tr{cursor:pointer}
 .mono{font-family:ui-monospace,Consolas,"D2Coding",monospace;font-size:13px;line-height:1.5;tab-size:4}
 #t-code{flex:1;min-height:260px;width:100%}
 .ask pre{max-height:280px}
+.rules{display:grid;grid-template-columns:230px minmax(0,1fr);gap:12px}
+.subnav{display:flex;gap:4px;flex-wrap:wrap;border-bottom:1px solid var(--line);margin:8px 0}
+.subnav button{border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;padding:6px 10px}
+.subnav button.active{border-bottom-color:var(--accent);color:var(--accent);font-weight:600}
+table.grid select{padding:2px 4px;font-size:12px}
+.sug{border-left:3px solid var(--warn);padding:4px 10px;margin:6px 0}
+.pick{max-height:50vh;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:6px;margin:6px 0}
+.pick label{display:flex;gap:6px;align-items:center;font-size:13px;padding:2px 0}
 .status-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}
 .hidden{display:none!important}
 @media (max-width:800px){
@@ -120,6 +128,7 @@ table.grid tbody tr{cursor:pointer}
 }
 @media (max-width:1000px){
   .tools{grid-template-columns:1fr;height:auto}
+  .rules{grid-template-columns:1fr}
   .tools>.card{min-height:auto}
   .skills{grid-template-columns:1fr;height:auto}
   .skills>.card{min-height:auto}
@@ -137,6 +146,7 @@ table.grid tbody tr{cursor:pointer}
     <button data-tab="skills">스킬</button>
     <button data-tab="files">파일</button>
     <button data-tab="tools">도구</button>
+    <button data-tab="rules">규칙</button>
     <button data-tab="status">상태</button>
   </nav>
   <div class="right">
@@ -288,6 +298,30 @@ table.grid tbody tr{cursor:pointer}
   </div>
 </section>
 
+<!-- ===================== 규칙 (과거 자료 학습 → 규칙 → 검증 → 갱신) ===================== -->
+<section id="tab-rules" class="tab">
+  <div class="rules">
+    <div class="card">
+      <div class="row"><b class="grow">규칙집</b><button id="rb-new">＋ 새로</button></div>
+      <div id="rb-list" class="list"></div>
+      <div class="small muted" style="margin-top:8px">과거 보고서(PPT/엑셀)를 학습해 장별 구성과 규칙을 만들고, 새 제품 분석 결과로 검증·갱신합니다.</div>
+    </div>
+    <div class="card" style="min-width:0">
+      <div class="row"><b id="rb-title" class="grow">규칙집을 선택하세요</b>
+        <button id="rb-learn" disabled title="과거 자료를 좋은 예시로 학습">📚 자료 학습</button>
+        <button id="rb-validate" disabled title="문서를 규칙으로 검증">✅ 문서 검증</button>
+        <button id="rb-export" disabled>엑셀로 내보내기</button>
+        <button id="rb-agent" disabled class="primary" title="조사 탭에서 에이전트에게 맡기기">🤖 에이전트에게</button></div>
+      <div id="rb-meta" class="small muted"></div>
+      <div class="subnav" id="rb-subnav">
+        <button data-v="blueprint" class="active">장별 구성</button><button data-v="rules">규칙</button><button data-v="validations">검증</button>
+        <button data-v="reflect">점검</button><button data-v="products">제품</button><button data-v="changelog">변경 기록</button>
+      </div>
+      <div id="rb-body" class="scroll" style="max-height:calc(100vh - 260px)"></div>
+    </div>
+  </div>
+</section>
+
 <!-- ===================== 상태 ===================== -->
 <section id="tab-status" class="tab">
   <div class="row" style="margin-bottom:10px"><button id="st-refresh">새로고침</button><span id="st-info" class="small muted"></span></div>
@@ -382,6 +416,7 @@ function showTab(name) {
   if (name === "files") loadFiles();
   if (name === "status") loadStatus();
   if (name === "tools") loadTools();
+  if (name === "rules") loadRulebooks();
 }
 
 // ---------------- 실행 뷰 (조사/스킬 공용) ----------------
@@ -913,6 +948,143 @@ $("#t-run").onclick = async () => {
     const o = $("#t-out"); o.classList.remove("hidden"); o.textContent = r.text;
   } catch (e) { $("#t-run-status").innerHTML = `<span class="b-err">${esc(e.message)}</span>`; }
   $("#t-run").disabled = false;
+};
+
+// ---------------- 규칙집 ----------------
+let rbCur = null, rbData = null, rbView = "blueprint";
+const ST = {candidate: ["후보", "b-run"], active: ["활성", "b-ok"], needs_review: ["재검토", "b-warn"], deprecated: ["폐기", ""]};
+const stBadge = s => { const [t, c] = ST[s] || [s, ""]; return `<span class="badge ${c}">${t}</span>`; };
+const pct = x => x == null ? "-" : Math.round(x * 100) + "%";
+const EL = {table: "표", chart: "차트", image: "이미지", notes: "노트"};
+async function loadRulebooks(select) {
+  try {
+    const items = await api("/api/rulebooks");
+    $("#rb-list").innerHTML = items.map(x => `<div class="item ${x.name === rbCur ? "active" : ""}" data-n="${esc(x.name)}"><div>${esc(x.name)} <span class="small muted">v${x.version}</span></div>
+      <div class="small muted">${esc(x.description).slice(0, 40)} · 예시 ${x.exemplars} · 활성 ${x.rules.active || 0}</div></div>`).join("") || `<div class="small muted">규칙집이 없습니다</div>`;
+    document.querySelectorAll("#rb-list .item").forEach(el => el.onclick = () => openRulebook(el.dataset.n));
+    if (select || rbCur) openRulebook(select || rbCur);
+  } catch (e) { $("#rb-list").innerHTML = `<div class="b-err small">${esc(e.message)}</div>`; }
+}
+async function openRulebook(name) {
+  try { rbData = await api(`/api/rulebooks/${encodeURIComponent(name)}`); } catch (e) { toast(e.message); return; }
+  rbCur = name;
+  document.querySelectorAll("#rb-list .item").forEach(el => el.classList.toggle("active", el.dataset.n === name));
+  const li = document.querySelector(`#rb-list .item[data-n="${CSS.escape(name)}"]`);
+  if (li) li.innerHTML = `<div>${esc(rbData.name)} <span class="small muted">v${rbData.version}</span></div><div class="small muted">${esc(rbData.description || "").slice(0, 40)} · 예시 ${rbData.corpus.filter(x => x.label === "exemplar").length} · 활성 ${rbData.rules.filter(r => r.status === "active").length}</div>`;
+  ["#rb-learn", "#rb-validate", "#rb-export", "#rb-agent"].forEach(x => $(x).disabled = false);
+  const c = {}; rbData.rules.forEach(r => c[r.status] = (c[r.status] || 0) + 1);
+  $("#rb-title").textContent = `${rbData.name} v${rbData.version}`;
+  $("#rb-meta").textContent = `${rbData.description || ""} · 좋은 예시 ${rbData.corpus.filter(x => x.label === "exemplar").length}건 · 규칙 활성 ${c.active || 0} / 후보 ${c.candidate || 0} / 재검토 ${c.needs_review || 0} / 폐기 ${c.deprecated || 0}`;
+  await renderRb();
+}
+document.querySelectorAll("#rb-subnav button").forEach(b => b.onclick = () => { rbView = b.dataset.v; document.querySelectorAll("#rb-subnav button").forEach(x => x.classList.toggle("active", x === b)); renderRb(); });
+async function renderRb() {
+  const body = $("#rb-body"); if (!rbData) return;
+  if (rbView === "blueprint") {
+    const bp = rbData.blueprint;
+    body.innerHTML = bp.length ? `<div class="small muted">좋은 예시에서 묶은 장. 등장 비율이 높을수록 '보통 꼭 들어가는 장' 입니다.</div><table class="grid"><thead><tr><th>#</th><th>장</th><th>등장</th><th>필요한 형식</th><th>표 열 / 다룰 내용</th><th>예시</th></tr></thead><tbody>${bp.map((b, i) => `<tr style="${b.support < 0.5 ? "opacity:.55" : ""}"><td>${i + 1}</td><td><b>${esc(b.name)}</b><div class="small muted">${esc(b.patterns.slice(0, 3).join(" / "))}</div></td>
+      <td>${pct(b.support)} <span class="small muted">(${b.docs}건)</span></td><td>${Object.entries(b.elements).map(([k, v]) => `${EL[k] || k} ${pct(v)}`).join("<br>") || "본문"}<div class="small muted">평균 ${b.avg_words}단어</div></td>
+      <td class="small">${b.columns.length ? "열: " + esc(b.columns.join(", ")) + "<br>" : ""}${b.keywords.length ? "핵심어: " + esc(b.keywords.join(", ")) : ""}</td>
+      <td class="small muted">${b.examples.slice(0, 2).map(e => `${esc(e.doc)} #${e.no} ${esc(e.title)}`).join("<br>")}</td></tr>`).join("")}</tbody></table>` : `<div class="muted">아직 학습한 자료가 없습니다. 📚 자료 학습을 눌러 과거 보고서를 추가하세요.</div>`;
+  } else if (rbView === "rules") {
+    const order = {active: 0, needs_review: 1, candidate: 2, deprecated: 3}, sev = {must: 0, should: 1, nice: 2};
+    const rules = [...rbData.rules].sort((a, b) => (order[a.status] - order[b.status]) || (sev[a.severity] - sev[b.severity]));
+    body.innerHTML = `<div class="row" style="margin-bottom:6px"><span class="small muted grow">지지율 = 좋은 예시 중 이 규칙을 지킨 비율. 상태를 직접 바꾸면 🔒 잠겨 자동 변경되지 않습니다.</span><button id="rb-addrule">＋ 규칙 추가</button></div>
+      <table class="grid"><thead><tr><th>ID</th><th>상태</th><th>중요도</th><th>규칙</th><th>지지율</th><th>검증 실패</th></tr></thead><tbody>${rules.map(r => `<tr data-id="${r.id}" style="${r.status === "deprecated" ? "opacity:.5" : ""}">
+      <td>${r.id}</td><td><select class="r-status">${Object.keys(ST).map(k => `<option value="${k}" ${k === r.status ? "selected" : ""}>${ST[k][0]}</option>`).join("")}</select>${r.locked ? " 🔒" : ""}</td>
+      <td><select class="r-sev">${["must", "should", "nice"].map(k => `<option ${k === r.severity ? "selected" : ""}>${k}</option>`).join("")}</select></td>
+      <td><span class="r-stmt" title="클릭해서 문장 수정">${esc(r.statement)}</span><div class="small muted">${esc(r.type)} ${esc(JSON.stringify(r.params)).slice(0, 120)}${r.rationale ? " · 근거: " + esc(r.rationale) : ""}</div></td>
+      <td title="${esc((r.support.failing_docs || []).join("\n"))}">${pct(r.support.ratio)} <span class="small muted">(${r.support.pass || 0}/${(r.support.pass || 0) + (r.support.fail || 0)})</span></td>
+      <td>${r.stats.fails}/${r.stats.validations}</td></tr>`).join("")}</tbody></table>`;
+    const patch = async (id, changes, reason) => { try { await api(`/api/rulebooks/${encodeURIComponent(rbCur)}/rules/${id}`, {method: "PATCH", json: {changes, reason}}); await openRulebook(rbCur); } catch (e) { toast(e.message); } };
+    body.querySelectorAll("tr[data-id]").forEach(tr => {
+      const id = tr.dataset.id;
+      tr.querySelector(".r-status").onchange = e => { const reason = prompt("상태를 바꾸는 이유 (변경 기록에 남습니다)", ""); if (reason === null) { renderRb(); return; } patch(id, {status: e.target.value}, reason || "화면에서 변경"); };
+      tr.querySelector(".r-sev").onchange = e => patch(id, {severity: e.target.value}, "중요도 변경");
+      tr.querySelector(".r-stmt").onclick = () => { const t = prompt("규칙 문장", tr.querySelector(".r-stmt").textContent); if (t) patch(id, {statement: t}, "문장 수정"); };
+    });
+    $("#rb-addrule").onclick = async () => {
+      const statement = prompt("규칙 문장 (예: 시사점은 앞 장의 데이터로 뒷받침되어야 한다)"); if (!statement) return;
+      try { await api(`/api/rulebooks/${encodeURIComponent(rbCur)}/rules`, {json: {type: "judgment", params: {question: statement}, statement, rationale: "화면에서 추가", severity: "should", status: "active"}}); await openRulebook(rbCur); rbView = "rules"; renderRb(); }
+      catch (e) { toast(e.message); }
+    };
+  } else if (rbView === "validations") {
+    const vs = await api(`/api/rulebooks/${encodeURIComponent(rbCur)}/validations`);
+    body.innerHTML = vs.length ? `<table class="grid"><thead><tr><th>일시</th><th>문서</th><th>구분</th><th>제품</th><th>점수</th><th>실패</th></tr></thead><tbody>${vs.map(v => `<tr data-v="${v.id}"><td class="small">${new Date(v.time * 1000).toLocaleString()}</td><td>${esc(v.name)}</td><td>${v.label === "exemplar" ? "좋은 예시" : "새 자료"}</td><td>${esc(v.product || "")}</td><td><b>${v.score ?? "-"}</b></td><td>${v.fails}${v.pending_judgments && v.pending_judgments.length ? ` <span class="badge b-warn">판정 ${v.pending_judgments.length}</span>` : ""}</td></tr>`).join("")}</tbody></table><div id="rb-vdetail"></div>` : `<div class="muted">검증 기록이 없습니다.</div>`;
+    body.querySelectorAll("tr[data-v]").forEach(tr => tr.onclick = async () => renderValidation(await api(`/api/rulebooks/${encodeURIComponent(rbCur)}/validations/${tr.dataset.v}`), $("#rb-vdetail")));
+  } else if (rbView === "reflect") {
+    const r = await api(`/api/rulebooks/${encodeURIComponent(rbCur)}/reflect`);
+    body.innerHTML = `<div class="small muted">규칙과 근거(좋은 예시), 검증 이력이 어긋나는 곳입니다. 🤖 버튼으로 에이전트에게 근거를 확인하고 반영하도록 맡길 수 있습니다.</div>`
+      + (r.suggestions.length ? r.suggestions.map(x => `<div class="sug"><b>${esc(x.rule || x.section || "")}</b> <span class="badge">${esc(x.kind)}</span> ${esc(x.message)}${x.evidence && x.evidence.length ? `<div class="small muted">${esc(x.evidence.join(" / "))}</div>` : ""}</div>`).join("") : `<div class="muted" style="margin-top:8px">특별한 문제가 없습니다.</div>`)
+      + `<div style="margin-top:8px"><button id="rb-reflect-agent" class="primary">🤖 점검 결과 반영하기</button></div>`;
+    $("#rb-reflect-agent").onclick = () => toChat(`규칙집 '${rbCur}' 를 rulebook_reflect 로 점검하고, 제안마다 근거 자료를 doc_structure 로 확인한 뒤 필요한 수정은 이유와 함께 반영해줘. 반영하지 않은 제안은 이유를 알려줘.`);
+  } else if (rbView === "products") {
+    const ps = await api(`/api/rulebooks/${encodeURIComponent(rbCur)}/products`);
+    body.innerHTML = ps.length ? `<table class="grid"><thead><tr><th>제품/기술</th><th>최근 요약</th><th>핵심 사실</th><th>분석</th></tr></thead><tbody>${ps.map(p => `<tr><td><b>${esc(p.product)}</b><div class="small muted">${esc((p.tags || []).join(", "))}</div></td><td class="small">${md(p.latest.summary)}</td><td class="small">${esc(Object.entries(p.latest.facts || {}).map(([k, v]) => k + ": " + v).join(" · "))}</td><td>${p.history.length}회</td></tr>`).join("")}</tbody></table>` : `<div class="muted">분석한 제품 기록이 없습니다.</div>`;
+    body.querySelectorAll("td").forEach(td => linkifyPaths(td));
+  } else if (rbView === "changelog") {
+    const cl = await api(`/api/rulebooks/${encodeURIComponent(rbCur)}/changelog`);
+    body.innerHTML = `<table class="grid"><thead><tr><th>일시</th><th>작업</th><th>사용자</th><th>내용</th></tr></thead><tbody>${cl.map(x => { const {time, action, user, ...rest} = x; return `<tr><td class="small">${new Date(time * 1000).toLocaleString()}</td><td>${esc(action)}</td><td>${esc(user || "")}</td><td class="small">${esc(JSON.stringify(rest)).slice(0, 300)}</td></tr>`; }).join("")}</tbody></table>`;
+  }
+}
+function renderValidation(v, el) {
+  const fails = v.results.filter(x => x.result === "fail"), judge = v.results.filter(x => x.result === "judge");
+  el.innerHTML = `<div class="card" style="margin-top:10px"><b>${esc(v.name)}</b> ${v.product ? `(${esc(v.product)})` : ""} · 점수 <b>${v.score ?? "-"}</b> · 규칙집 v${v.rulebook_version}
+    ${v.checklist && v.checklist.length ? `<h4>장별 체크리스트</h4><table class="grid"><thead><tr><th>장</th><th>있음</th><th>위치</th><th>필요한 형식</th><th>관련 규칙</th></tr></thead><tbody>${v.checklist.map(c => `<tr><td>${esc(c.section)}</td><td>${c.found ? "✅" : "❌"}</td><td class="small">${c.found ? "#" + c.at + " " + esc(c.title) : "-"}</td><td>${c.needs.map(k => `${EL[k] || k}${c.has.includes(k) ? "✅" : "❌"}`).join(" ") || "-"}</td><td class="small">${c.rules.map(r => r.rule + (r.result === "pass" ? "✅" : r.result === "fail" ? "❌" : "·")).join(" ")}</td></tr>`).join("")}</tbody></table>` : ""}
+    ${fails.length ? `<h4>어긴 규칙</h4>${fails.map(x => `<div class="small">❌ <b>${x.rule}</b> [${x.severity}] ${esc(x.statement)} → ${esc(x.detail)}</div>`).join("")}` : `<div class="small" style="margin-top:6px">✅ 어긴 규칙 없음</div>`}
+    ${judge.length ? `<h4>판단이 필요한 규칙</h4>${judge.map(x => `<div class="small">· <b>${x.rule}</b> ${esc(x.detail)}</div>`).join("")}<button class="primary" id="v-judge" style="margin-top:6px">🤖 에이전트에게 판정 맡기기</button>` : ""}</div>`;
+  const jb = el.querySelector("#v-judge");
+  if (jb) jb.onclick = () => toChat(`규칙집 '${rbCur}' 검증 ${v.id} 의 판단형 규칙(${judge.map(x => x.rule).join(", ")})을 ${v.path} 를 doc_structure 로 읽고 rulebook_judge 로 판정해줘.`);
+}
+function toChat(text) { showTab("chat"); newChat(); chatInput.value = text; chatInput.focus(); }
+async function pickFiles(title, multi) {
+  const files = await api("/api/files").catch(() => []);
+  return new Promise(resolve => {
+    const m = document.createElement("div"); m.className = "modal";
+    m.innerHTML = `<div class="card" style="max-width:640px"><b>${esc(title)}</b><div class="small muted">작업폴더의 파일 (PPT/엑셀/Word/PDF). 폴더 경로를 직접 입력할 수도 있습니다. 파일 탭에서 먼저 업로드하세요.</div>
+      <div class="pick">${files.filter(f => /\.(pptx|xlsx|xlsm|xls|csv|docx|pdf)$/i.test(f.name)).map(f => `<label><input type="${multi ? "checkbox" : "radio"}" name="pf" value="${esc(f.path)}"> ${esc(f.display)}</label>`).join("") || `<div class="small muted">문서 파일이 없습니다</div>`}</div>
+      <input id="pf-extra" placeholder="또는 경로/폴더 직접 입력 (예: uploads/과거보고서)" style="width:100%">
+      ${multi ? `<label class="small" style="display:flex;gap:6px;margin-top:6px"><select id="pf-label"><option value="exemplar">좋은 예시 (규칙의 근거)</option><option value="reference">참고만</option></select></label>` : `<div class="row" style="margin-top:6px"><input id="pf-product" placeholder="제품/기술 이름 (선택)" class="grow"><select id="pf-label"><option value="target">새 자료 검증</option><option value="exemplar">승인된 자료 (검증 후 학습)</option></select></div>`}
+      <div class="row" style="margin-top:8px;justify-content:flex-end"><button id="pf-cancel">취소</button><button id="pf-ok" class="primary">확인</button></div></div>`;
+    document.body.appendChild(m);
+    m.querySelector("#pf-cancel").onclick = () => { m.remove(); resolve(null); };
+    m.querySelector("#pf-ok").onclick = () => {
+      const paths = [...m.querySelectorAll("input[name=pf]:checked")].map(x => x.value);
+      const extra = m.querySelector("#pf-extra").value.trim(); if (extra) paths.push(extra);
+      const label = m.querySelector("#pf-label").value, product = m.querySelector("#pf-product")?.value.trim() || null;
+      m.remove(); resolve(paths.length ? {paths, label, product} : null);
+    };
+  });
+}
+$("#rb-new").onclick = async () => {
+  const name = prompt("규칙집 이름 (예: tech_report)"); if (!name) return;
+  const description = prompt("설명 (예: 기술·제품 분석 보고서)", "") || "";
+  try { await api("/api/rulebooks", {json: {name, description}}); loadRulebooks(name); } catch (e) { toast(e.message); }
+};
+$("#rb-learn").onclick = async () => {
+  const r = await pickFiles("학습할 과거 자료 선택", true); if (!r) return;
+  toast("학습 중…");
+  try {
+    const out = await api(`/api/rulebooks/${encodeURIComponent(rbCur)}/learn`, {json: {paths: r.paths, label: r.label}});
+    toast(`학습 완료: 새 자료 ${out.added.length}건, 새 후보 규칙 ${out.new_candidates.length}개, 상태 변경 ${out.status_changes.length}개` + (out.errors.length ? ` (실패 ${out.errors.length})` : ""));
+    if (out.errors.length) alert("읽지 못한 파일:\n" + out.errors.join("\n"));
+    await openRulebook(rbCur);
+  } catch (e) { toast(e.message); }
+};
+$("#rb-validate").onclick = async () => {
+  const r = await pickFiles("검증할 문서 선택", false); if (!r) return;
+  try {
+    const v = await api(`/api/rulebooks/${encodeURIComponent(rbCur)}/validate`, {json: {path: r.paths[0], label: r.label, product: r.product}});
+    rbView = "validations"; document.querySelectorAll("#rb-subnav button").forEach(x => x.classList.toggle("active", x.dataset.v === "validations"));
+    await openRulebook(rbCur); renderValidation(v, $("#rb-vdetail"));
+  } catch (e) { toast(e.message); }
+};
+$("#rb-export").onclick = async () => { try { const r = await api(`/api/rulebooks/${encodeURIComponent(rbCur)}/export`, {method: "POST"}); const a = document.createElement("a"); a.href = fileUrl(r.files[0].path); a.download = ""; a.click(); } catch (e) { toast(e.message); } };
+$("#rb-agent").onclick = () => {
+  const product = prompt("분석할 제품/기술 (비우면 규칙 학습/점검을 맡깁니다)\n예) 뮤즈, AI 비서", "");
+  if (product === null) return;
+  toChat(product ? `규칙집 '${rbCur}' 기준으로 '${product}' 분석 보고서를 만들어줘 (product_analysis 스킬). 장별 계획 → 조사 → PPT 작성 → 규칙 검증·수정 → 제품 기록 → 규칙 갱신 제안까지.`
+                 : `규칙집 '${rbCur}' 의 과거 자료를 다시 검토해서 후보 규칙을 정리하고(learn_rules 스킬 4~7단계), 점검 결과를 반영해줘.`);
 };
 
 // ---------------- 상태 ----------------

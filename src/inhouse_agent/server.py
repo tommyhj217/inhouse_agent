@@ -55,6 +55,39 @@ class RunRequest(BaseModel):
     images: list[str] | None = None  # /api/images/upload 로 올린 이미지 경로
 
 
+class RulebookCreate(BaseModel):
+    name: str
+    description: str = ""
+    domain: str = ""
+
+
+class RulebookLearn(BaseModel):
+    paths: list[str]
+    label: str = "exemplar"
+    product: str | None = None
+
+
+class RulebookValidate(BaseModel):
+    path: str
+    label: str = "target"
+    product: str | None = None
+    include_candidates: bool = False
+
+
+class RuleChange(BaseModel):
+    changes: dict[str, Any]
+    reason: str = ""
+
+
+class RuleAdd(BaseModel):
+    type: str
+    params: dict[str, Any] = {}
+    statement: str
+    rationale: str = ""
+    severity: str = "should"
+    status: str = "candidate"
+
+
 class SessionPatch(BaseModel):
     title: str
 
@@ -517,6 +550,91 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
             target.unlink(missing_ok=True)
             raise HTTPException(400, str(e)) from e
         return {"ok": True, "path": str(target), "display": rt.workspace.display(target), "name": target.name}
+
+    # ---------------- 규칙집 ----------------
+    from .rulebook import RulebookError, RulebookStore
+
+    def _rb(name: str):
+        return RulebookStore(rt.rules_path).get(name)
+
+    def _rbcall(fn, *a, **k):
+        async def go():
+            try:
+                return await asyncio.to_thread(fn, *a, **k)
+            except (RulebookError, PermissionError) as e:
+                raise HTTPException(400, str(e)) from e
+        return go()
+
+    @app.get("/api/rulebooks", dependencies=A)
+    async def rb_list() -> list[dict[str, Any]]:
+        return RulebookStore(rt.rules_path).list()
+
+    @app.post("/api/rulebooks", dependencies=A)
+    async def rb_create(req: RulebookCreate) -> dict[str, Any]:
+        await _rbcall(_rb(req.name).create, req.description, req.domain, current_user.get())
+        return {"ok": True}
+
+    @app.get("/api/rulebooks/{name}", dependencies=A)
+    async def rb_get(name: str) -> dict[str, Any]:
+        d = await _rbcall(_rb(name).load)
+        return d
+
+    @app.post("/api/rulebooks/{name}/learn", dependencies=A)
+    async def rb_learn(name: str, req: RulebookLearn) -> dict[str, Any]:
+        from .rules_tools import DOC_EXT
+
+        files = []
+        for p in req.paths:
+            try:
+                rp = rt.workspace.resolve(p)
+            except PermissionError as e:
+                raise HTTPException(403, str(e)) from e
+            files += sorted(x for x in rp.rglob("*") if x.is_file() and x.suffix.lower() in DOC_EXT) if rp.is_dir() else [rp]
+        r = await _rbcall(_rb(name).learn, files, req.label, current_user.get(), req.product)
+        return {k: r[k] for k in ("added", "relabeled", "errors", "exemplars", "new_candidates", "status_changes", "new_sections")}
+
+    @app.post("/api/rulebooks/{name}/validate", dependencies=A)
+    async def rb_validate(name: str, req: RulebookValidate) -> dict[str, Any]:
+        try:
+            path = rt.workspace.resolve(req.path)
+        except PermissionError as e:
+            raise HTTPException(403, str(e)) from e
+        return await _rbcall(_rb(name).validate, path, label=req.label, product=req.product, user=current_user.get(), include_candidates=req.include_candidates)
+
+    @app.get("/api/rulebooks/{name}/validations", dependencies=A)
+    async def rb_validations(name: str) -> list[dict[str, Any]]:
+        return await _rbcall(_rb(name).validations, 100)
+
+    @app.get("/api/rulebooks/{name}/validations/{vid}", dependencies=A)
+    async def rb_validation(name: str, vid: str) -> dict[str, Any]:
+        return await _rbcall(_rb(name).validation, vid)
+
+    @app.post("/api/rulebooks/{name}/rules", dependencies=A)
+    async def rb_add_rule(name: str, req: RuleAdd) -> dict[str, Any]:
+        return await _rbcall(_rb(name).add_rule, req.model_dump(), current_user.get(), "user")
+
+    @app.patch("/api/rulebooks/{name}/rules/{rid}", dependencies=A)
+    async def rb_update_rule(name: str, rid: str, req: RuleChange) -> dict[str, Any]:
+        return await _rbcall(_rb(name).update_rule, rid, req.changes, req.reason or "화면에서 수정", current_user.get())
+
+    @app.get("/api/rulebooks/{name}/reflect", dependencies=A)
+    async def rb_reflect(name: str) -> dict[str, Any]:
+        return await _rbcall(_rb(name).reflect)
+
+    @app.get("/api/rulebooks/{name}/changelog", dependencies=A)
+    async def rb_changelog(name: str) -> list[dict[str, Any]]:
+        return await _rbcall(_rb(name).changelog, 200)
+
+    @app.get("/api/rulebooks/{name}/products", dependencies=A)
+    async def rb_products(name: str) -> list[dict[str, Any]]:
+        return await _rbcall(_rb(name).products)
+
+    @app.post("/api/rulebooks/{name}/export", dependencies=A)
+    async def rb_export(name: str) -> dict[str, Any]:
+        out = await rt.hub.call("rulebook_export", {"name": name})
+        if out.is_error:
+            raise HTTPException(400, out.text)
+        return {"text": out.text, "files": out.files}
 
     # ---------------- 서버/tool ----------------
     @app.get("/api/servers", dependencies=A)

@@ -21,6 +21,7 @@ from .downloader import DownloadConfig, Downloader
 from .dynamic_tools import DynamicToolManager, DynamicToolsConfig
 from .files import FileWorkspace
 from .links import LinkSigner
+from .rules_tools import make_rule_tools
 from .toolkit import ToolkitConfig, make_toolkit
 from .users import SessionStore, UserWorkspaces, UsersConfig, WorkspaceProxy, current_user
 from .interaction import AskFn
@@ -87,6 +88,9 @@ class AgentRuntime:
             self.workspace, cfg.agent.timezone, self.skills, self.downloader, self.dynamic, wait_timeout=cfg.files.wait_timeout
         )
         builtin_tools += make_toolkit(self.workspace, self.downloader, self.links, self.toolkit_cfg, cfg.agent.timezone)
+        # 규칙집: 과거 자료로 규칙을 배우고 검증하며 갱신 (모든 사용자가 공유해 지식이 쌓이도록 프로젝트 폴더에 저장)
+        self.rules_path = cfg.resolve_path(str((cfg.raw.get("rules") or {}).get("dir") or "rulebooks"))
+        builtin_tools += make_rule_tools(self.workspace, self.rules_path)
         self.hub = MCPHub(
             cfg.mcp_servers,
             log_dir=cfg.log_path,
@@ -164,6 +168,7 @@ class AgentRuntime:
         if self._agent is None:
             self._agent = Agent(self.llm, self.hub, self.cfg.agent, self.skills)
             self._agent.recent_sessions_in_prompt = self.users_cfg.recent_sessions_in_prompt
+            self._agent.rules_path = self.rules_path
         return self._agent
 
     def sessions(self) -> SessionStore:
