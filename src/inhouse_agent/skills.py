@@ -181,8 +181,16 @@ def parse_skill(text: str, folder: Path) -> Skill:
         raise SkillError(f"입력 이름이 중복됩니다: {', '.join(dup)}")
     from .workflow import WorkflowError, validate_steps
 
+    raw_steps = meta.get("steps")
+    if isinstance(raw_steps, list):  # script: scripts/x.py 단계 → run_skill_script 호출로 (LLM 없이 스크립트 실행)
+        raw_steps = [
+            {**{k: v for k, v in s.items() if k not in ("script", "args", "argv")}, "tool": "run_skill_script",
+             "args": {"name": name, "path": s["script"], **({"args": s["args"]} if s.get("args") else {}), **({"argv": s["argv"]} if s.get("argv") else {})}}
+            if isinstance(s, dict) and s.get("script") and not s.get("tool") else s
+            for s in raw_steps
+        ]
     try:
-        steps = validate_steps(meta.get("steps"))
+        steps = validate_steps(raw_steps)
     except WorkflowError as e:
         raise SkillError(str(e)) from e
     servers = meta.get("servers")
@@ -214,6 +222,9 @@ inputs:
 # steps:
 #   - id: s1
 #     tool: get_current_time
+#   - id: menu                  # 스킬 폴더의 스크립트 실행 (scripts/ 에 파일 추가)
+#     script: scripts/make_menu.py
+#     args: {{date: "{{date}}"}}     # → --date 2026-11-04
 #   - id: s2
 #     tool: list_downloads
 #     args: {{recent_minutes: 60}}
@@ -321,6 +332,91 @@ class SkillStore:
         (d / ".meta.json").write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
         skill.info = info
         return skill
+
+    def write_file(self, name: str, rel: str, data: bytes, user: str | None = None) -> Path:
+        """스킬 폴더에 참고 파일/스크립트 추가 (예: scripts/make_menu.py, templates/form.xlsx)."""
+        d = self._dir(name)
+        if not (d / "SKILL.md").is_file():
+            raise SkillError(f"스킬 '{name}' 을(를) 찾을 수 없습니다.")
+        rel = str(rel).replace("\\", "/").strip("/")
+        p = (d / rel).resolve()
+        if d.resolve() not in p.parents or not rel or any(x.startswith(".") for x in Path(rel).parts) or p.name == "SKILL.md":
+            raise SkillError(f"이 경로에는 파일을 둘 수 없습니다: {rel}")
+        if len(data) > 50 * 1024 * 1024:
+            raise SkillError("스킬 파일은 50MB 이하만 올릴 수 있습니다.")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+        self._touch(d, user)
+        return p
+
+    def delete_file(self, name: str, rel: str, user: str | None = None) -> None:
+        d = self._dir(name)
+        p = (d / str(rel)).resolve()
+        if d.resolve() not in p.parents or not p.is_file() or p.name == "SKILL.md":
+            raise SkillError(f"지울 수 없는 파일입니다: {rel}")
+        p.unlink()
+        self._touch(d, user)
+
+    def _touch(self, d: Path, user: str | None) -> None:
+        import json
+        import time
+
+        info = self._info(d)
+        info.update(updated=time.time(), updated_by=user)
+        (d / ".meta.json").write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
+
+    def import_zip(self, data: bytes, user: str | None = None, overwrite: bool = False, name: str | None = None) -> Skill:
+        """다른 곳에서 만든 스킬 폴더(zip: SKILL.md + scripts/ 등)를 가져옴. 기존 스킬은 overwrite 일 때만 덮어씀(이전 것은 _trash)."""
+        import io
+        import zipfile
+
+        try:
+            z = zipfile.ZipFile(io.BytesIO(data))
+        except zipfile.BadZipFile as e:
+            raise SkillError("zip 파일이 아닙니다.") from e
+        names = [n for n in z.namelist() if not n.endswith("/") and "__MACOSX" not in n]
+        mds = sorted((n for n in names if n.split("/")[-1] == "SKILL.md"), key=lambda n: n.count("/"))
+        if not mds:
+            raise SkillError("zip 안에 SKILL.md 가 없습니다.")
+        base = mds[0][: -len("SKILL.md")]
+        text = z.read(mds[0]).decode("utf-8-sig")
+        orig = parse_skill(text, self.root / "_tmp").name
+        skill_name = name or orig
+        if skill_name != orig:
+            import re as _re
+
+            text = _re.sub(r"(?m)^name:\s*.*$", f"name: {skill_name}", text, count=1)
+        if not NAME_RE.match(skill_name):
+            # 외부 스킬 이름(예: menu-builder)도 받도록 폴더 이름 규칙에 맞춤
+            import re as _re
+
+            skill_name = _re.sub(r"[^A-Za-z0-9_]", "_", skill_name).strip("_").lower() or "imported_skill"
+            text = _re.sub(r"(?m)^name:\s*.*$", f"name: {skill_name}", text, count=1)
+        d = self._dir(skill_name)
+        if (d / "SKILL.md").exists():
+            if not overwrite:
+                raise SkillError(f"스킬 '{skill_name}' 이(가) 이미 있습니다. 덮어쓰려면 overwrite 를 선택하세요.")
+            self.delete(skill_name)
+        total = 0
+        d.mkdir(parents=True, exist_ok=True)
+        try:
+            for n in names:
+                if not n.startswith(base) or n == mds[0]:
+                    continue
+                rel = n[len(base):]
+                p = (d / rel).resolve()
+                if d.resolve() not in p.parents or any(x.startswith(".") for x in Path(rel).parts):
+                    continue  # 경로 탈출 / 숨김 파일 무시
+                info = z.getinfo(n)
+                total += info.file_size
+                if total > 100 * 1024 * 1024:
+                    raise SkillError("스킬 zip 의 압축 해제 크기가 100MB 를 넘습니다.")
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(z.read(n))
+            return self.save(skill_name, text, user)
+        except Exception:
+            shutil.rmtree(d, ignore_errors=True)
+            raise
 
     def create(self, name: str, description: str = "", content: str | None = None, user: str | None = None) -> Skill:
         d = self._dir(name)

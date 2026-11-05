@@ -54,6 +54,13 @@ pre{background:var(--code);padding:8px 10px;border-radius:8px;overflow:auto;max-
 .thumb img{width:100%;height:100%;object-fit:cover;display:block;cursor:zoom-in}
 .thumb .x{position:absolute;top:2px;right:2px;border:0;border-radius:50%;width:20px;height:20px;padding:0;line-height:18px;background:rgba(0,0,0,.6);color:#fff;font-size:12px}
 .thumb.up{opacity:.5}
+.dchip{position:relative;display:flex;align-items:center;gap:6px;max-width:260px;height:44px;padding:4px 26px 4px 8px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-size:12px}
+.dchip .ic{font-size:20px}
+.dchip .nm{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600}
+.dchip .sm{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dchip .x{position:absolute;top:3px;right:3px;border:0;border-radius:50%;width:18px;height:18px;padding:0;line-height:16px;background:rgba(0,0,0,.5);color:#fff;font-size:11px}
+.dchip.up{opacity:.5}
+.msg-user .dchip{padding-right:8px;cursor:pointer}
 .msg-user .thumbs{justify-content:flex-end}
 .drop{outline:2px dashed var(--accent);outline-offset:-6px}
 .userchip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:3px 10px;font-size:13px;cursor:pointer;background:var(--panel)}
@@ -198,9 +205,9 @@ table.grid select{padding:2px 4px;font-size:12px}
     <div class="composer">
       <div id="slash" class="slash hidden"></div>
       <button id="chat-skill" title="스킬·기능 실행 (입력창에 / 를 쳐도 됩니다)">🧩</button>
-      <button id="chat-img" title="이미지 첨부 (붙여넣기 Ctrl+V / 끌어놓기도 됩니다)">🖼</button>
-      <input id="chat-img-file" type="file" accept="image/*" multiple class="hidden">
-      <textarea id="chat-input" placeholder="요청을 입력하세요 · / 를 치면 스킬과 기능 목록 (Enter 전송, Shift+Enter 줄바꿈 · 이미지는 붙여넣기/끌어놓기)"></textarea>
+      <button id="chat-img" title="파일 첨부: 이미지 · PPT · 엑셀 · Word · PDF · CSV (붙여넣기 Ctrl+V / 끌어놓기도 됩니다)">📎</button>
+      <input id="chat-img-file" type="file" accept="image/*,.pptx,.xlsx,.xlsm,.xls,.csv,.tsv,.docx,.pdf,.txt,.md,.json,.zip" multiple class="hidden">
+      <textarea id="chat-input" placeholder="요청을 입력하세요 · / 를 치면 스킬과 기능 목록 (Enter 전송, Shift+Enter 줄바꿈 · 이미지·PPT·엑셀 파일은 붙여넣기/끌어놓기)"></textarea>
       <div style="display:grid;gap:6px">
         <button id="chat-send" class="primary">전송</button>
         <button id="chat-cancel" class="danger hidden">중단</button>
@@ -214,7 +221,8 @@ table.grid select{padding:2px 4px;font-size:12px}
 <section id="tab-skills" class="tab">
   <div class="skills">
     <div class="card">
-      <div class="row"><b class="grow">스킬</b><button id="sk-new" title="새 스킬">＋ 새로 만들기</button></div>
+      <div class="row"><b class="grow">스킬</b><button id="sk-import" title="다른 곳에서 만든 스킬 폴더(zip: SKILL.md + scripts/ 등) 가져오기">📦 가져오기</button><button id="sk-new" title="새 스킬">＋ 새로 만들기</button></div>
+      <input id="sk-import-file" type="file" accept=".zip" class="hidden">
       <div id="sk-list" class="list"></div>
       <div id="sk-errors" class="small" style="color:var(--err)"></div>
     </div>
@@ -229,6 +237,8 @@ table.grid select{padding:2px 4px;font-size:12px}
       </div>
       <div id="sk-validate" class="small muted" style="margin:6px 0">SKILL.md 를 수정하면 오른쪽 입력 폼이 바로 바뀝니다.</div>
       <textarea id="sk-editor" spellcheck="false" disabled></textarea>
+      <div id="sk-files" class="small" style="margin-top:6px"></div>
+      <input id="sk-file-input" type="file" multiple class="hidden">
     </div>
 
     <div class="card runpane" id="sk-pane">
@@ -352,6 +362,12 @@ table.grid select{padding:2px 4px;font-size:12px}
   <div id="st-jobs" class="status-grid"></div>
   <h3>최근 실행</h3>
   <div id="st-runs" class="card"></div>
+  <h3>사용 이력</h3>
+  <div class="row" style="margin-bottom:6px"><select id="st-days"><option value="1">오늘</option><option value="7">최근 7일</option><option value="30" selected>최근 30일</option><option value="90">최근 90일</option></select>
+    <label id="st-all-wrap" class="small hidden"><input type="checkbox" id="st-all"> 모든 사용자 (관리자)</label></div>
+  <div id="st-usage" class="card answer"></div>
+  <h3>모델</h3>
+  <div id="st-models" class="card answer"></div>
 </section>
 </main>
 
@@ -589,12 +605,13 @@ async function loadServerOptions() {
 }
 async function sendChat(text) {
   text = (text ?? chatInput.value).trim();
-  if (pendingImages.some(p => !p.path)) { toast("이미지 올리는 중입니다…"); return; }
-  const imgs = pendingImages.map(p => p.path);
-  if ((!text && !imgs.length) || chatRun) return;
-  if (!text) text = "첨부한 이미지를 확인해줘";
+  if (pendingImages.some(p => !p.path)) { toast("파일 올리는 중입니다…"); return; }
+  const imgs = pendingImages.filter(p => p.kind === "image").map(p => p.path);
+  const docs = pendingImages.filter(p => p.kind !== "image").map(p => p.path);
+  if ((!text && !imgs.length && !docs.length) || chatRun) return;
+  if (!text) text = docs.length >= 2 ? "첨부한 파일들을 비교 분석해줘" : docs.length ? "첨부한 파일을 분석해줘" : "첨부한 이미지를 확인해줘";
   chatInput.value = "";
-  chatLog.insertAdjacentHTML("beforeend", `<div class="msg-user">${esc(text)}${thumbsHtml(imgs)}</div>`);
+  chatLog.insertAdjacentHTML("beforeend", `<div class="msg-user">${esc(text)}${thumbsHtml(imgs)}${docsHtml(docs)}</div>`);
   pendingImages = []; renderPending();
   const srv = $("#chat-servers").value;
   const servers = srv ? [srv] : [];
@@ -602,7 +619,7 @@ async function sendChat(text) {
   const view = new RunView(chatLog, {onDone: () => { chatRun = null; $("#chat-send").disabled = false; $("#chat-cancel").classList.add("hidden"); loadSessions(); }});
   chatRun = view;
   try {
-    const run = await view.start({prompt: text, session_id: chatSession, servers: servers.length ? servers : null, images: imgs});
+    const run = await view.start({prompt: text, session_id: chatSession, servers: servers.length ? servers : null, images: imgs, attachments: docs});
     chatSession = run.session_id; $("#chat-session").textContent = "대화 " + chatSession.slice(0, 8);
   } catch (e) { chatLog.insertAdjacentHTML("beforeend", `<div class="b-err">오류: ${esc(e.message)}</div>`); chatRun = null; $("#chat-send").disabled = false; $("#chat-cancel").classList.add("hidden"); }
 }
@@ -632,35 +649,58 @@ async function renderWelcome() {
 }
 $("#sess-new").onclick = newChat;
 
-// ---- 이미지 첨부 (선택 / 붙여넣기 / 끌어놓기)
-let pendingImages = [];  // {url(미리보기), path(업로드 후), name}
+// ---- 파일 첨부: 이미지 + PPT/엑셀/Word/PDF/CSV (선택 / 붙여넣기 / 끌어놓기)
+let pendingImages = [];  // {kind: image|document, url(미리보기), path(업로드 후), name, summary}
+const DOC_EXT = /\.(pptx|xlsx|xlsm|xls|csv|tsv|docx|pdf|txt|md|json|zip)$/i;
+const docIcon = n => /\.pptx?$/i.test(n) ? "📊" : /\.(xlsx|xlsm|xls|csv|tsv)$/i.test(n) ? "📗" : /\.docx?$/i.test(n) ? "📘" : /\.pdf$/i.test(n) ? "📕" : "📄";
 function thumbsHtml(paths) {
   if (!paths || !paths.length) return "";
   return `<div class="thumbs">${paths.map(p => `<div class="thumb"><img src="${esc(fileUrl(p, true))}" data-full="${esc(fileUrl(p, true))}" alt="${esc(p.split(/[\\/]/).pop())}" title="${esc(p)}"></div>`).join("")}</div>`;
 }
+function docsHtml(paths) {
+  if (!paths || !paths.length) return "";
+  return `<div class="thumbs">${paths.map(p => { const n = p.split(/[\\/]/).pop(); return `<div class="dchip filechip" data-path="${esc(p)}" title="${esc(p)}"><span class="ic">${docIcon(n)}</span><div style="min-width:0"><div class="nm">${esc(n.replace(/^\d{8}_\d{6}_/, ""))}</div><div class="sm"><a href="${esc(fileUrl(p))}" download>⬇ 받기</a></div></div></div>`; }).join("")}</div>`;
+}
 function renderPending() {
-  $("#chat-thumbs").innerHTML = pendingImages.map((p, i) => `<div class="thumb ${p.path ? "" : "up"}" title="${esc(p.name)}"><img src="${p.url}" data-full="${p.url}"><button class="x" data-i="${i}" title="빼기">×</button></div>`).join("");
-  $("#chat-thumbs").querySelectorAll(".x").forEach(b => b.onclick = e => { e.stopPropagation(); const [p] = pendingImages.splice(+b.dataset.i, 1); URL.revokeObjectURL(p.url); renderPending(); });
+  $("#chat-thumbs").innerHTML = pendingImages.map((p, i) => p.kind === "image"
+    ? `<div class="thumb ${p.path ? "" : "up"}" title="${esc(p.name)}"><img src="${p.url}" data-full="${p.url}"><button class="x" data-i="${i}" title="빼기">×</button></div>`
+    : `<div class="dchip ${p.path ? "" : "up"}" title="${esc(p.path || p.name)}"><span class="ic">${docIcon(p.name)}</span><div style="min-width:0"><div class="nm">${esc(p.name)}</div><div class="sm">${esc(p.path ? (p.summary || "첨부됨") : "올리는 중…")}</div></div><button class="x" data-i="${i}" title="빼기">×</button></div>`).join("");
+  $("#chat-thumbs").querySelectorAll(".x").forEach(b => b.onclick = e => { e.stopPropagation(); const [p] = pendingImages.splice(+b.dataset.i, 1); if (p.url) URL.revokeObjectURL(p.url); renderPending(); });
 }
 async function addImages(files) {
   for (const f of files) {
-    if (!f.type.startsWith("image/")) { toast("이미지 파일만 첨부할 수 있습니다: " + f.name); continue; }
-    if (pendingImages.length >= 10) { toast("이미지는 한 번에 10장까지"); break; }
-    const item = {url: URL.createObjectURL(f), path: null, name: f.name || "붙여넣은 이미지.png"};
+    const isImg = f.type.startsWith("image/");
+    if (!isImg && !DOC_EXT.test(f.name || "")) { toast("첨부할 수 없는 형식입니다 (이미지·PPT·엑셀·Word·PDF·CSV): " + f.name); continue; }
+    if (pendingImages.length >= 20) { toast("첨부는 한 번에 20개까지"); break; }
+    if (isImg && pendingImages.filter(p => p.kind === "image").length >= 10) { toast("이미지는 한 번에 10장까지"); continue; }
+    const item = {kind: isImg ? "image" : "document", url: isImg ? URL.createObjectURL(f) : "", path: null, name: f.name || "붙여넣은 이미지.png", summary: ""};
     pendingImages.push(item); renderPending();
     try {
-      const r = await api("/api/images/upload?name=" + encodeURIComponent(item.name), {method: "POST", body: f});
-      item.path = r.path;
-    } catch (e) { pendingImages = pendingImages.filter(x => x !== item); toast("이미지 업로드 실패: " + e.message); }
+      const r = await api((isImg ? "/api/images/upload" : "/api/attachments/upload") + "?name=" + encodeURIComponent(item.name), {method: "POST", body: f});
+      item.path = r.path; item.summary = r.summary || "";
+      if (r.state && r.state !== "complete") toast(`${item.name}: ${r.summary || r.state}`);
+    } catch (e) { pendingImages = pendingImages.filter(x => x !== item); toast("업로드 실패: " + e.message); }
     renderPending();
   }
+}
+// 엑셀/PPT 에서 셀 범위를 복사해 붙여넣으면(탭으로 구분된 여러 줄) 표 파일(TSV)로 첨부
+function pastedTable(text) {
+  const lines = (text || "").replace(/\r/g, "").split("\n").filter(l => l.trim());
+  if (lines.length < 2 || !lines.every(l => l.includes("\t"))) return null;
+  return new File(["\ufeff" + lines.join("\n") + "\n"], "붙여넣은_표.tsv", {type: "text/tab-separated-values"});
 }
 $("#chat-img").onclick = () => $("#chat-img-file").click();
 $("#chat-img-file").onchange = e => { addImages([...e.target.files]); e.target.value = ""; };
 chatInput.addEventListener("paste", e => {
-  const files = [...(e.clipboardData?.items || [])].filter(i => i.kind === "file" && i.type.startsWith("image/")).map(i => {
-    const f = i.getAsFile(); return new File([f], f.name && f.name !== "image.png" ? f.name : `붙여넣기_${Date.now()}.png`, {type: f.type});
-  });
+  const cd = e.clipboardData; if (!cd) return;
+  const files = [...(cd.items || [])].filter(i => i.kind === "file").map(i => {
+    const f = i.getAsFile(); if (!f) return null;
+    return f.type.startsWith("image/") && (!f.name || f.name === "image.png") ? new File([f], `붙여넣기_${Date.now()}.png`, {type: f.type}) : f;
+  }).filter(Boolean);
+  const docs = files.filter(f => !f.type.startsWith("image/"));
+  const table = pastedTable(cd.getData("text/plain"));
+  if (docs.length) { e.preventDefault(); addImages(files); return; }  // 탐색기에서 복사한 PPT/엑셀 파일
+  if (table) { e.preventDefault(); addImages([table]); toast("엑셀 표를 첨부 파일로 붙였습니다 (그림 대신 데이터로 분석)"); return; }
   if (files.length) { e.preventDefault(); addImages(files); }
 });
 const chatBox = $("#tab-chat .chat");
@@ -823,12 +863,14 @@ async function execCommand(it, args, prompt, mode = "auto") {
   }
   if (chatRun) { toast("실행 중입니다. 끝난 뒤 다시 시도하세요."); return; }
   const label = `/${it.name} ${Object.entries(args).map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join(" ")}${prompt ? " · " + prompt : ""}`;
-  chatLog.insertAdjacentHTML("beforeend", `<div class="msg-user">${esc(label)}</div>`);
+  const att = it.kind === "skill" && !pendingImages.some(p => !p.path) ? pendingImages.map(p => p.path) : [];  // 스킬에도 첨부 전달 ({attachment})
+  chatLog.insertAdjacentHTML("beforeend", `<div class="msg-user">${esc(label)}${docsHtml(att)}</div>`);
+  if (att.length) { pendingImages = []; renderPending(); }
   $("#chat-send").disabled = true; $("#chat-cancel").classList.remove("hidden");
   const view = new RunView(chatLog, {onDone: () => { chatRun = null; $("#chat-send").disabled = false; $("#chat-cancel").classList.add("hidden"); loadSessions(); }});
   chatRun = view;
   try {
-    const body = it.kind === "skill" ? {skill: it.name, inputs: args, prompt, mode, new_session: true} : {tool: it.name, args, session_id: chatSession};
+    const body = it.kind === "skill" ? {skill: it.name, inputs: args, prompt, mode, new_session: true, attachments: att} : {tool: it.name, args, session_id: chatSession};
     const run = await view.start(body);
     chatSession = run.session_id; $("#chat-session").textContent = (it.kind === "skill" ? "스킬 " : "기능 ") + "/" + it.name;
   } catch (e) { chatLog.insertAdjacentHTML("beforeend", `<div class="b-err">오류: ${esc(e.message)}</div>`); chatRun = null; $("#chat-send").disabled = false; $("#chat-cancel").classList.add("hidden"); }
@@ -860,7 +902,7 @@ async function openSession(id) {
   $("#chat-session").textContent = `${d.title} · 이어서 진행합니다`;
   chatLog.insertAdjacentHTML("beforeend", `<div class="small muted">📂 ${new Date(d.created * 1000).toLocaleString()} 에 시작한 작업${d.skill ? ` (스킬 ${esc(d.skill)})` : ""} - 아래에 이어서 요청하면 이전 대화와 파일을 기억한 채로 계속합니다.</div>`);
   for (const t of d.turns || []) {
-    chatLog.insertAdjacentHTML("beforeend", `<div class="msg-user">${esc(t.prompt)}${thumbsHtml(t.images)}</div>`);
+    chatLog.insertAdjacentHTML("beforeend", `<div class="msg-user">${esc(t.prompt)}${thumbsHtml(t.images)}${docsHtml(t.attachments)}</div>`);
     const box = document.createElement("div"); box.style.display = "grid"; box.style.gap = "6px";
     box.innerHTML = (t.tools && t.tools.length ? `<div class="small muted">🔧 ${esc(t.tools.join(", "))}</div>` : "")
       + `<div class="answer">${md(t.output)}</div>`
@@ -873,8 +915,10 @@ async function openSession(id) {
 }
 
 // ---- 편집 권한 (skills.editors): 편집은 지정한 사람만, 사용(실행)은 모두
+let canEditSkills = true;
 function applyEditPermission(can) {
-  ["#sk-new", "#sk-save", "#sk-delete", "#t-new", "#t-save", "#t-delete"].forEach(sel => { const el = $(sel); if (el) { el.dataset.noedit = can ? "" : "1"; if (!can) el.disabled = true; } });
+  canEditSkills = can;
+  ["#sk-new", "#sk-import", "#sk-save", "#sk-delete", "#t-new", "#t-save", "#t-delete"].forEach(sel => { const el = $(sel); if (el) { el.dataset.noedit = can ? "" : "1"; if (!can) el.disabled = true; } });
   if (!can) { $("#sk-editor").readOnly = true; $("#t-code").readOnly = true;
     ["#sk-validate", "#t-check"].forEach(sel => $(sel).insertAdjacentHTML("beforebegin", `<div class="small b-warn">편집 권한이 없어 보기·실행만 가능합니다 (편집자: skills.editors).</div>`)); }
 }
@@ -930,8 +974,49 @@ async function openSkill(name) {
   $("#sk-log").innerHTML = ""; $("#sk-follow").classList.add("hidden");
   document.querySelectorAll("#sk-list .item").forEach(el => el.classList.toggle("active", el.dataset.name === name));
   applyParsed(d.parsed, d.error);
+  renderSkFiles(d.parsed ? d.parsed.files : []);
   markDirty();
 }
+// 스킬 폴더 파일 (스크립트·템플릿): ▶ 는 run_skill_script 로 실행 (LLM 없이)
+const SCRIPT_EXT = /\.(py|sh|bat|cmd|ps1|js)$/i;
+function renderSkFiles(files) {
+  const box = $("#sk-files"); if (!skCurrent) { box.innerHTML = ""; return; }
+  box.innerHTML = `<b>스킬 파일</b> ${files.length ? "" : '<span class="muted">없음 - 스크립트(scripts/*.py)나 템플릿을 넣으면 에이전트가 run_skill_script / read_skill_file 로 씁니다</span>'}
+    ${files.map(f => `<span class="filechip skf" data-f="${esc(f)}">${SCRIPT_EXT.test(f) ? "⚙️" : "📄"} ${esc(f)}${SCRIPT_EXT.test(f) ? ` <a href="#" class="skrun" title="실행">▶</a>` : ""}${canEditSkills ? ` <a href="#" class="skdel" title="삭제">🗑</a>` : ""}</span>`).join("")}
+    ${canEditSkills ? `<button id="sk-file-add" style="margin-left:4px">＋ 파일 추가</button>` : ""}`;
+  box.querySelectorAll(".skf").forEach(el => {
+    const f = el.dataset.f;
+    el.onclick = async e => {
+      e.preventDefault(); e.stopPropagation();
+      if (e.target.closest(".skrun")) {  // 인자를 채울 수 있게 입력창에 명령을 넣어 줌 (Enter 로 실행)
+        showTab("chat"); chatInput.value = `/run_skill_script name=${skCurrent} path=${f} args={}`; chatInput.focus();
+        toast("args={\"키\":\"값\"} 에 스크립트 인자를 넣고 Enter (인자가 없으면 그대로 Enter)"); return;
+      }
+      if (e.target.closest(".skdel")) { if (!confirm(f + " 을(를) 삭제할까요?")) return; try { const r = await api(`/api/skills/${encodeURIComponent(skCurrent)}/files?path=${encodeURIComponent(f)}`, {method: "DELETE"}); renderSkFiles(r.files); } catch (er) { toast(er.message); } return; }
+      try { const r = await api(`/api/skills/${encodeURIComponent(skCurrent)}/files?path=${encodeURIComponent(f)}`); const w = document.createElement("div"); w.className = "lightbox"; w.style.cursor = "default"; w.innerHTML = `<pre class="card" style="max-width:900px;max-height:80vh;overflow:auto;white-space:pre-wrap">${esc(r.content)}</pre>`; w.onclick = ev => { if (ev.target === w) w.remove(); }; document.body.appendChild(w); } catch (er) { toast(er.message); }
+    };
+  });
+  const add = $("#sk-file-add"); if (add) add.onclick = () => $("#sk-file-input").click();
+}
+$("#sk-file-input").onchange = async e => {
+  let files = [];
+  for (const f of e.target.files) {
+    const rel = prompt(`스킬 폴더 안 저장 위치 (${f.name})`, (SCRIPT_EXT.test(f.name) ? "scripts/" : "") + f.name); if (!rel) continue;
+    try { files = (await api(`/api/skills/${encodeURIComponent(skCurrent)}/files?path=${encodeURIComponent(rel)}`, {method: "PUT", body: f})).files; } catch (er) { toast(er.message); }
+  }
+  e.target.value = ""; if (files.length) { renderSkFiles(files); loadCommands(true); }
+};
+$("#sk-import").onclick = () => $("#sk-import-file").click();
+$("#sk-import-file").onchange = async e => {
+  const f = e.target.files[0]; e.target.value = ""; if (!f) return;
+  let r; try { r = await api("/api/skills/import", {method: "POST", body: f}); }
+  catch (er) {
+    if (!/이미 있습니다/.test(er.message) || !confirm(er.message + "\n\n덮어쓸까요? (이전 것은 _trash 로 이동)")) { toast(er.message); return; }
+    try { r = await api("/api/skills/import?overwrite=true", {method: "POST", body: f}); } catch (er2) { toast(er2.message); return; }
+  }
+  toast(`스킬 '${r.parsed.name}' 을(를) 가져왔습니다 (파일 ${r.parsed.files.length}개) - 모든 사용자에게 보입니다`);
+  await loadSkills(); openSkill(r.parsed.name); loadCommands(true);
+};
 function markDirty() { $("#sk-dirty").classList.toggle("hidden", editor.value === skSaved); }
 let vTimer = null;
 editor.addEventListener("input", () => { markDirty(); clearTimeout(vTimer); vTimer = setTimeout(validate, 350); });
@@ -1317,7 +1402,17 @@ async function loadStatus() {
     });
     $("#st-runs").innerHTML = runs.length ? `<table class="grid"><thead><tr><th>시각</th><th>종류</th><th>내용</th><th>상태</th></tr></thead><tbody>${runs.slice(0, 30).map(r => `<tr><td class="small">${new Date(r.created * 1000).toLocaleString()}</td><td>${r.kind === "skill" ? "스킬" : "조사"}</td><td>${esc(r.title)}</td><td>${esc(r.status)}</td></tr>`).join("")}</tbody></table>` : `<span class="muted small">아직 실행 기록이 없습니다</span>`;
   } catch (e) { $("#st-info").textContent = "오류: " + e.message; }
+  loadUsage();
+  api("/api/models?remote=true").then(m => { $("#st-models").innerHTML = md(m.text); }).catch(e => { $("#st-models").textContent = e.message; });
 }
+async function loadUsage() {
+  $("#st-all-wrap").classList.toggle("hidden", !canEditSkills);
+  try {
+    const u = await api(`/api/usage?days=${$("#st-days").value}${$("#st-all").checked ? "&all=true" : ""}`);
+    $("#st-usage").innerHTML = md(u.text);
+  } catch (e) { $("#st-usage").innerHTML = `<span class="b-err">${esc(e.message)}</span>`; }
+}
+$("#st-days").onchange = loadUsage; $("#st-all").onchange = loadUsage;
 $("#st-refresh").onclick = loadStatus;
 
 // 시작

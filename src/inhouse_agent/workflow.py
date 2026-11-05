@@ -11,12 +11,16 @@ steps:
     args: {path: "{steps.dl.file}", group_by: [부서], aggregates: [{column: 금액, func: sum}]}
     on_error: stop                 # stop(기본) | continue
     when: "{dept} != 전체"          # (선택) 조건이 맞을 때만 실행 (==, !=, 값만 쓰면 비어있지 않을 때)
+  - id: menu
+    script: scripts/make_menu.py     # 스킬 폴더의 스크립트 실행 (= tool: run_skill_script)
+    args: {date: "{today}"}          # → --date 2026-11-05
 output: |                          # (선택) 최종 결과 템플릿. 생략하면 단계별 결과를 이어 붙임
   ## {month} 매출
   {steps.dept.text}
 
 템플릿 변수
   {입력이름}, {today} {yesterday} {last_month} … (날짜), {prev} (바로 앞 단계 결과 텍스트)
+  {attachment} {attachments} (채팅에 첨부한 파일 경로 - 첫 파일 / 전체 줄바꿈 목록)
   {steps.<id>.text}  {steps.<id>.file} (첫 파일 경로)  {steps.<id>.files}  {steps.<id>.error}
   {steps.<id>.data.<키>.<0>…} (구조화 결과: dict 키 / 리스트 번호)
   필터: {paths|lines} (여러 줄/쉼표 → 목록), {x|json}, {list|first}

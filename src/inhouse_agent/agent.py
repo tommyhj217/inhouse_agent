@@ -21,6 +21,15 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+
+def _skill_scripts(skill: Any) -> list[str]:
+    from .skill_scripts import skill_scripts
+
+    try:
+        return skill_scripts(skill.path)
+    except OSError:
+        return []
+
 DEFAULT_SYSTEM_PROMPT = """당신은 사내 업무 자료 수집·분석 에이전트입니다.
 사내 사이트들의 자료는 MCP tool(웹 컨트롤)로만 가져올 수 있습니다.
 
@@ -59,6 +68,17 @@ DEFAULT_SYSTEM_PROMPT = """당신은 사내 업무 자료 수집·분석 에이�
 이미지:
 - 사용자가 첨부한 이미지는 직접 보고 판단하세요 (화면 캡처, 표 사진, 오류 화면 등).
 - 파일로 저장된 이미지(MCP 캡처, 다운로드 이미지, 이전 대화의 첨부)를 봐야 하면 view_image 로 불러오세요.
+
+첨부 문서 (PPT / 엑셀 / Word / PDF):
+- 사용자 메시지에 [첨부 파일] 이 있으면 그 경로의 파일을 직접 분석하세요. 요약만 보고 결론 내리지 마세요.
+- 2개 이상이면 먼저 compare_documents 로 비교(PPT↔PPT 장별 차이, 엑셀↔엑셀 합계·행 변경, PPT↔엑셀 숫자 교차 확인)하고,
+  차이가 큰 장/시트는 doc_structure(sections 지정) / query_table / compare_tables 로 근거를 확인해 설명하세요.
+- 1개면 doc_structure / analyze_file 로 장별 내용을 보고, 규칙집이 있으면 rulebook_validate 로 검증하세요.
+
+스킬 스크립트 / 사용 이력 / 모델:
+- 스킬 지침이 스크립트(예: scripts/make_menu.py) 실행을 요구하면 run_skill_script 로 실행하세요. 파일 목록은 list_skill_scripts.
+  스크립트가 요구하는 인자는 스크립트 내용(read_skill_file)을 보고 args 로 넘기세요.
+- '사용 이력', '얼마나 썼는지', '토큰 사용량' → agent_usage, '모델 목록', '어떤 모델' → list_models.
 
 과거 자료 학습 / 규칙 (스스로 분석 → 규칙화 → 검증 → 갱신):
 - 과거 자료를 배우라는 요청: rulebook_create → rulebook_learn(좋은 예시) → doc_structure 로 각 장의 실제 내용을 읽고
@@ -183,6 +203,7 @@ class Agent:
             f"# 지금 실행할 스킬: {skill.name}\n설명: {skill.description}\n"
             f"입력값: {json.dumps(inputs, ensure_ascii=False)}\n"
             + (f"스킬 참고 파일: {', '.join(skill.files)} (read_skill_file 로 읽기)\n" if skill.files else "")
+            + (f"실행할 수 있는 스크립트: {', '.join(scripts)} (run_skill_script 로 실행: name={skill.name})\n" if (scripts := _skill_scripts(skill)) else "")
             + "\n아래 지침을 순서대로 따르세요. use_skill 을 다시 호출할 필요는 없습니다.\n\n"
             + skill.render(inputs, timezone)
         )
@@ -200,6 +221,7 @@ class Agent:
         skill: "Skill | None" = None,
         skill_inputs: dict[str, Any] | None = None,
         images: list[str] | None = None,
+        attachments: list[str] | None = None,
     ) -> AgentResult:
         """프롬프트 1건 처리. messages 를 주면 이어지는 대화로 처리하고 그 리스트를 갱신합니다.
 
@@ -223,6 +245,11 @@ class Agent:
         from .images import downgrade_old_images, user_content
 
         downgrade_old_images(messages, keep_last=0)  # 이전 턴 이미지는 텍스트 참조로 (토큰 절약)
+        if attachments:  # PPT/엑셀 등 첨부 문서: 경로 + 장별 요약을 알려주고 도구로 직접 분석하게 함
+            from .compare import attachment_note
+
+            note = await asyncio.to_thread(attachment_note, attachments)
+            prompt = f"{prompt}\n\n{note}" if prompt.strip() else f"첨부한 파일을 분석해줘.\n\n{note}"
         if images:
             content, used = user_content(prompt, images, self.image_max_side)
             messages.append({"role": "user", "content": content, "_images": used})

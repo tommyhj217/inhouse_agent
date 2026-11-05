@@ -194,7 +194,7 @@ async def cmd_chat(cfg: AppConfig, args: argparse.Namespace) -> int:
         _warn_failed(rt)
         print("사내 자료수집 에이전트 - 대화형 모드")
         print("/ 만 입력하면 사용할 수 있는 스킬 목록, /<스킬이름> key=value 로 바로 실행, /<도구이름> key=value 로 기능 직접 실행")
-        print("명령: /tools  /servers  /files  /skills  /skill <이름> [k=v ...]  /noskill  /image <경로>  /sessions  /reset  /save <이름>  /reconnect <서버>  /exit")
+        print("명령: /tools  /servers  /files  /skills  /skill <이름> [k=v ...]  /noskill  /attach <경로> (이미지·PPT·엑셀)  /sessions  /reset  /save <이름>  /reconnect <서버>  /exit")
         ready, why = rt.llm_status()
         if not ready:
             print(f"[LLM 없음] {why} → 워크플로가 있는 스킬과 도구는 / 로 실행할 수 있습니다.")
@@ -206,6 +206,7 @@ async def cmd_chat(cfg: AppConfig, args: argparse.Namespace) -> int:
         store = rt.sessions()
         sid = store.new_id()
         images: list[str] = []
+        attachments: list[str] = []
         if rt.workspace.user:
             print(f"[사용자] {rt.workspace.user} · 작업폴더 {rt.workspace.root}")
         if getattr(args, "resume", None):
@@ -249,19 +250,23 @@ async def cmd_chat(cfg: AppConfig, args: argparse.Namespace) -> int:
                         continue
                     messages = rt.agent.new_conversation(servers)
                     print(f"[스킬 모드] {skill.name}: {skill.description}\n  입력: {[i.name for i in skill.inputs]} · 빈 줄 대신 '실행' 이라고 입력하면 바로 실행합니다.")
-                elif cmd == "/image":
+                elif cmd in ("/image", "/attach"):
                     from .images import is_image
 
                     try:
-                        ip = rt.workspace.resolve(rest.strip())
+                        ip = rt.workspace.resolve(rest.strip().strip('"'))
                     except PermissionError as e:
                         print(f"오류: {e}")
                         continue
-                    if not ip.is_file() or not is_image(ip):
-                        print(f"이미지 파일이 아닙니다: {ip}")
-                    else:
+                    if not ip.is_file():
+                        print(f"파일이 없습니다: {ip}")
+                    elif is_image(ip):
                         images.append(str(ip))
-                        print(f"다음 요청에 첨부: {ip.name} (총 {len(images)}장)")
+                        print(f"다음 요청에 이미지 첨부: {ip.name} (이미지 {len(images)}장, 문서 {len(attachments)}개)")
+                    else:
+                        attachments.append(str(ip))
+                        print(f"다음 요청에 문서 첨부: {ip.name} (이미지 {len(images)}장, 문서 {len(attachments)}개)"
+                              + (" · 2개 이상이면 비교 분석합니다" if len(attachments) >= 2 else ""))
                 elif cmd == "/sessions":
                     for it in store.list(15):
                         print(f"- {it['id']}  {it['title']}  ({it['turns']}회)")
@@ -312,6 +317,13 @@ async def cmd_chat(cfg: AppConfig, args: argparse.Namespace) -> int:
                 else:
                     print("알 수 없는 명령 - / 를 입력하면 스킬 목록이 나옵니다.")
                 continue
+            if not rt.llm_status()[0] and attachments and not skill:  # 토큰 없이 첨부 문서 자동 분석/비교
+                from .compare import attachment_steps
+
+                res = await rt.run_workflow(attachment_steps(attachments), {}, title="첨부 문서 분석", on_event=_print_event(args.verbose), ask=_cli_ask)
+                attachments = []
+                print(f"\n에이전트> {res.output}\n")
+                continue
             if not rt.llm_status()[0] and not (skill and skill.steps and line == "실행"):
                 print("LLM 이 연결되어 있지 않아 자유 질문에는 답할 수 없습니다. / 를 입력하면 실행할 수 있는 스킬이 나옵니다.\n")
                 continue
@@ -323,16 +335,18 @@ async def cmd_chat(cfg: AppConfig, args: argparse.Namespace) -> int:
                 result = await rt.agent.run(
                     "" if (skill and line == "실행") else line,
                     messages=messages, servers=servers, on_event=_print_event(args.verbose), ask=_cli_ask,
-                    skill=skill, skill_inputs=skill_inputs, images=images or None,
+                    skill=skill, skill_inputs=skill_inputs, images=images or None, attachments=attachments or None,
                 )
             except Exception as e:  # noqa: BLE001 - 스킬 입력 오류 등
                 print(f"오류: {e}")
                 continue
             store.save(sid, messages, skill=skill.name if skill else None, inputs=skill_inputs or None, servers=servers, turn={
-                "time": time.time(), "prompt": line, "images": images, "status": result.stopped_reason, "output": result.output,
+                "time": time.time(), "prompt": line, "images": images, "attachments": attachments, "kind": "skill" if skill else "chat",
+                "skill": skill.name if skill else None, "usage": result.usage, "elapsed": round(result.elapsed, 1),
+                "status": result.stopped_reason, "output": result.output,
                 "tools": [f"{e.server}.{e.tool}" for e in result.tool_events], "files": [f["path"] for f in result.files if f.get("path")],
             })
-            images = []
+            images, attachments = [], []
             last = (line, result)
             print(f"\n에이전트> {result.output}")
             _print_links(rt, result)

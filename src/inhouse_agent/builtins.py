@@ -298,10 +298,14 @@ def make_builtin_tools(
                 inputs_note = json.dumps(inputs, ensure_ascii=False)
             if ctx is not None:
                 ctx.meta.setdefault("skills_used", []).append(sk.name)
+            from .skill_scripts import skill_scripts
+
             files = ", ".join(sk.files) or "(없음)"
+            scripts = skill_scripts(sk.path)
+            run_note = f"실행할 수 있는 스크립트: {', '.join(scripts)} (run_skill_script 로 실행: name={sk.name}, path=<스크립트>)\n" if scripts else ""
             return (
                 f"# 스킬: {sk.name}\n설명: {sk.description}\n입력값: {inputs_note}\n"
-                f"추가 파일: {files} (read_skill_file 로 읽기)\n\n## 지침 (이 절차를 따르세요)\n{sk.render(inputs, tz_name)}"
+                f"추가 파일: {files} (read_skill_file 로 읽기)\n{run_note}\n## 지침 (이 절차를 따르세요)\n{sk.render(inputs, tz_name)}"
             )
 
         async def read_skill_file(args: dict[str, Any]) -> str:

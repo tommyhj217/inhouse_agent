@@ -53,6 +53,7 @@ class RunRequest(BaseModel):
     inputs: dict[str, Any] | None = None
     new_session: bool = False
     images: list[str] | None = None  # /api/images/upload 로 올린 이미지 경로
+    attachments: list[str] | None = None  # /api/attachments/upload 로 올린 문서(PPT/엑셀/Word/PDF) 경로
     mode: str = "auto"  # auto(LLM 있으면 에이전트, 없으면 워크플로) | agent | workflow
     tool: str | None = None  # 도구(기능) 직접 실행 - LLM 불필요
     args: dict[str, Any] | None = None
@@ -166,6 +167,7 @@ class Run:
     tool: str | None = None
     args: dict[str, Any] | None = None
     skill_start: bool = False  # 이번 요청이 스킬 실행 자체인지 (아니면 스킬 대화에 이어서 하는 말)
+    attachments: list[str] = field(default_factory=list)  # 첨부 문서 (PPT/엑셀 등)
     cond: asyncio.Condition = field(default_factory=asyncio.Condition)
 
     async def push(self, kind: str, data: dict[str, Any]) -> None:
@@ -233,9 +235,23 @@ class RunManager:
             out.append(str(rp))
         return out[:10]
 
+    def _check_attachments(self, paths: list[str] | None) -> tuple[list[str], list[str]]:
+        """첨부 → (이미지, 문서). 이미지가 섞여 오면 이미지로 처리."""
+        from .images import is_image
+
+        imgs, docs = [], []
+        for p in paths or []:
+            rp = self.rt.workspace.resolve(p)
+            if not rp.is_file():
+                raise SkillError(f"첨부 파일이 없습니다: {p}")
+            (imgs if is_image(rp) else docs).append(str(rp))
+        return imgs, docs[:20]
+
     async def start(self, req: RunRequest) -> Run:
         self._gc()
         images = self._check_images(req.images)
+        more, attachments = self._check_attachments(req.attachments)
+        images = (images + more)[:10]
         sess = self.session(None if req.new_session else req.session_id)
         if req.skill:
             self.rt.skills.get(req.skill)  # 존재/형식 확인 (오류는 400)
@@ -258,7 +274,8 @@ class RunManager:
                 raise SkillError(f"LLM 을 쓸 수 없습니다: {self.rt.llm_status()[1]}")
             kind = "skill" if sess.skill else "chat"
             title = (req.prompt or f"[스킬] {sess.skill}")[:80]
-        run = Run(uuid.uuid4().hex[:12], sess.id, kind, title, user=sess.user, mode=req.mode, tool=req.tool, args=req.args, skill_start=bool(req.skill))
+        run = Run(uuid.uuid4().hex[:12], sess.id, kind, title, user=sess.user, mode=req.mode, tool=req.tool, args=req.args, skill_start=bool(req.skill),
+                  attachments=attachments)
         self.runs[run.id] = run
         run.task = asyncio.create_task(self._execute(run, sess, req.prompt, images))
         return run
@@ -285,7 +302,7 @@ class RunManager:
             return answer
 
         await run.push("start", {"kind": run.kind, "prompt": prompt, "skill": sess.skill if run.kind != "tool" else None, "inputs": sess.inputs, "tool": run.tool, "mode": run.mode,
-                                 "session_id": sess.id, "images": images or [], "user": sess.user})
+                                 "session_id": sess.id, "images": images or [], "attachments": run.attachments, "user": sess.user})
         result = None
         try:
             async with sess.lock:
@@ -299,12 +316,20 @@ class RunManager:
                     result, path = await self.rt.run_skill(
                         sess.skill, sess.inputs, prompt, on_event=on_event, ask=ask,
                         messages=sess.messages if sess.messages else None, save=True, images=images, mode=run.mode,
+                        attachments=run.attachments,
                     )
                     if not sess.messages:
                         sess.messages = result.messages
                     elif result.messages and result.messages is not sess.messages:
                         sess.messages = sess.messages + result.messages  # 워크플로 결과도 대화에 이어 붙임
                     run.saved_to = str(path) if path else None
+                elif not ready and run.attachments:  # 토큰 없이도 첨부 문서는 자동으로 분석/비교
+                    from .compare import attachment_steps
+
+                    result = await self.rt.run_workflow(attachment_steps(run.attachments), {}, title="첨부 문서 분석", on_event=on_event, ask=ask)
+                    note = ("\n\n(LLM 없이 자동 분석한 결과입니다. LLM 이 연결되면 이 결과를 바탕으로 해석·검토까지 해 줍니다.)")
+                    result.output += note
+                    sess.messages = (sess.messages or []) + result.messages
                 elif not ready:
                     from .agent import AgentResult
 
@@ -317,7 +342,7 @@ class RunManager:
                     if not sess.messages:
                         sess.messages = self.rt.agent.new_conversation(sess.servers)
                     result = await self.rt.agent.run(
-                        prompt, messages=sess.messages, servers=sess.servers, on_event=on_event, ask=ask, images=images
+                        prompt, messages=sess.messages, servers=sess.servers, on_event=on_event, ask=ask, images=images, attachments=run.attachments
                     )
             run.status = result.stopped_reason
             await run.push(
@@ -353,6 +378,13 @@ class RunManager:
             "prompt": prompt or (f"/{run.tool} {json.dumps(run.args or {}, ensure_ascii=False)}" if run.kind == "tool" else
                                  f"/{sess.skill} {json.dumps(sess.inputs or {}, ensure_ascii=False)}" if sess.skill else ""),
             "images": images or [],
+            "attachments": run.attachments or [],
+            "kind": run.kind,
+            "skill": sess.skill if run.kind == "skill" else None,
+            "tool": run.tool,
+            "mode": run.mode,
+            "usage": done.get("usage") or {},
+            "elapsed": done.get("elapsed"),
             "status": run.status,
             "output": done.get("output", ""),
             "tools": [f"{e['server']}.{e['tool']}" + ("(오류)" if e.get("is_error") else "") for e in run.events if e["type"] == "tool_end"],
@@ -606,6 +638,75 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
             raise HTTPException(400, str(e)) from e
         return {"ok": True, "path": str(target), "display": rt.workspace.display(target), "name": target.name}
 
+    ATTACH_EXT = {".pptx", ".xlsx", ".xlsm", ".xls", ".csv", ".tsv", ".docx", ".pdf", ".txt", ".md", ".json", ".zip", ".html", ".htm", ".xml"}
+
+    @app.post("/api/attachments/upload", dependencies=A)
+    async def attachment_upload(request: Request, name: str = "file") -> dict[str, Any]:
+        """채팅 첨부 (PPT/엑셀/Word/PDF/CSV + 이미지) → 사용자 uploads/attachments/ 에 저장하고 간단 요약."""
+        from .images import IMAGE_EXT
+
+        ext = Path(name).suffix.lower()
+        if ext in IMAGE_EXT:
+            return {**await image_upload(request, name), "kind": "image"}
+        if ext not in ATTACH_EXT:
+            raise HTTPException(400, f"첨부할 수 없는 형식입니다: {ext or name} (가능: PPT/엑셀/Word/PDF/CSV/이미지 등)")
+        data = await request.body()
+        if not data:
+            raise HTTPException(400, "빈 파일입니다.")
+        limit = max(min(int(cfg.files.max_file_mb or 100), 100), 1)
+        if len(data) > limit * 1024 * 1024:
+            raise HTTPException(413, f"첨부 파일은 {limit}MB 이하만 올릴 수 있습니다.")
+        stem = re.sub(r'[\\/:*?"<>|\s]+', "_", Path(name).stem).strip("_") or "file"
+        # 원래 파일 이름 유지 (비교 결과·답변에 그대로 보이도록) → 올린 시각별 폴더에 저장
+        folder = Path(rt.workspace.uploads) / "attachments" / f"{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4]}"
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / f"{stem[:80]}{ext}"
+        target.write_bytes(data)
+        from .files import file_status
+
+        st = await file_status(target, rt.workspace, stable_wait=0)
+        summary = ""
+        if st.get("state") in ("corrupt", "empty", "suspicious"):
+            summary = "⚠️ " + "; ".join(st.get("issues") or [st.get("state", "")])
+        else:
+            def brief() -> str:
+                from .docstruct import doc_structure
+
+                d = doc_structure(target)
+                if d["kind"] == "pptx":
+                    return f"PPT {len(d['sections'])}장"
+                if d["kind"] in ("xlsx", "csv"):
+                    return f"{'엑셀' if d['kind'] == 'xlsx' else 'CSV'} 시트 {len(d['sheets'])}개 · " + ", ".join(f"{x['name']} {x['rows']}행" for x in d["sheets"][:3])
+                return f"{d['kind'].upper()} {len(d['sections'])}개 장"
+            try:
+                summary = await asyncio.to_thread(brief)
+            except Exception:  # noqa: BLE001
+                summary = st.get("detected_type") or ext[1:]
+        return {"ok": True, "path": str(target), "display": rt.workspace.display(target), "name": target.name, "kind": "document",
+                "type": ext[1:], "size": len(data), "summary": summary, "state": st.get("state")}
+
+    # ---------------- 사용 이력 / 모델 ----------------
+    @app.get("/api/usage", dependencies=A)
+    async def usage(days: float = 30, all_users: bool = Query(False, alias="all"), user: str | None = None) -> dict[str, Any]:
+        from .usage import collect_usage, format_usage
+
+        me = current_user.get()
+        if all_users or (user and user != me):
+            if not rt.can_edit_skills(me):
+                raise HTTPException(403, "다른 사용자의 이력은 관리자(skills.editors)만 볼 수 있습니다.")
+            users = [user] if user else [*rt.users.list_users(), None]
+        else:
+            users = [me] if (me and rt.users_cfg.enabled) else [None]
+        u = await asyncio.to_thread(collect_usage, rt, users, days)
+        return {**u, "text": format_usage(u)}
+
+    @app.get("/api/models", dependencies=A)
+    async def models(remote: bool = True) -> dict[str, Any]:
+        from .usage import format_models, list_models
+
+        i = await list_models(rt, remote)
+        return {**i, "text": format_models(i)}
+
     # ---------------- 규칙집 ----------------
     from .rulebook import RulebookError, RulebookStore
 
@@ -713,8 +814,8 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
     # ---------------- 실행(대화/스킬) ----------------
     @app.post("/api/runs", dependencies=A)
     async def start_run(req: RunRequest) -> dict[str, Any]:
-        if not req.prompt.strip() and not req.skill and not req.tool:
-            raise HTTPException(400, "prompt, skill 또는 tool 이 필요합니다.")
+        if not req.prompt.strip() and not req.skill and not req.tool and not req.attachments and not req.images:
+            raise HTTPException(400, "prompt, skill, tool 또는 첨부 파일이 필요합니다.")
         try:
             run = await mgr.start(req)
         except (SkillError, UserError, PermissionError) as e:
@@ -849,6 +950,42 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
         except SkillError as e:
             raise HTTPException(400, str(e)) from e
         return {"ok": True}
+
+    @app.post("/api/skills/import", dependencies=A)
+    async def skill_import(request: Request, overwrite: bool = False, name: str | None = None) -> dict[str, Any]:
+        """다른 곳에서 만든 스킬 폴더(zip: SKILL.md + scripts/ 등)를 가져와 모든 사용자가 쓰도록 등록."""
+        need_editor()
+        data = await request.body()
+        try:
+            sk = await asyncio.to_thread(rt.skills.import_zip, data, current_user.get(), overwrite, name or None)
+        except SkillError as e:
+            raise HTTPException(400, str(e)) from e
+        return {"ok": True, "parsed": sk.summary()}
+
+    @app.put("/api/skills/{name}/files", dependencies=A)
+    async def skill_file_put(name: str, request: Request, path: str = Query(...)) -> dict[str, Any]:
+        need_editor()
+        try:
+            p = rt.skills.write_file(name, path, await request.body(), current_user.get())
+        except SkillError as e:
+            raise HTTPException(400, str(e)) from e
+        return {"ok": True, "path": str(p), "files": rt.skills.get(name).files}
+
+    @app.get("/api/skills/{name}/files", dependencies=A)
+    async def skill_file_get(name: str, path: str = Query(...)) -> dict[str, Any]:
+        try:
+            return {"path": path, "content": rt.skills.read_file(name, path, max_chars=200000)}
+        except SkillError as e:
+            raise HTTPException(404, str(e)) from e
+
+    @app.delete("/api/skills/{name}/files", dependencies=A)
+    async def skill_file_delete(name: str, path: str = Query(...)) -> dict[str, Any]:
+        need_editor()
+        try:
+            rt.skills.delete_file(name, path, current_user.get())
+        except SkillError as e:
+            raise HTTPException(400, str(e)) from e
+        return {"ok": True, "files": rt.skills.get(name).files}
 
     @app.get("/api/skills/{name}/history/{fname}", dependencies=A)
     async def skill_history(name: str, fname: str) -> dict[str, Any]:

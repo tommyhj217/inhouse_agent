@@ -101,6 +101,15 @@ class AgentRuntime:
         # 규칙집: 과거 자료로 규칙을 배우고 검증하며 갱신 (모든 사용자가 공유해 지식이 쌓이도록 프로젝트 폴더에 저장)
         self.rules_path = cfg.resolve_path(str((cfg.raw.get("rules") or {}).get("dir") or "rulebooks"))
         builtin_tools += make_rule_tools(self.workspace, self.rules_path)
+        # 스킬 폴더의 스크립트 실행, 문서 비교, 사용 이력/모델 목록
+        from .compare import make_compare_tools
+        from .skill_scripts import SkillScriptRunner
+        from .usage import make_usage_tools
+
+        self.scripts = SkillScriptRunner(self.skills, self.workspace, cfg.raw.get("skills") or {}, self.dynamic, self.links)
+        builtin_tools += self.scripts.tools()
+        builtin_tools += make_compare_tools(self.workspace)
+        builtin_tools += make_usage_tools(self)
         self.hub = MCPHub(
             cfg.mcp_servers,
             log_dir=cfg.log_path,
@@ -286,6 +295,7 @@ class AgentRuntime:
         save: bool = True,
         images: list[str] | None = None,
         mode: str = "auto",
+        attachments: list[str] | None = None,
     ) -> tuple[AgentResult, Path | None]:
         """스킬 1회 실행 (테스트용). 결과는 outputs/skill_<이름>/ (사용자면 그 사용자의 results/) 에 저장."""
         skill = self.skills.get(name)
@@ -301,11 +311,15 @@ class AgentRuntime:
                     if not ready else f"스킬 '{name}' 에는 steps(실행 단계)가 없어 워크플로로 실행할 수 없습니다."
                 )
             vals = skill.resolve_inputs(inputs, self.cfg.agent.timezone)
+            files = [*(attachments or []), *(images or [])]
+            if files:  # 첨부 파일은 {attachment} {attachments} 로 단계에서 사용
+                vals.setdefault("attachment", files[0])
+                vals.setdefault("attachments", "\n".join(files))
             result = await self.run_workflow(skill.steps, vals, title=f"[스킬] {name}", output_template=skill.output_template, on_event=on_event, ask=ask)
             result.skills_used = [name]
         else:
             result = await self.agent.run(
-                prompt, messages=messages, on_event=on_event, ask=ask, skill=skill, skill_inputs=inputs, images=images
+                prompt, messages=messages, on_event=on_event, ask=ask, skill=skill, skill_inputs=inputs, images=images, attachments=attachments
             )
         path = None
         if save:

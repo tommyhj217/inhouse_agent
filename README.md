@@ -36,7 +36,9 @@
 | 파일 받기 / 공유 | 답변과 tool 결과에 나온 파일·폴더 경로를 클릭하면 바로 받습니다(폴더는 zip). 🔗를 누르면 API 토큰 없이 열리는 기한부 서명 링크가 복사됩니다. 메일, 메신저, 웹훅, CLI 결과에도 링크가 붙습니다. |
 | 범용 자동화 도구 | 공개 자동화 에이전트들의 도구를 분석해서 추가했습니다([분석 문서](docs/agent_tools_analysis.md)): 웹 읽기/검색, HTTP API, SQL, 표 비교, 엑셀·차트·zip 생성, 파일 내용 검색, 기억, 작업 계획, 메일/메신저 알림 |
 | 사용자별 작업폴더 / 이어서 하기 | 사용자 ID별로 `workspace/users/<ID>/` 폴더를 따로 씁니다. 대화는 자동으로 저장되어 "내 작업" 목록에서 골라 이어서 진행할 수 있고, 서버를 다시 켜도 유지됩니다. 에이전트가 최근 작업을 기억합니다. |
-| 채팅 이미지 | 🖼 버튼, 붙여넣기(Ctrl+V), 끌어놓기로 첨부합니다. 비전 모델이 직접 보고, 저장된 이미지(MCP 캡처 등)는 `view_image`로 봅니다. |
+| 채팅 첨부 (이미지 · PPT · 엑셀) | 📎 버튼, 붙여넣기(Ctrl+V), 끌어놓기로 이미지와 PPT/엑셀/Word/PDF/CSV를 첨부합니다. 엑셀에서 셀 범위를 복사해 붙여넣으면 표 파일로 첨부됩니다. 에이전트가 `compare_documents`로 파일끼리 비교 분석합니다(PPT 장별 차이, 엑셀 합계·행 변경, PPT 숫자↔엑셀 값 교차 확인). 토큰이 없어도 첨부만 하면 자동으로 비교합니다. |
+| 스킬 스크립트 | 스킬 폴더의 `scripts/*.py` 등을 `run_skill_script`로 실행합니다(메뉴·보고서 생성 등). `steps`에 `script:`로 적으면 토큰 없이 실행되고, 스킬 폴더는 zip으로 가져올 수 있습니다. |
+| 사용 이력 / 모델 목록 | `agent_usage`로 실행 횟수, 스킬·도구별 사용, 토큰, 최근 실행을 조회하고, `list_models`로 사용 중인 모델과 Azure에서 쓸 수 있는 모델을 봅니다. 상태 탭에도 표시됩니다. |
 | 과거 자료 학습 / 규칙 | 과거 보고서(PPT/엑셀/Word/PDF)를 장별로 분석해 장별 구성과 규칙을 만듭니다. 새 제품(예: 뮤즈, AI 비서)을 분석해 같은 형식의 PPT를 만들고 규칙으로 검증합니다. 검증 결과와 승인된 결과물로 규칙을 스스로 고쳐 나가고, 버전과 변경 기록을 남깁니다. |
 | / 명령 · 토큰 없이 사용 | 첫 화면 채팅창에 `/`를 치면 등록된 스킬과 기능(도구)이 나와 바로 실행됩니다. 스킬에 `steps`(실행 단계)를 적어 두면 LLM이나 토큰 없이 순서대로 실행되고, 도구는 모두 LLM 없이 직접 실행됩니다. |
 | 인터랙티브 UI | 스킬을 편집하면 입력 폼이 즉시 바뀌고, 바로 테스트 실행할 수 있습니다. 실행 과정은 실시간으로 표시되고, 에이전트의 질문(`ask_user`)에 화면에서 답할 수 있습니다. 결과를 보고 후속 지시를 내릴 수 있습니다. |
@@ -380,7 +382,7 @@ def run(args, ctx):
 **작업폴더**: `workspace/users/<ID>/`
 
 ```
-downloads/  uploads/images/  files/  results/  sessions/  memory.json
+downloads/  uploads/images/  uploads/attachments/  files/  results/  sessions/  memory.json
 ```
 
 - 모든 도구(파일 저장·분석·다운로드·기억·동적 도구 실행 폴더)가 이 사용자의 폴더를 씁니다. 다른 사용자의 파일은 열 수 없습니다.
@@ -397,7 +399,7 @@ downloads/  uploads/images/  files/  results/  sessions/  memory.json
 
 **채팅 이미지**
 
-- 🖼 버튼, 붙여넣기(Ctrl+V, 화면 캡처), 채팅창에 끌어놓기로 첨부합니다. 한 번에 최대 10장이고, 썸네일을 클릭하면 크게 보입니다.
+- 📎 버튼, 붙여넣기(Ctrl+V, 화면 캡처), 채팅창에 끌어놓기로 첨부합니다. 한 번에 최대 10장이고, 썸네일을 클릭하면 크게 보입니다. PPT·엑셀 첨부는 [12장](#12-첨부-파일-비교-분석--스킬-스크립트--사용-이력)을 보세요.
 - 이미지는 `uploads/images/`에 저장되고, 긴 변 2048px로 줄여 비전 모델에 보냅니다.
 - 다음 요청부터는 이전 이미지를 경로 텍스트로 바꿔서 보내 토큰을 아낍니다. 다시 봐야 하면 에이전트가 `view_image`로 불러옵니다.
 - `view_image`로는 MCP 화면 캡처나 다운로드한 이미지도 에이전트가 직접 볼 수 있습니다.
@@ -589,7 +591,69 @@ output: |
 - 웹 UI **규칙** 탭에서 장별 구성, 규칙(상태·중요도·문장 바로 수정), 검증(장별 체크리스트), 점검, 제품, 변경 기록을 보고 자료 학습, 문서 검증, 엑셀 내보내기를 합니다. 🤖 버튼은 에이전트에게 작업을 넘깁니다.
 - 스킬: `learn_rules`(과거 자료 학습과 규칙 정리), `product_analysis`(새 제품 분석, 검증, 규칙 갱신)
 
-## 12. 결과 파일 받기 / 공유 링크
+## 12. 첨부 파일 비교 분석 · 스킬 스크립트 · 사용 이력
+
+### 채팅에 PPT / 엑셀 첨부
+
+- **첨부 방법**: 📎 버튼, 탐색기에서 파일을 복사한 뒤 붙여넣기(Ctrl+V), 채팅 화면에 끌어놓기.
+  - 가능한 형식: 이미지, pptx, xlsx/xlsm/xls, csv/tsv, docx, pdf, txt/md/json, zip
+- **엑셀 셀 범위 붙여넣기**: 엑셀에서 표를 복사해 붙여넣으면 그림이 아니라 `붙여넣은_표.tsv` 파일로 첨부되어 데이터로 분석됩니다.
+- **저장 위치**: 사용자 폴더 `uploads/attachments/<시각>/<원래 파일명>`. 업로드할 때 상태를 점검해 손상되었거나 로그인 HTML 같은 파일이면 바로 알려줍니다.
+- **에이전트에 전달되는 것**: 첨부 파일 경로와 장별 요약. 에이전트는 이것을 보고 직접 분석합니다.
+  - 2개 이상: `compare_documents`로 비교한 뒤, 차이가 큰 장은 `doc_structure`/`query_table`로 근거를 확인합니다.
+  - 1개: `doc_structure`/`analyze_file`로 보고, 규칙집이 있으면 `rulebook_validate`로 검증합니다.
+- **토큰 없이(LLM 없음)**: 첨부만 하고 보내면 자동으로 비교와 장별 구조 분석을 실행하고, 비교 보고서(md)를 저장합니다.
+- **스킬에 첨부**: 스킬을 실행할 때 첨부한 파일은 `steps`에서 `{attachment}`(첫 파일), `{attachments|lines}`(전체)로 씁니다.
+- **CLI**: `/attach <경로>`로 첨부한 뒤 요청을 입력합니다.
+
+`compare_documents`가 비교하는 내용 (첫 파일이 기준):
+
+| 조합 | 비교 내용 |
+|---|---|
+| PPT ↔ PPT (Word/PDF도 같은 방식) | 제목으로 장을 짝지어 추가/삭제/바뀐 장, 제목 변경, 추가/삭제된 문장, 숫자 변화(12.3억 → 13.1억), 표/차트/이미지 수, 발표자 노트, 순서 이동 |
+| 엑셀 ↔ 엑셀 (CSV) | 시트별 열 추가/삭제, 행 수, 숫자 열 합계 차이(증감률), 키 열(자동 탐지 또는 `key_columns`) 기준 행 추가/삭제/값 변경 |
+| PPT ↔ 엑셀 | PPT에 적힌 숫자가 엑셀 값(셀, 열 합계, 평균)과 맞는지 확인합니다. 억/만/천 단위, %(0.153 = 15.3%), "(단위: 백만원)"처럼 줄여 쓴 값, 반올림을 허용하고, 맞지 않는 숫자를 장 번호와 함께 보여줍니다. |
+
+### 스킬 스크립트 실행
+
+스킬 폴더에 스크립트를 넣어 두면 에이전트가 `run_skill_script`로 실행합니다(예: 메뉴 생성, 보고서 생성). 스킬을 불러오면 실행할 수 있는 스크립트 목록이 지침과 함께 전달되므로, "스크립트를 실행할 도구가 없다"는 답이 나오지 않습니다.
+
+```
+skills/menu_builder/
+  SKILL.md
+  scripts/make_menu.py     ← argparse 스크립트: args {"title": "점심"} 이 --title 점심 으로 전달됨
+  scripts/with_ctx.py      ← def run(args, ctx): 형식이면 ctx.call_tool 로 MCP 도구도 호출 가능
+```
+
+- **실행 위치**: 작업 폴더가 사용자 `files/skill_<스킬>/<시각>/`이라서, 스크립트가 만든 파일은 결과 파일로 잡혀 바로 받을 수 있습니다.
+- **스크립트에서 쓸 수 있는 환경변수**: `SKILL_DIR`, `SKILL_ARGS`(JSON), `AGENT_OUTPUT_DIR`, `AGENT_WORKSPACE`, `AGENT_USER`.
+- **지원 형식**: `.py`(에이전트와 같은 파이썬), `.sh`, `.bat/.cmd`, `.ps1`, `.js`.
+- **토큰 없이 실행**: `steps`에 적습니다.
+  ```yaml
+  steps:
+    - id: m
+      script: scripts/make_menu.py
+      args: {title: "{title}", items: [김치찌개, 제육볶음]}
+  ```
+- **설정**: `skills.scripts: on | approve(실행 전 승인) | off`, `skills.script_timeout: 300`
+- **스킬 탭에서 관리**:
+  - 📦 **가져오기**: 다른 곳에서 만든 스킬 폴더 zip(SKILL.md + scripts/ …)을 등록합니다. 이름에 `-`가 있어도 되고, 경로 탈출이나 숨김 파일은 무시합니다.
+  - **파일 추가 / 삭제 / 보기**와 ▶ 실행.
+  - 가져오기, 추가, 삭제는 편집자(`skills.editors`)만 할 수 있습니다.
+
+### 사용 이력 / 모델 목록
+
+- `agent_usage`(도구, `/agent_usage days=7`)와 상태 탭의 **사용 이력**:
+  - 보여주는 것: 실행 횟수, 성공/실패, 대화·스킬·기능별 횟수, 스킬별·도구별 사용(오류 수), 토큰(입력/출력), 날짜별 실행, 최근 실행 목록
+  - 기본은 본인 이력만 보입니다. 모든 사용자 합계(`all_users`, 상태 탭의 "모든 사용자")는 관리자(`skills.editors`)만 볼 수 있습니다.
+  - 실행할 때마다 토큰, 소요 시간, 종류, 스킬, 첨부 파일이 기록됩니다.
+- `list_models`와 상태 탭의 **모델**:
+  - 현재 배포(deployment), 연결 상태, 이미지 지원 여부
+  - `llm.models`에 적어 둔 모델
+  - Azure 리소스에서 쓸 수 있는 모델 목록(게이트웨이가 막으면 사유를 표시)
+- API: `GET /api/usage?days=30[&all=true]`, `GET /api/models`
+
+## 13. 결과 파일 받기 / 공유 링크
 
 - **웹 화면**: 답변이나 tool 결과에 실제로 있는 파일/폴더 경로가 나오면 📎 링크로 바뀝니다. 파일명에 공백이나 한글이 있어도 됩니다.
   - 경로 클릭: 내려받기 (폴더는 zip으로 묶음)
@@ -606,7 +670,7 @@ output: |
   - CLI 결과 (`[파일 받기]`)
 - **CLI로 링크 만들기**: `inhouse-agent link files/reports/10월_매출.xlsx --hours 24`
 
-## 13. 범용 자동화 도구
+## 14. 범용 자동화 도구
 
 공개 자동화 에이전트(OpenAI Agents SDK, smolagents, Manus, n8n, LangChain, Claude Code)의 도구를 비교한 결과와,
 무엇을 넣고 무엇을 뺐는지(예: 셸 명령)는 [docs/agent_tools_analysis.md](docs/agent_tools_analysis.md)에 정리했습니다.
@@ -627,7 +691,7 @@ output: |
 | `send_email` | 사내 SMTP 메일 (첨부와 다운로드 링크) | `notify.email.smtp_host`와 `allowed_recipients`가 필요. 대화형에서는 승인 |
 | `send_message` | Teams/Slack 웹훅 | `notify.webhooks`에 등록된 채널로만 발송 |
 
-## 14. 구조
+## 15. 구조
 
 ```
 src/inhouse_agent/
@@ -643,6 +707,9 @@ src/inhouse_agent/
   links.py      서명된 다운로드 링크 (/d/...)
   users.py      사용자별 작업폴더(WorkspaceProxy), 대화 세션 저장/이어서 하기
   docstruct.py  PPT/엑셀/Word/PDF 장(슬라이드/시트) 단위 구조 추출
+  compare.py    문서 비교 (PPT 장별 차이, 엑셀 합계·행 변경, PPT 숫자↔엑셀 교차 확인), 첨부 안내문
+  skill_scripts.py 스킬 폴더 스크립트 실행 (run_skill_script, list_skill_scripts)
+  usage.py      사용 이력(agent_usage) / 모델 목록(list_models)
   rulebook.py   장별 구성 도출, 규칙 후보 발굴, 규칙 검사·지지율·상태 자동 변경, 검증, 점검(reflect), 버전/변경기록
   rules_tools.py 규칙집 tool (learn/add/update/validate/judge/outline/reflect/record_product/export) + write_pptx
   pptxgen.py    PPT 생성 (과거 보고서 템플릿 디자인 사용)
@@ -669,7 +736,7 @@ tests/                          통합 테스트 (실제 MCP 서버, 가짜 Azur
   현재 시각과 서버 목록, 서버 설명은 자동으로 붙습니다.
 - 결과를 디버깅할 때는 `outputs/<작업>/_trace/*.json`에서 LLM이 어떤 tool을 어떤 인자로 불렀는지 확인할 수 있습니다.
 
-## 15. 테스트
+## 16. 테스트
 
 ```bash
 pip install -e ".[server,dev]"
