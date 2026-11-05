@@ -78,6 +78,9 @@ DEFAULT_SYSTEM_PROMPT = """당신은 사내 업무 자료 수집·분석 에이�
 스킬 스크립트 / 사용 이력 / 모델:
 - 스킬 지침이 스크립트(예: scripts/make_menu.py) 실행을 요구하면 run_skill_script 로 실행하세요. 파일 목록은 list_skill_scripts.
   스크립트가 요구하는 인자는 스크립트 내용(read_skill_file)을 보고 args 로 넘기세요.
+  스킬 문서·스크립트 출력에 나온 명령줄(python3 …/scripts/view.py model MDL-101 --set "x=y" 등)은 run_skill_script 의 command 에 그대로 넣으세요.
+  Claude Code·Codex 용 스킬의 <this skill>, .agents/skills/ 경로는 이 에이전트의 스킬 폴더로 자동으로 바뀝니다.
+  스크립트가 화면 문서(JSON: view/sections/form/actions)를 내면 웹 화면에 버튼 메뉴로 보입니다. 같은 목록을 길게 다시 쓰지 말고 다음 선택을 안내하세요.
 - '사용 이력', '얼마나 썼는지', '토큰 사용량' → agent_usage, '모델 목록', '어떤 모델' → list_models.
 
 과거 자료 학습 / 규칙 (스스로 분석 → 규칙화 → 검증 → 갱신):
@@ -117,6 +120,11 @@ class ToolEvent:
     is_error: bool = False
     elapsed: float = 0.0
     files: list[dict[str, Any]] = field(default_factory=list)
+    view: dict[str, Any] | None = None  # 스크립트가 낸 화면 문서(JSON: view/sections/form/actions) → 웹에서 메뉴로 표시
+
+
+def view_of(data: Any) -> dict[str, Any] | None:
+    return data if isinstance(data, dict) and isinstance(data.get("view"), str) and any(k in data for k in ("sections", "form", "actions", "card", "questions", "rounds")) else None
 
 
 @dataclass
@@ -366,6 +374,7 @@ class Agent:
             ev.result = _truncate(out.text, self.cfg.max_tool_result_chars)
             ev.is_error = out.is_error
             ev.files = out.files
+            ev.view = view_of(out.data)
             if ev.is_error and not ev.result.startswith("오류"):
                 ev.result = "오류: " + ev.result
             await emit("tool_end", _ev_dict(ev, tc.id))
@@ -413,6 +422,7 @@ def _ev_dict(ev: ToolEvent, call_id: str = "") -> dict[str, Any]:
         "is_error": ev.is_error,
         "elapsed": round(ev.elapsed, 2),
         "files": ev.files,
+        **({"view": ev.view} if ev.view else {}),
     }
 
 

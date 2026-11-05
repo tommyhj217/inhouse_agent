@@ -36,6 +36,7 @@ except ImportError as e:  # pragma: no cover
 
 
 SESSION_TTL = 60 * 60 * 6
+API_VERSION = 4  # web/index.html 의 UI_API 와 같아야 함 (화면은 바로 바뀌지만 API 는 서버를 다시 켜야 바뀜)
 ASK_TIMEOUT = 60 * 15
 
 
@@ -57,6 +58,11 @@ class RunRequest(BaseModel):
     mode: str = "auto"  # auto(LLM 있으면 에이전트, 없으면 워크플로) | agent | workflow
     tool: str | None = None  # 도구(기능) 직접 실행 - LLM 불필요
     args: dict[str, Any] | None = None
+
+
+class StageInstall(BaseModel):
+    names: list[str] | None = None
+    overwrite: bool = False
 
 
 class RulebookCreate(BaseModel):
@@ -539,6 +545,7 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
             "users": {"enabled": rt.users_cfg.enabled, "require": rt.users_cfg.require},
             "llm": {"ready": rt.llm_status()[0], "reason": rt.llm_status()[1]},
             "can_edit_skills": rt.can_edit_skills(),
+            "api": API_VERSION,  # 화면(index.html)과 서버 코드 버전 확인용 - 다르면 서버 재시작 필요
             "user": current_user.get(),
             "auth": bool(token),
         }
@@ -555,7 +562,7 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
         ]
         for sk in skills:
             items.append({"kind": "skill", "name": sk.name, "description": sk.description, "inputs": [i.to_dict() for i in sk.inputs],
-                          "workflow": bool(sk.steps), "steps": len(sk.steps), "offline": bool(sk.steps),
+                          "workflow": bool(sk.steps), "steps": len(sk.steps), "offline": bool(sk.steps) or bool(sk.entry_commands()),
                           "updated": sk.info.get("updated"), "updated_by": sk.info.get("updated_by"), "created_by": sk.info.get("created_by"),
                           # 화면에서 사용자가 추가한(작성자가 기록된) 스킬만 3일간 '새 스킬' (git 으로 받은 파일은 제외)
                           "new": bool(sk.info.get("created_by")) and time.time() - float(sk.info.get("created") or 0) < 3 * 86400})
@@ -953,14 +960,82 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
 
     @app.post("/api/skills/import", dependencies=A)
     async def skill_import(request: Request, overwrite: bool = False, name: str | None = None) -> dict[str, Any]:
-        """다른 곳에서 만든 스킬 폴더(zip: SKILL.md + scripts/ 등)를 가져와 모든 사용자가 쓰도록 등록."""
+        """zip 한 번에 설치 (안의 스킬이 여러 개면 모두). 골라서 설치하려면 /api/skills/stage → install."""
         need_editor()
         data = await request.body()
+        inst = rt.skill_installer
         try:
-            sk = await asyncio.to_thread(rt.skills.import_zip, data, current_user.get(), overwrite, name or None)
+            sid = await asyncio.to_thread(inst.stage_zip, data, name or "")
+            try:
+                res = await asyncio.to_thread(inst.install, sid, None, overwrite, current_user.get())
+            finally:
+                inst.drop(sid)
         except SkillError as e:
             raise HTTPException(400, str(e)) from e
-        return {"ok": True, "parsed": sk.summary()}
+        if not res["installed"]:
+            msg = (f"스킬 '{', '.join(res['skipped'])}' 이(가) 이미 있습니다. 덮어쓰려면 overwrite 를 선택하세요." if res["skipped"]
+                   else "; ".join(f"{k}: {v}" for k, v in res["errors"].items()) or "zip 안에 SKILL.md 가 없습니다.")
+            raise HTTPException(400, msg)
+        return {"ok": True, "parsed": res["installed"][0], **res}
+
+    @app.post("/api/skills/stage", dependencies=A)
+    async def skill_stage(request: Request, filename: str = "") -> dict[str, Any]:
+        """스킬 가져오기 1단계: 원본을 받아 안의 스킬 목록을 보여줌.
+        본문: zip 파일 | SKILL.md 파일(filename=*.md) | JSON {url, ref, path} (GitHub/사내 Git) | {folder} (서버 PC 폴더)
+              | {files: [{path, data(base64)}]} (브라우저 폴더 선택) | {content} (SKILL.md 붙여넣기)"""
+        need_editor()
+        inst = rt.skill_installer
+        body = await request.body()
+        try:
+            if "json" in (request.headers.get("content-type") or ""):
+                d = json.loads(body or b"{}")
+                if d.get("url"):
+                    sid = await asyncio.to_thread(inst.stage_git, str(d["url"]), d.get("ref") or None, d.get("path") or None)
+                elif d.get("folder"):
+                    sid = await asyncio.to_thread(inst.stage_folder, str(d["folder"]))
+                elif d.get("files"):
+                    sid = await asyncio.to_thread(inst.stage_files, list(d["files"]), str(d.get("label") or ""))
+                elif d.get("content"):
+                    sid = await asyncio.to_thread(inst.stage_text, str(d["content"]), d.get("name"))
+                else:
+                    raise SkillError("url, folder, files, content 중 하나가 필요합니다.")
+            elif filename.lower().endswith(".md"):
+                sid = await asyncio.to_thread(inst.stage_text, body.decode("utf-8-sig"), None)
+            else:
+                sid = await asyncio.to_thread(inst.stage_zip, body, filename)
+            found = await asyncio.to_thread(inst.scan, sid)
+            _, meta = inst.stage_dir(sid)
+        except SkillError as e:
+            raise HTTPException(400, str(e)) from e
+        if not found:
+            inst.drop(sid)
+            raise HTTPException(400, "SKILL.md 가 들어 있는 스킬 폴더를 찾지 못했습니다. (각 스킬 폴더에 SKILL.md 가 있어야 합니다)")
+        return {"id": sid, "source": meta.get("source"), "skills": [f.to_dict() for f in found]}
+
+    @app.post("/api/skills/stage/{sid}/install", dependencies=A)
+    async def skill_stage_install(sid: str, req: StageInstall) -> dict[str, Any]:
+        need_editor()
+        inst = rt.skill_installer
+        try:
+            res = await asyncio.to_thread(inst.install, sid, req.names, req.overwrite, current_user.get())
+        except SkillError as e:
+            raise HTTPException(400, str(e)) from e
+        inst.drop(sid)
+        return {"ok": bool(res["installed"]), **res}
+
+    @app.delete("/api/skills/stage/{sid}", dependencies=A)
+    async def skill_stage_drop(sid: str) -> dict[str, Any]:
+        rt.skill_installer.drop(sid)
+        return {"ok": True}
+
+    @app.post("/api/skills/{name}/update", dependencies=A)
+    async def skill_update(name: str) -> dict[str, Any]:
+        """git/폴더에서 가져온 스킬을 원본에서 다시 받아 갱신 (data/ 와 DB 파일, 편집 기록은 유지)."""
+        need_editor()
+        try:
+            return {"ok": True, **await asyncio.to_thread(rt.skill_installer.update, name, current_user.get())}
+        except SkillError as e:
+            raise HTTPException(400, str(e)) from e
 
     @app.put("/api/skills/{name}/files", dependencies=A)
     async def skill_file_put(name: str, request: Request, path: str = Query(...)) -> dict[str, Any]:

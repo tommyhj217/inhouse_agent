@@ -90,6 +90,13 @@ class AgentRuntime:
         self.workspace: Any = WorkspaceProxy(self.users)
         self.skills = SkillStore(cfg.skills_path)
         self.downloader = Downloader(DownloadConfig.from_dict(cfg.downloads), self.workspace)
+        from .skill_install import SkillInstaller
+
+        try:
+            ssl_ctx = self.downloader._ssl_context()  # 사내 CA 설정을 GitHub 받기에도 사용
+        except Exception:  # noqa: BLE001
+            ssl_ctx = None
+        self.skill_installer = SkillInstaller(self.skills, cfg.raw.get("skills") or {}, ssl_ctx)
         dyn_cfg = DynamicToolsConfig.from_dict(cfg.dynamic_tools)
         self.dynamic = DynamicToolManager(dyn_cfg, cfg.resolve_path(dyn_cfg.dir), self.workspace)
         self.toolkit_cfg = ToolkitConfig.from_raw(cfg.raw)
@@ -301,8 +308,15 @@ class AgentRuntime:
         skill = self.skills.get(name)
         ready, why = self.llm_status()
         use_workflow = mode == "workflow" or (mode == "auto" and not ready)
+        steps = skill.steps
+        if use_workflow and not steps and skill.entry_commands():
+            # steps 가 없는 외부 스킬(Claude Code·Codex 용 등): 문서의 첫 명령으로 시작 (화면 JSON 을 지원하면 json 으로 → 웹에서 메뉴로 표시)
+            cmd = skill.entry_commands()[0]
+            if "--format json" in skill.body and "--format" not in cmd:
+                cmd += " --format json"
+            steps = [{"id": "entry", "title": f"{name} 시작", "tool": "run_skill_script", "args": {"name": name, "command": cmd}, "on_error": "stop"}]
         if use_workflow:
-            if not skill.steps:
+            if not steps:
                 from .skills import SkillError
 
                 raise SkillError(
@@ -315,7 +329,7 @@ class AgentRuntime:
             if files:  # 첨부 파일은 {attachment} {attachments} 로 단계에서 사용
                 vals.setdefault("attachment", files[0])
                 vals.setdefault("attachments", "\n".join(files))
-            result = await self.run_workflow(skill.steps, vals, title=f"[스킬] {name}", output_template=skill.output_template, on_event=on_event, ask=ask)
+            result = await self.run_workflow(steps, vals, title=f"[스킬] {name}", output_template=skill.output_template, on_event=on_event, ask=ask)
             result.skills_used = [name]
         else:
             result = await self.agent.run(

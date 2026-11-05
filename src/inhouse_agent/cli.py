@@ -27,6 +27,8 @@ import json
 import signal
 import sys
 import time
+import re
+from pathlib import Path
 from typing import Any
 
 from .config import AppConfig, ConfigError, load_config
@@ -389,6 +391,44 @@ async def cmd_skills(cfg: AppConfig, args: argparse.Namespace) -> int:
 
     store = SkillStore(cfg.skills_path)
     sc = args.skills_cmd
+    if sc in ("import", "update"):
+        from .skill_install import SkillInstaller
+        from .skills import SkillError
+
+        inst = SkillInstaller(store, cfg.raw.get("skills") or {})
+        try:
+            if sc == "update":
+                names = [s.name for s in store.list()[0] if (s.info.get("source") or {}).get("type") in ("git", "folder")] if args.all else args.names
+                for n in names:
+                    r = inst.update(n)
+                    print(f"- {n}: " + ("갱신함" if r.get("updated") else r.get("reason", "변경 없음")) + (f" ({str(r.get('commit'))[:8]})" if r.get("commit") else ""))
+                return 0
+            src = args.source
+            if re.match(r"^(https?://|git@|ssh://)", src):
+                sid = inst.stage_git(src, args.ref, args.path)
+            elif Path(src).is_dir():
+                sid = inst.stage_folder(src)
+            elif src.lower().endswith(".md"):
+                sid = inst.stage_text(Path(src).read_text(encoding="utf-8-sig"))
+            else:
+                sid = inst.stage_zip(Path(src).read_bytes(), Path(src).name)
+            found = inst.scan(sid)
+            for f in found:
+                print(f"- {f.name}{' (이미 있음)' if f.exists else ''}{' ⚠ ' + f.error if f.error else ''}: {f.description[:70]}  [{f.key}]")
+            if args.list:
+                inst.drop(sid)
+                return 0
+            res = inst.install(sid, args.only.split(",") if args.only else None, overwrite=args.overwrite)
+            inst.drop(sid)
+        except SkillError as e:
+            print(f"오류: {e}")
+            return 1
+        print(f"설치: {', '.join(x['name'] for x in res['installed']) or '-'}")
+        if res["skipped"]:
+            print(f"건너뜀(이미 있음, --overwrite 로 덮어쓰기): {', '.join(res['skipped'])}")
+        for k, v in res["errors"].items():
+            print(f"오류 {k}: {v}")
+        return 0 if res["installed"] or not res["errors"] else 1
     if sc == "list":
         skills, errors = store.list()
         for s in skills:
@@ -704,6 +744,16 @@ def build_parser() -> argparse.ArgumentParser:
     x = sks.add_parser("new")
     x.add_argument("name")
     x.add_argument("-d", "--description")
+    x = sks.add_parser("import", help="스킬 가져오기: zip / GitHub·Git 주소 / 폴더 / SKILL.md (안의 스킬 여러 개 모두)")
+    x.add_argument("source", help="예) https://github.com/org/repo  ·  skills.zip  ·  C:/work/skill_repo  ·  SKILL.md")
+    x.add_argument("--only", help="이 스킬만 (쉼표로 여러 개)")
+    x.add_argument("--overwrite", action="store_true", help="이미 있는 스킬도 덮어쓰기 (data/ 와 DB 파일은 유지)")
+    x.add_argument("--ref", help="브랜치/태그 (Git)")
+    x.add_argument("--path", help="저장소 안 하위 폴더 (Git)")
+    x.add_argument("--list", action="store_true", help="설치하지 않고 들어 있는 스킬만 보기")
+    x = sks.add_parser("update", help="Git/폴더에서 가져온 스킬을 원본에서 갱신")
+    x.add_argument("names", nargs="*")
+    x.add_argument("--all", action="store_true")
     x = sks.add_parser("validate", help="형식 검사 + 치환된 지침 미리보기")
     x.add_argument("name")
     x.add_argument("-i", "--input", action="append")

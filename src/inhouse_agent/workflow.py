@@ -204,6 +204,9 @@ async def run_workflow(
                 out_text, is_err, files, data = out.text, out.is_error, out.files, out.data
             ev.elapsed = time.monotonic() - t0
             ev.result, ev.is_error, ev.files = _truncate(out_text, max_chars), is_err, files
+            from .agent import view_of
+
+            ev.view = view_of(data)
             events.append(ev)
             await emit("tool_end", _ev_dict(ev, call_id))
             paths = [f["path"] for f in files if f.get("path")]

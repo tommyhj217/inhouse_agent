@@ -66,6 +66,22 @@ pre{background:var(--code);padding:8px 10px;border-radius:8px;overflow:auto;max-
 .userchip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:3px 10px;font-size:13px;cursor:pointer;background:var(--panel)}
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:60;padding:16px}
 .modal .card{max-width:380px;width:100%}
+.modal .card.wide{max-width:720px;max-height:90vh;overflow:auto}
+.imp-row{display:grid;grid-template-columns:1fr auto;gap:6px;margin:4px 0 10px}
+.imp-drop{border:2px dashed var(--line);border-radius:8px;padding:12px;text-align:center;color:var(--muted);margin:6px 0 10px}
+.imp-drop.on{border-color:var(--accent);color:var(--accent)}
+.imp-list .it{display:grid;grid-template-columns:auto 1fr;gap:8px;padding:6px 0;border-bottom:1px solid var(--line)}
+.viewdoc{border:1px solid var(--accent);border-radius:10px;padding:10px 12px;background:var(--panel);display:grid;gap:8px}
+.viewdoc .vh{font-weight:700;font-size:15px}
+.viewdoc .vcard{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-size:13px}
+.viewdoc .vitems{display:grid;gap:6px}
+.viewdoc .vit{display:grid;grid-template-columns:auto 1fr;gap:8px;align-items:start;text-align:left;width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);cursor:pointer}
+.viewdoc .vit:hover{border-color:var(--accent)}
+.viewdoc .vit .n{color:var(--muted);font-weight:700}
+.viewdoc .vform{display:grid;gap:6px}
+.viewdoc .vform label{display:grid;gap:2px;font-size:13px}
+.viewdoc .vacts{display:flex;gap:6px;flex-wrap:wrap}
+.stale{position:sticky;top:0;z-index:80;background:#b91c1c;color:#fff;padding:8px 16px;font-size:14px}
 .lightbox{position:fixed;inset:0;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;z-index:70;cursor:zoom-out}
 .lightbox img{max-width:95vw;max-height:92vh}
 .chat{display:flex;flex-direction:column;height:100%;min-height:0}
@@ -221,8 +237,9 @@ table.grid select{padding:2px 4px;font-size:12px}
 <section id="tab-skills" class="tab">
   <div class="skills">
     <div class="card">
-      <div class="row"><b class="grow">스킬</b><button id="sk-import" title="다른 곳에서 만든 스킬 폴더(zip: SKILL.md + scripts/ 등) 가져오기">📦 가져오기</button><button id="sk-new" title="새 스킬">＋ 새로 만들기</button></div>
-      <input id="sk-import-file" type="file" accept=".zip" class="hidden">
+      <div class="row"><b class="grow">스킬</b><button id="sk-import" title="GitHub 주소 · zip · 폴더 · SKILL.md 에서 스킬 가져오기 (여러 개 한 번에)">📦 가져오기</button><button id="sk-new" title="새 스킬">＋ 새로 만들기</button></div>
+      <input id="sk-import-file" type="file" accept=".zip,.md" class="hidden">
+      <input id="sk-import-dir" type="file" webkitdirectory multiple class="hidden">
       <div id="sk-list" class="list"></div>
       <div id="sk-errors" class="small" style="color:var(--err)"></div>
     </div>
@@ -401,8 +418,17 @@ async function api(path, opts={}) {
   const r = await fetch(path, {method: opts.method || (opts.body ? "POST" : "GET"), headers, body: opts.body});
   const ct = r.headers.get("content-type") || "";
   const data = ct.includes("json") ? await r.json() : await r.text();
-  if (!r.ok) throw new Error((data && data.detail) || r.status);
+  if (!r.ok) {
+    if (path.startsWith("/api/") && (r.status === 405 || (r.status === 404 && data && data.detail === "Not Found")))
+      throw new Error(`서버 코드가 이 화면보다 이전 버전입니다 (${r.status} ${path}). 코드를 받은(git pull) 뒤에는 서버를 다시 시작하세요.`);
+    throw new Error((data && data.detail) || r.status);
+  }
   return data;
+}
+const UI_API = 4;  // server.py 의 API_VERSION 과 같아야 함
+function staleBanner(serverApi) {
+  if (serverApi === UI_API || document.querySelector(".stale")) return;
+  document.body.insertAdjacentHTML("afterbegin", `<div class="stale">⚠ 서버가 이전 버전으로 실행 중입니다 (화면 v${UI_API} / 서버 v${serverApi ?? "?"}). 코드를 받은 뒤에는 서버를 다시 시작해야 새 기능(스킬 가져오기 등)이 동작합니다. <b>서버 창에서 Ctrl+C 후 다시 실행</b>하세요.</div>`);
 }
 const withToken = url => {  // EventSource / 링크는 헤더를 못 붙이므로 쿼리로
   const q = []; if (tokenEl.value) q.push("token=" + encodeURIComponent(tokenEl.value)); if (currentUser) q.push("user=" + encodeURIComponent(currentUser));
@@ -510,6 +536,7 @@ class RunView {
     el.querySelector(".body").insertAdjacentHTML("beforeend", `<b>결과</b><pre>${esc(d.result)}</pre>`);
     linkifyPaths(el.querySelector(".body pre:last-child"));
     if (d.is_error) el.open = true;
+    if (d.view) { this.hadView = true; const box = this.add(renderView(d.view, (d.arguments || {}).name)); bindView(box); }
   }
   askBox(d) {
     this.status.innerHTML = `<span class="badge b-warn">답변 대기</span>`;
@@ -533,7 +560,9 @@ class RunView {
     this.status.innerHTML = `<span class="badge ${ok ? "b-ok" : (d.status === "cancelled" ? "b-warn" : "b-err")}">${ok ? "완료" : esc(d.status)}${d.elapsed ? " · " + d.elapsed + "s" : ""}</span>`
       + (d.usage && d.usage.total_tokens ? ` <span class="small muted">토큰 ${d.usage.total_tokens.toLocaleString()}</span>` : "")
       + (d.saved_to ? ` <span class="small muted">저장: ${esc(d.saved_to)}</span>` : "");
-    const ans = this.add(`<div class="answer">${md(d.output)}</div>`);
+    const ans = this.hadView  // 화면 메뉴가 나왔으면 텍스트 결과는 접어 둠 (메뉴가 위로 밀리지 않게)
+      ? this.add(`<details class="small"><summary class="muted">텍스트 결과 보기</summary><div class="answer">${md(d.output)}</div></details>`)
+      : this.add(`<div class="answer">${md(d.output)}</div>`);
     linkifyPaths(ans);
     if (d.files && d.files.length) ans.insertAdjacentHTML("beforeend", `<div class="small muted" style="margin-top:6px">사용한 파일: ${this.fileChips(d.files)}</div>`);
     this.onDone && this.onDone(d);
@@ -852,7 +881,7 @@ function fieldHtml(k, label, type, val, required, desc, options) {
   else ctl = `<input data-k="${esc(k)}" data-t="${type === "number" ? "number" : "string"}" value="${esc(val)}" ${type === "date" ? 'placeholder="YYYY-MM-DD 또는 {yesterday}"' : ""}>`;
   return `<label>${lab}${ctl}</label>`;
 }
-async function execCommand(it, args, prompt, mode = "auto") {
+async function execCommand(it, args, prompt, mode = "auto", shownLabel = "") {
   if (it.kind === "command") {
     if (it.name === "new") { newChat(); toast("새 대화"); }
     if (it.name === "help") {
@@ -862,7 +891,7 @@ async function execCommand(it, args, prompt, mode = "auto") {
     return;
   }
   if (chatRun) { toast("실행 중입니다. 끝난 뒤 다시 시도하세요."); return; }
-  const label = `/${it.name} ${Object.entries(args).map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join(" ")}${prompt ? " · " + prompt : ""}`;
+  const label = shownLabel ? "▸ " + shownLabel : `/${it.name} ${Object.entries(args).map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join(" ")}${prompt ? " · " + prompt : ""}`;
   const att = it.kind === "skill" && !pendingImages.some(p => !p.path) ? pendingImages.map(p => p.path) : [];  // 스킬에도 첨부 전달 ({attachment})
   chatLog.insertAdjacentHTML("beforeend", `<div class="msg-user">${esc(label)}${docsHtml(att)}</div>`);
   if (att.length) { pendingImages = []; renderPending(); }
@@ -974,14 +1003,16 @@ async function openSkill(name) {
   $("#sk-log").innerHTML = ""; $("#sk-follow").classList.add("hidden");
   document.querySelectorAll("#sk-list .item").forEach(el => el.classList.toggle("active", el.dataset.name === name));
   applyParsed(d.parsed, d.error);
-  renderSkFiles(d.parsed ? d.parsed.files : []);
+  renderSkFiles(d.parsed ? d.parsed.files : [], d.parsed && d.parsed.source);
   markDirty();
 }
 // 스킬 폴더 파일 (스크립트·템플릿): ▶ 는 run_skill_script 로 실행 (LLM 없이)
 const SCRIPT_EXT = /\.(py|sh|bat|cmd|ps1|js)$/i;
-function renderSkFiles(files) {
+function renderSkFiles(files, source) {
   const box = $("#sk-files"); if (!skCurrent) { box.innerHTML = ""; return; }
-  box.innerHTML = `<b>스킬 파일</b> ${files.length ? "" : '<span class="muted">없음 - 스크립트(scripts/*.py)나 템플릿을 넣으면 에이전트가 run_skill_script / read_skill_file 로 씁니다</span>'}
+  const src = source ? `<div style="margin-bottom:4px">📥 출처: ${esc(source.type === "git" ? source.url : source.type === "folder" ? source.path : source.filename || source.label || source.type)}${source.ref ? " @" + esc(source.ref) : ""}${source.commit ? " (" + esc(source.commit.slice(0, 8)) + ")" : ""}
+      ${canEditSkills && (source.type === "git" || source.type === "folder") ? ` <button id="sk-update" title="원본에서 다시 받아 갱신 (data/ 와 DB 파일은 유지)">🔄 원본에서 업데이트</button>` : ""}</div>` : "";
+  box.innerHTML = src + `<b>스킬 파일</b> ${files.length ? "" : '<span class="muted">없음 - 스크립트(scripts/*.py)나 템플릿을 넣으면 에이전트가 run_skill_script / read_skill_file 로 씁니다</span>'}
     ${files.map(f => `<span class="filechip skf" data-f="${esc(f)}">${SCRIPT_EXT.test(f) ? "⚙️" : "📄"} ${esc(f)}${SCRIPT_EXT.test(f) ? ` <a href="#" class="skrun" title="실행">▶</a>` : ""}${canEditSkills ? ` <a href="#" class="skdel" title="삭제">🗑</a>` : ""}</span>`).join("")}
     ${canEditSkills ? `<button id="sk-file-add" style="margin-left:4px">＋ 파일 추가</button>` : ""}`;
   box.querySelectorAll(".skf").forEach(el => {
@@ -997,6 +1028,11 @@ function renderSkFiles(files) {
     };
   });
   const add = $("#sk-file-add"); if (add) add.onclick = () => $("#sk-file-input").click();
+  const up = $("#sk-update"); if (up) up.onclick = async () => {
+    up.disabled = true; up.textContent = "받는 중…";
+    try { const r = await api(`/api/skills/${encodeURIComponent(skCurrent)}/update`, {method: "POST"}); toast(r.updated ? `업데이트했습니다${r.commit ? " (" + r.commit.slice(0, 8) + ")" : ""}` : (r.reason || "변경 없음")); if (r.updated) { skSaved = editor.value; openSkill(skCurrent); loadCommands(true); } }
+    catch (e) { toast(e.message); } up.disabled = false; up.textContent = "🔄 원본에서 업데이트";
+  };
 }
 $("#sk-file-input").onchange = async e => {
   let files = [];
@@ -1006,17 +1042,138 @@ $("#sk-file-input").onchange = async e => {
   }
   e.target.value = ""; if (files.length) { renderSkFiles(files); loadCommands(true); }
 };
-$("#sk-import").onclick = () => $("#sk-import-file").click();
-$("#sk-import-file").onchange = async e => {
-  const f = e.target.files[0]; e.target.value = ""; if (!f) return;
-  let r; try { r = await api("/api/skills/import", {method: "POST", body: f}); }
-  catch (er) {
-    if (!/이미 있습니다/.test(er.message) || !confirm(er.message + "\n\n덮어쓸까요? (이전 것은 _trash 로 이동)")) { toast(er.message); return; }
-    try { r = await api("/api/skills/import?overwrite=true", {method: "POST", body: f}); } catch (er2) { toast(er2.message); return; }
-  }
-  toast(`스킬 '${r.parsed.name}' 을(를) 가져왔습니다 (파일 ${r.parsed.files.length}개) - 모든 사용자에게 보입니다`);
-  await loadSkills(); openSkill(r.parsed.name); loadCommands(true);
-};
+// ---- 스킬 스크립트가 낸 화면 문서(JSON view) → 클릭할 수 있는 메뉴/입력 폼 (LLM·토큰 없이 다음 화면으로)
+const viewJson = c => /--format\s+\S+/.test(c) ? c.replace(/--format\s+\S+/, "--format json") : c + " --format json";
+const qv = v => /^[\w@%+=:,./\-가-힣]+$/.test(v) ? v : '"' + String(v).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+function renderView(v, skill) {
+  const tone = t => ({ok: "b-ok", warn: "b-warn", info: "b-run", err: "b-err", error: "b-err"}[t] || "");
+  const cmdBtn = (a, html, cls = "") => a && a.command ? `<button class="${cls}" data-cmd="${esc(a.command)}">${html}</button>` : "";
+  const f = v.form;
+  let n = 0;
+  return `<div class="viewdoc" data-skill="${esc(skill || "")}">
+    <div><div class="vh">${esc(v.title || "")}</div>${v.subtitle ? `<div class="small muted">${esc(v.subtitle)}</div>` : ""}</div>
+    ${(v.card || []).length ? `<div class="vcard">${v.card.map(c => `<span class="muted">${esc(c.label)}</span><span>${c.link ? `<a href="${esc(c.link)}" target="_blank" rel="noopener">${esc(c.value)}</a>` : esc(c.value)}</span>`).join("")}</div>` : ""}
+    ${(v.sections || []).map(sec => `<div><div class="small"><b>${esc(sec.title || "")}</b></div><div class="vitems">${(sec.items || []).map(it => `<div class="vit" ${it.action && it.action.command ? `data-cmd="${esc(it.action.command)}"` : ""} data-label="${esc(it.title || it.id || "")}">
+        <span class="n">${++n}</span><div><div><b>${esc(it.title || it.id)}</b>${it.subtitle ? ` <span class="small muted">${esc(it.subtitle)}</span>` : ""}</div>
+        <div class="row" style="gap:4px;margin-top:2px">${(it.badges || []).map(b => `<span class="badge ${tone(b.tone)}">${esc(b.text)}</span>`).join("")}</div></div></div>`).join("") || `<div class="small muted">${esc(v.empty || "항목이 없습니다")}</div>`}</div></div>`).join("")}
+    ${f ? `<div class="vform" data-submit="${esc((f.submit || {}).command || "")}">${(f.fields || []).map(x => { const val = (f.values || {})[x.name] ?? x.default ?? "";
+        const ctl = x.type === "select" ? `<select data-f="${esc(x.name)}">${(x.options || []).map(o => `<option ${String(o) === String(val) ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>`
+          : x.type === "textarea" ? `<textarea data-f="${esc(x.name)}" rows="2">${esc(val)}</textarea>` : `<input data-f="${esc(x.name)}" value="${esc(val)}">`;
+        return `<label>${esc(x.label || x.name)}${ctl}</label>`; }).join("")}
+      ${(f.errors || []).map(e => `<div class="b-err small">⚠ ${esc(typeof e === "string" ? e : JSON.stringify(e))}</div>`).join("")}
+      <div class="vacts">${f.submit && f.submit.command ? `<button class="vsubmit">값 적용</button>` : ""}
+      ${v.invoke && v.invoke.skill ? `<button class="primary vinvoke" data-skill="${esc(v.invoke.skill)}" data-prompt="${esc(v.invoke.prompt || "")}">▶ /${esc(v.invoke.skill)} 실행</button>` : ""}
+      ${v.after && v.after.record_use ? cmdBtn({command: v.after.record_use}, "✅ 사용 기록 남기기") : ""}</div></div>` : ""}
+    ${(v.actions || []).length ? `<div class="vacts">${v.actions.map(a => cmdBtn(a.action, esc(a.label || a.id))).join("")}</div>` : ""}
+    ${v.note ? `<div class="small muted">${esc(v.note)}</div>` : ""}${v.prompt ? `<div class="small"><b>${esc(v.prompt)}</b> <span class="muted">(누르면 다음 화면 · 토큰 없이 동작)</span></div>` : ""}</div>`;
+}
+function bindView(box) {
+  const vd = box.querySelector(".viewdoc") || box; const skill = vd.dataset.skill;
+  const go = (cmd, label) => {
+    if (chatRun) { toast("실행 중입니다. 끝난 뒤 다시 누르세요."); return; }
+    if (/<[^<>\n]+>|…/.test(cmd)) {  // <CODE>, <한 줄 결과>, … 같은 자리표시 → 채운 뒤 실행
+      const filled = prompt("명령의 <…> / … 부분을 채운 뒤 확인을 누르세요", cmd);
+      if (!filled || /<[^<>\n]+>|…/.test(filled)) { if (filled) toast("<…> 자리를 모두 채워 주세요"); return; }
+      cmd = filled;
+    }
+    if (!document.querySelector("#tab-chat.active")) showTab("chat");
+    execCommand({kind: "tool", name: "run_skill_script"}, {...(skill ? {name: skill} : {}), command: cmd.includes("record_use") || /\buse\b/.test(cmd) ? cmd : viewJson(cmd)}, "", "auto", label);
+  };
+  vd.querySelectorAll("[data-cmd]").forEach(el => el.onclick = () => go(el.dataset.cmd, el.dataset.label || el.textContent.trim()));
+  const fm = vd.querySelector(".vform");
+  const vals = () => Object.fromEntries([...vd.querySelectorAll("[data-f]")].map(x => [x.dataset.f, x.value]));
+  const sub = vd.querySelector(".vsubmit");
+  if (sub) sub.onclick = () => go(fm.dataset.submit + " " + Object.entries(vals()).map(([k, v]) => `--set ${qv(k + "=" + v)}`).join(" "), "값 적용");
+  const inv = vd.querySelector(".vinvoke");
+  if (inv) inv.onclick = () => {
+    if (chatRun) { toast("실행 중입니다."); return; }
+    if (!document.querySelector("#tab-chat.active")) showTab("chat");
+    execCommand({kind: "skill", name: inv.dataset.skill}, vals(), inv.dataset.prompt);
+  };
+}
+
+// ---- 스킬 가져오기: GitHub/Git 주소 · zip · SKILL.md · 폴더 선택 · 서버 폴더 → 안의 스킬 목록에서 골라 설치
+function importDialog() {
+  const m = document.createElement("div"); m.className = "modal"; m.id = "imp-modal";
+  m.innerHTML = `<div class="card wide"><div class="row"><b class="grow">📦 스킬 가져오기</b><button id="imp-close">닫기</button></div>
+    <div class="small muted" style="margin:4px 0 10px">Claude Code · Codex 등에서 쓰던 스킬(SKILL.md + scripts/ …)도 그대로 가져옵니다. 저장소에 스킬이 여러 개 있으면 골라서 설치합니다 (.agents/skills, .claude/skills, skills/ 어디에 있어도 찾음).</div>
+    <label class="small"><b>GitHub / 사내 Git 주소</b> <span class="muted">저장소 주소 또는 …/tree/브랜치/폴더</span></label>
+    <div class="imp-row"><input id="imp-url" placeholder="https://github.com/org/repo  또는  https://github.com/org/repo/tree/main/.agents/skills/my-skill"><button id="imp-git" class="primary">불러오기</button></div>
+    <label class="small"><b>파일 · 폴더</b></label>
+    <div class="imp-drop" id="imp-drop">zip(GitHub Code → Download ZIP) 또는 SKILL.md 를 여기에 끌어놓기<br>
+      <button id="imp-file">zip / SKILL.md 선택</button> <button id="imp-dir">폴더 선택</button></div>
+    <details><summary class="small">스킬 서버 PC 의 폴더 경로로 가져오기</summary>
+      <div class="imp-row"><input id="imp-folder" placeholder="예) C:/work/skill_test  또는  /home/me/skills"><button id="imp-fold">불러오기</button></div></details>
+    <div id="imp-result" class="small"></div></div>`;
+  document.body.appendChild(m);
+  const close = () => { if (m.dataset.sid) api(`/api/skills/stage/${m.dataset.sid}`, {method: "DELETE"}).catch(() => {}); m.remove(); };
+  $("#imp-close").onclick = close; m.onclick = e => { if (e.target === m) close(); };
+  $("#imp-git").onclick = () => { const u = $("#imp-url").value.trim(); if (u) stage({url: u}, "저장소 받는 중…"); };
+  $("#imp-url").onkeydown = e => { if (e.key === "Enter") $("#imp-git").click(); };
+  $("#imp-fold").onclick = () => { const f = $("#imp-folder").value.trim(); if (f) stage({folder: f}, "폴더 읽는 중…"); };
+  $("#imp-file").onclick = () => $("#sk-import-file").click();
+  $("#imp-dir").onclick = () => $("#sk-import-dir").click();
+  const drop = $("#imp-drop");
+  ["dragenter", "dragover"].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add("on"); }));
+  ["dragleave", "drop"].forEach(t => drop.addEventListener(t, () => drop.classList.remove("on")));
+  drop.addEventListener("drop", e => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) stageFile(f); });
+}
+async function stage(body, msg) {
+  if (!$("#imp-modal")) importDialog();
+  const res = $("#imp-result"); res.innerHTML = `<div class="muted" style="margin-top:8px">${esc(msg)}</div>`;
+  try {
+    const r = body instanceof File ? await api("/api/skills/stage?filename=" + encodeURIComponent(body.name), {method: "POST", body})
+                                   : await api("/api/skills/stage", {method: "POST", json: body});
+    showStaged(r);
+  } catch (e) { res.innerHTML = `<div class="b-err" style="margin-top:8px">${esc(e.message)}</div>`; }
+}
+function stageFile(f) {
+  if (!/\.(zip|md)$/i.test(f.name)) { toast("zip 또는 SKILL.md 파일을 올리세요"); return; }
+  stage(f, `${f.name} 읽는 중…`);
+}
+const b64 = buf => { let s = "", a = new Uint8Array(buf); for (let i = 0; i < a.length; i += 0x8000) s += String.fromCharCode.apply(null, a.subarray(i, i + 0x8000)); return btoa(s); };
+async function stageDir(fileList) {
+  const skip = /(^|\/)(\.git|node_modules|__pycache__|\.venv|venv)(\/|$)/;
+  const files = [...fileList].filter(f => !skip.test(f.webkitRelativePath || f.name));
+  const total = files.reduce((n, f) => n + f.size, 0);
+  if (!files.some(f => /(^|\/)SKILL\.md$/.test(f.webkitRelativePath))) { $("#imp-result").innerHTML = `<div class="b-err">선택한 폴더에 SKILL.md 가 없습니다.</div>`; return; }
+  if (total > 80 * 1024 * 1024) { toast("폴더가 너무 큽니다 (80MB 초과) - zip 으로 올려 주세요"); return; }
+  $("#imp-result").innerHTML = `<div class="muted">${files.length}개 파일 올리는 중…</div>`;
+  const payload = []; for (const f of files) payload.push({path: f.webkitRelativePath || f.name, data: b64(await f.arrayBuffer())});
+  stage({files: payload, label: (files[0].webkitRelativePath || "").split("/")[0]}, "스킬 찾는 중…");
+}
+function showStaged(r) {
+  const m = $("#imp-modal"); if (!m) return; m.dataset.sid = r.id;
+  const src = r.source || {};
+  $("#imp-result").innerHTML = `<div style="margin-top:10px"><b>찾은 스킬 ${r.skills.length}개</b> <span class="muted">${esc(src.type === "git" ? src.url + (src.ref ? " @" + src.ref : "") + (src.commit ? " (" + src.commit.slice(0, 8) + ")" : "") : src.filename || src.label || src.path || "")}</span></div>
+    <div class="imp-list">${r.skills.map((s, i) => `<label class="it"><input type="checkbox" data-n="${esc(s.name)}" ${s.error || s.exists ? "" : "checked"} ${s.error ? "disabled" : ""}>
+      <div><b>/${esc(s.name)}</b> ${s.exists ? '<span class="badge b-warn">이미 있음</span>' : '<span class="badge b-ok">새 스킬</span>'}${s.renamed_from ? ` <span class="muted">(${esc(s.renamed_from)} → 이름 변경)</span>` : ""}
+      <div class="muted">${esc(s.description).slice(0, 160)}</div>
+      <div class="muted">${esc(s.key)} · 파일 ${s.files}${s.scripts.length ? " · 스크립트 " + s.scripts.length : ""}${s.inputs ? " · 입력 " + s.inputs : ""}</div>
+      ${s.error ? `<div class="b-err">⚠ ${esc(s.error)}</div>` : ""}</div></label>`).join("")}</div>
+    <div class="row" style="margin-top:8px"><label class="grow"><input type="checkbox" id="imp-over"> 이미 있는 스킬 덮어쓰기 (스킬의 data/ 와 DB 파일은 유지)</label>
+      <button id="imp-all">전체 선택</button><button id="imp-install" class="primary">선택한 스킬 설치</button></div>`;
+  $("#imp-over").onchange = e => { if (e.target.checked) document.querySelectorAll(".imp-list input:not(:disabled)").forEach(c => c.checked = true); };
+  $("#imp-all").onclick = () => document.querySelectorAll(".imp-list input:not(:disabled)").forEach(c => c.checked = true);
+  $("#imp-install").onclick = async () => {
+    const names = [...document.querySelectorAll(".imp-list input:checked")].map(c => c.dataset.n);
+    if (!names.length) { toast("설치할 스킬을 고르세요"); return; }
+    $("#imp-install").disabled = true;
+    try {
+      const res = await api(`/api/skills/stage/${r.id}/install`, {method: "POST", json: {names, overwrite: $("#imp-over").checked}});
+      delete m.dataset.sid;
+      const msg = [res.installed.length ? `설치 ${res.installed.length}개: ${res.installed.map(x => x.name).join(", ")}` : "",
+                   res.skipped.length ? `이미 있어 건너뜀: ${res.skipped.join(", ")} (덮어쓰기 체크)` : "",
+                   ...Object.entries(res.errors).map(([k, v]) => `⚠ ${k}: ${v}`)].filter(Boolean).join("\n");
+      toast(msg.split("\n")[0]);
+      $("#imp-result").innerHTML = `<pre class="small" style="white-space:pre-wrap">${esc(msg)}</pre><div class="small muted">모든 사용자의 / 목록과 첫 화면에 바로 보입니다.</div>`;
+      await loadSkills(); if (res.installed[0]) openSkill(res.installed[0].name); loadCommands(true);
+    } catch (e) { toast(e.message); $("#imp-install").disabled = false; }
+  };
+}
+$("#sk-import").onclick = importDialog;
+$("#sk-import-file").onchange = e => { const f = e.target.files[0]; e.target.value = ""; if (f) stageFile(f); };
+$("#sk-import-dir").onchange = e => { const fl = e.target.files; stageDir(fl); e.target.value = ""; };
 function markDirty() { $("#sk-dirty").classList.toggle("hidden", editor.value === skSaved); }
 let vTimer = null;
 editor.addEventListener("input", () => { markDirty(); clearTimeout(vTimer); vTimer = setTimeout(validate, 350); });
@@ -1420,6 +1577,7 @@ $("#st-refresh").onclick = loadStatus;
   $("#userlabel").textContent = currentUser || "사용자 ID 입력";
   try {
     const info = await api("/api/info");
+    staleBanner(info.api);
     if (!info.auth && !tokenEl.value) tokenEl.classList.add("hidden");  // 서버에 API 토큰이 없으면 입력칸 숨김 (토큰 없이 사용)
     cmdLLM = info.llm || cmdLLM; updateLLMBadge();
     applyEditPermission(info.can_edit_skills !== false);

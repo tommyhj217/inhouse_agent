@@ -118,9 +118,37 @@ class Skill:
     def render(self, inputs: dict[str, Any], timezone: str) -> str:
         """본문의 {입력이름} 과 {today} 등 날짜 변수 치환."""
         text = render_dates(self.body, timezone)
+        # 다른 에이전트(Claude Code·Codex 등)용 스킬의 경로 자리표시 → 실제 경로
+        here, root = self.path.resolve().as_posix(), self.path.resolve().parent.as_posix()
+        subs = {"<this skill>": here, "${CLAUDE_SKILL_DIR}": here, "{baseDir}": here, "<skills dir>": root,
+                ".agents/skills/": root + "/", ".claude/skills/": root + "/"}
+        text = re.sub(r"(?<![\w/.])(?:" + "|".join(re.escape(k) for k in subs) + ")", lambda m: subs[m.group(0)], text)
         for k, v in inputs.items():
             text = text.replace("{" + k + "}", "" if v is None else str(v))
         return text
+
+    def entry_commands(self) -> list[str]:
+        """SKILL.md 본문에 적힌 이 스킬의 스크립트 명령 중 자리표시(<MODEL> 등)가 없는 것 - steps 가 없는 스킬을
+        토큰 없이 시작할 때 첫 화면으로 씀 (예: python3 <this skill>/scripts/view.py home)."""
+        from .skill_scripts import RUNNERS
+
+        text = self.render({}, "Asia/Seoul")
+        here = self.path.resolve().as_posix()
+        out: list[str] = []
+        for m in re.finditer(r"`([^`\n]+)`|^\s*((?:python3?|py|node|bash)\s+[^\n]+)$", text, re.M):
+            c = (m.group(1) or m.group(2) or "").strip()
+            sm = re.match(r"^(?:python3?|py(?:\s+-3)?|node|bash)\s+(\S+)", c)
+            if not sm or re.search(r"[<>{}…]|\.\.\.", c):
+                continue
+            script = sm.group(1).strip('"')
+            if Path(script).suffix.lower() not in RUNNERS:
+                continue
+            sp = Path(script) if Path(script).is_absolute() else self.path / script
+            if not sp.is_file() or here not in sp.resolve().as_posix():
+                continue
+            if c not in out:
+                out.append(c)
+        return out
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -132,11 +160,60 @@ class Skill:
             "path": str(self.path),
             "steps": len(self.steps),
             "workflow": bool(self.steps),
+            "entry": (self.entry_commands() or [None])[0] if not self.steps else None,
             "created_by": self.info.get("created_by"),
             "created": self.info.get("created"),
             "updated_by": self.info.get("updated_by"),
             "updated": self.info.get("updated"),
+            "source": self.info.get("source"),
         }
+
+
+_LOOSE = re.compile(r"^(\s*)([A-Za-z0-9_-]+):[ \t]+(.+?)\s*$")
+
+
+def load_frontmatter(src: str) -> Any:
+    """머리말 YAML. 엄격한 YAML 로 안 읽히면(예: Claude Code·Codex 스킬의
+    `description: Create a plan: scope, ...` 처럼 값 안에 ': ' 가 있는 경우) 그런 값만 따옴표로 감싸 다시 읽음."""
+    try:
+        return yaml.safe_load(src)
+    except yaml.YAMLError as first:
+        lines = []
+        for line in src.splitlines():
+            m = _LOOSE.match(line)
+            if m and m.group(3)[:1] not in "'\"[{|>&*!#" and (": " in m.group(3) or " #" in m.group(3)):
+                v = m.group(3).replace("'", "''")
+                line = f"{m.group(1)}{m.group(2)}: '{v}'"
+            lines.append(line)
+        try:
+            return yaml.safe_load("\n".join(lines))
+        except yaml.YAMLError:
+            raise first from None
+
+
+def _ui_inputs(folder: Path) -> list[dict[str, Any]]:
+    """ui.json(다른 에이전트용 입력 폼 선언)의 inputs → 스킬 입력 (머리말에 inputs 가 없을 때)."""
+    import json
+
+    f = folder / "ui.json"
+    if not f.is_file():
+        return []
+    try:
+        ui = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    out = []
+    for d in ui.get("inputs") or [] if isinstance(ui, dict) else []:
+        if not isinstance(d, dict) or not d.get("name"):
+            continue
+        typ = {"textarea": "text", "text": "string", "select": "select", "number": "number", "date": "date",
+               "boolean": "boolean", "checkbox": "boolean"}.get(str(d.get("type") or "text"), "string")
+        default = d.get("default")
+        if isinstance(default, str) and re.search(r"\{[a-z_]+\}", default) and render_dates(default, "Asia/Seoul") == default:
+            default = None  # {regions} 처럼 다른 시스템이 채우는 자리표시는 비워 둠
+        out.append({"name": d["name"], "label": d.get("label") or "", "type": typ, "default": default,
+                    "options": d.get("options") or [], "description": d.get("description") or ""})
+    return out
 
 
 def parse_skill(text: str, folder: Path) -> Skill:
@@ -144,7 +221,7 @@ def parse_skill(text: str, folder: Path) -> Skill:
     if not m:
         raise SkillError("SKILL.md 맨 앞에 '---' 로 감싼 YAML 머리말(name, description)이 필요합니다.")
     try:
-        meta = yaml.safe_load(m.group(1)) or {}
+        meta = load_frontmatter(m.group(1)) or {}
     except yaml.YAMLError as e:
         raise SkillError(f"머리말 YAML 오류: {e}") from e
     if not isinstance(meta, dict):
@@ -156,7 +233,7 @@ def parse_skill(text: str, folder: Path) -> Skill:
     if not desc:
         raise SkillError("description 이 필요합니다 (에이전트가 언제 이 스킬을 쓸지 판단하는 기준).")
     inputs = []
-    for i, d in enumerate(meta.get("inputs") or []):
+    for i, d in enumerate(meta.get("inputs") or _ui_inputs(folder)):
         if isinstance(d, str):
             d = {"name": d}
         if not isinstance(d, dict) or not d.get("name"):
@@ -186,7 +263,9 @@ def parse_skill(text: str, folder: Path) -> Skill:
         raw_steps = [
             {**{k: v for k, v in s.items() if k not in ("script", "args", "argv")}, "tool": "run_skill_script",
              "args": {"name": name, "path": s["script"], **({"args": s["args"]} if s.get("args") else {}), **({"argv": s["argv"]} if s.get("argv") else {})}}
-            if isinstance(s, dict) and s.get("script") and not s.get("tool") else s
+            if isinstance(s, dict) and s.get("script") and not s.get("tool") else
+            {**{k: v for k, v in s.items() if k != "command"}, "tool": "run_skill_script", "args": {"name": name, "command": s["command"]}}
+            if isinstance(s, dict) and s.get("command") and not s.get("tool") else s
             for s in raw_steps
         ]
     try:
@@ -349,6 +428,16 @@ class SkillStore:
         self._touch(d, user)
         return p
 
+    def set_info(self, name: str, **kw: Any) -> dict[str, Any]:
+        """.meta.json 에 정보 추가 (예: 가져온 출처 source)."""
+        import json
+
+        d = self._dir(name)
+        info = self._info(d)
+        info.update(kw)
+        (d / ".meta.json").write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
+        return info
+
     def delete_file(self, name: str, rel: str, user: str | None = None) -> None:
         d = self._dir(name)
         p = (d / str(rel)).resolve()
@@ -366,57 +455,20 @@ class SkillStore:
         (d / ".meta.json").write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
 
     def import_zip(self, data: bytes, user: str | None = None, overwrite: bool = False, name: str | None = None) -> Skill:
-        """다른 곳에서 만든 스킬 폴더(zip: SKILL.md + scripts/ 등)를 가져옴. 기존 스킬은 overwrite 일 때만 덮어씀(이전 것은 _trash)."""
-        import io
-        import zipfile
+        """zip 안의 스킬(여러 개면 모두)을 설치하고 첫 스킬을 돌려줌. 자세한 흐름은 skill_install.SkillInstaller."""
+        from .skill_install import SkillInstaller
 
+        inst = SkillInstaller(self)
+        sid = inst.stage_zip(data)
         try:
-            z = zipfile.ZipFile(io.BytesIO(data))
-        except zipfile.BadZipFile as e:
-            raise SkillError("zip 파일이 아닙니다.") from e
-        names = [n for n in z.namelist() if not n.endswith("/") and "__MACOSX" not in n]
-        mds = sorted((n for n in names if n.split("/")[-1] == "SKILL.md"), key=lambda n: n.count("/"))
-        if not mds:
-            raise SkillError("zip 안에 SKILL.md 가 없습니다.")
-        base = mds[0][: -len("SKILL.md")]
-        text = z.read(mds[0]).decode("utf-8-sig")
-        orig = parse_skill(text, self.root / "_tmp").name
-        skill_name = name or orig
-        if skill_name != orig:
-            import re as _re
-
-            text = _re.sub(r"(?m)^name:\s*.*$", f"name: {skill_name}", text, count=1)
-        if not NAME_RE.match(skill_name):
-            # 외부 스킬 이름(예: menu-builder)도 받도록 폴더 이름 규칙에 맞춤
-            import re as _re
-
-            skill_name = _re.sub(r"[^A-Za-z0-9_]", "_", skill_name).strip("_").lower() or "imported_skill"
-            text = _re.sub(r"(?m)^name:\s*.*$", f"name: {skill_name}", text, count=1)
-        d = self._dir(skill_name)
-        if (d / "SKILL.md").exists():
-            if not overwrite:
-                raise SkillError(f"스킬 '{skill_name}' 이(가) 이미 있습니다. 덮어쓰려면 overwrite 를 선택하세요.")
-            self.delete(skill_name)
-        total = 0
-        d.mkdir(parents=True, exist_ok=True)
-        try:
-            for n in names:
-                if not n.startswith(base) or n == mds[0]:
-                    continue
-                rel = n[len(base):]
-                p = (d / rel).resolve()
-                if d.resolve() not in p.parents or any(x.startswith(".") for x in Path(rel).parts):
-                    continue  # 경로 탈출 / 숨김 파일 무시
-                info = z.getinfo(n)
-                total += info.file_size
-                if total > 100 * 1024 * 1024:
-                    raise SkillError("스킬 zip 의 압축 해제 크기가 100MB 를 넘습니다.")
-                p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_bytes(z.read(n))
-            return self.save(skill_name, text, user)
-        except Exception:
-            shutil.rmtree(d, ignore_errors=True)
-            raise
+            res = inst.install(sid, [name] if name else None, overwrite=overwrite, user=user)
+        finally:
+            inst.drop(sid)
+        if res["installed"]:
+            return self.get(res["installed"][0]["name"])
+        if res["skipped"]:
+            raise SkillError(f"스킬 '{', '.join(res['skipped'])}' 이(가) 이미 있습니다. 덮어쓰려면 overwrite 를 선택하세요.")
+        raise SkillError("; ".join(f"{k}: {v}" for k, v in res["errors"].items()) or "설치할 스킬이 없습니다.")
 
     def create(self, name: str, description: str = "", content: str | None = None, user: str | None = None) -> Skill:
         d = self._dir(name)

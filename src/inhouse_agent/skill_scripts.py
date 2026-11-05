@@ -46,6 +46,15 @@ RUNNERS: dict[str, list[str]] = {
     ".js": ["node"],
 }
 _HAS_RUN = re.compile(r"^def run\(\s*args\s*,\s*ctx\s*\)", re.M)
+_INTERP = re.compile(r"^(python[\d.]*|py|python[\d.]*\.exe|py\.exe|node|node\.exe|bash|sh|zsh|powershell|pwsh|powershell\.exe|cmd|cmd\.exe|uv|run)$", re.I)
+_INTERP_FLAGS = {"-3", "-u", "-B", "-X", "utf8", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "/c", "/C"}
+_SHELL_OPS = {";", "&&", "||", "|", ">", ">>", "<", "&"}
+# 스크립트에 넘길 환경변수 (skills.script_env 로 바꿀 수 있음). {user} {skills_dir} {skill_dir} {skill} {data_dir} {workspace} {output_dir}
+DEFAULT_SCRIPT_ENV = {
+    # 예: model-agents 스킬 - 사용자별 모델/이력, 다른 스킬(에이전트) 찾을 폴더
+    "MODEL_AGENTS_USER": "{user}",
+    "MODEL_AGENTS_SKILL_ROOTS": "{skills_dir}",
+}
 
 
 def _decode(b: bytes) -> str:
@@ -86,12 +95,52 @@ def skill_scripts(skill_dir: Path) -> list[str]:
     )
 
 
+def format_view(v: dict[str, Any]) -> str:
+    """화면 문서(JSON) → 짧은 텍스트 (번호 목록 + 다음 명령)."""
+    out = [f"## {v.get('title') or ''}".rstrip()]
+    if v.get("subtitle"):
+        out.append(str(v["subtitle"]))
+    out += [f"- {c.get('label')}: {c.get('value')}" for c in v.get("card") or []]
+    n = 0
+    for sec in v.get("sections") or []:
+        out.append(f"**{sec.get('title') or ''}**")
+        for it in sec.get("items") or []:
+            n += 1
+            badges = " · ".join(b.get("text", "") for b in it.get("badges") or [])
+            cmd = (it.get("action") or {}).get("command")
+            out.append(f"{n}. {it.get('title') or it.get('id')}" + (f" ({it['subtitle']})" if it.get("subtitle") else "")
+                       + (f" [{badges}]" if badges else "") + (f" → `{cmd}`" if cmd else ""))
+    f = v.get("form")
+    if isinstance(f, dict):
+        vals = f.get("values") or {}
+        for x in f.get("fields") or []:
+            opts = f" (선택: {', '.join(map(str, x.get('options') or []))})" if x.get("options") else ""
+            out.append(f"- 입력 {x.get('name')} [{x.get('label') or ''}] = {vals.get(x.get('name'), x.get('default', ''))}{opts}")
+        out += [f"⚠ {e}" for e in f.get("errors") or []]
+        if (f.get("submit") or {}).get("command"):
+            out.append(f"값 바꾸기 → `{f['submit']['command']} --set \"이름=값\"`")
+    inv = v.get("invoke") or {}
+    if inv.get("skill"):
+        out.append(f"실행 → 스킬 {inv['skill']}: {inv.get('prompt') or ''}")
+    if (v.get("after") or {}).get("record_use"):
+        out.append(f"실행 후 기록 → `{v['after']['record_use']}`")
+    for a in v.get("actions") or []:
+        cmd = (a.get("action") or {}).get("command")
+        out.append(f"[{a.get('id')}] {a.get('label')}" + (f" → `{cmd}`" if cmd else ""))
+    for k in ("note", "empty", "prompt"):
+        if v.get(k):
+            out.append(str(v[k]))
+    return "\n".join(out)
+
+
 class SkillScriptRunner:
     def __init__(self, skills: SkillStore, workspace: Any, cfg: dict[str, Any] | None = None, dynamic: "DynamicToolManager | None" = None, links: Any = None):
         cfg = cfg or {}
         mode = cfg.get("scripts", "on")
         self.mode = "off" if mode is False else ("on" if mode in (True, None) else str(mode).lower())
         self.timeout = float(cfg.get("script_timeout") or 300)
+        env = cfg.get("script_env")
+        self.script_env: dict[str, str] = {str(k): str(v) for k, v in (DEFAULT_SCRIPT_ENV if env is None else (env or {})).items()}
         self.skills = skills
         self.ws = workspace
         self.dynamic = dynamic
@@ -114,8 +163,59 @@ class SkillScriptRunner:
             raise SkillError(f"실행할 수 없는 형식입니다: {p.name} (지원: {', '.join(RUNNERS)})")
         return d, p
 
+    def parse_command(self, command: str, name: str | None = None) -> tuple[str, str, list[str], dict[str, str]]:
+        """스킬 문서에 적힌 명령줄 → (스킬, 스크립트 상대경로, 인자, 환경변수).
+        예) python3 .agents/skills/model-agents/scripts/view.py model MDL-101 --format json
+            python "C:/agent/skills/model-agents/scripts/models.py" use MDL-101 model-test-plan --summary "완료"
+            MODEL_AGENTS_USER=kim python3 <this skill>/scripts/view.py home"""
+        import shlex
+
+        cmd = command.strip().replace("<this skill>", str(self.skills.root / name) if name else "<this skill>")
+        try:
+            toks = shlex.split(cmd.replace("\\", "/"), posix=True)
+        except ValueError as e:
+            raise SkillError(f"명령줄을 해석할 수 없습니다: {e}") from e
+        if any(t in _SHELL_OPS for t in toks):
+            raise SkillError("명령은 하나씩 실행하세요 (; && | > 같은 연결/리다이렉트는 쓸 수 없습니다).")
+        env: dict[str, str] = {}
+        while toks and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", toks[0]):
+            k, v = toks.pop(0).split("=", 1)
+            env[k] = v
+        while toks and (_INTERP.match(Path(toks[0]).name) or toks[0] in _INTERP_FLAGS):
+            toks.pop(0)
+        if not toks:
+            raise SkillError("명령줄에 실행할 스크립트가 없습니다.")
+        script, argv = toks[0], toks[1:]
+        root = self.skills.root.resolve()
+        p = Path(script)
+        if p.is_absolute():
+            try:
+                rel_parts = p.resolve().relative_to(root).parts
+            except ValueError:
+                # 다른 위치(예: 원래 저장소 경로)에 있던 스킬 경로 → 경로 속 스킬 이름으로 찾기
+                rel_parts = ()
+            if len(rel_parts) >= 2:
+                return rel_parts[0], "/".join(rel_parts[1:]), argv, env
+        parts = [x for x in p.as_posix().split("/") if x not in ("", ".")]
+        for k in range(len(parts) - 1, -1, -1):  # …/<스킬이름>/scripts/view.py
+            if (root / parts[k] / "SKILL.md").is_file() and k < len(parts) - 1 and (root / parts[k] / "/".join(parts[k + 1:])).is_file():
+                return parts[k], "/".join(parts[k + 1:]), argv, env
+        if name:  # scripts/view.py 처럼 스킬 기준 경로 (또는 파일 이름만)
+            return name, "/".join(parts), argv, env
+        raise SkillError(f"명령줄의 스크립트가 어느 스킬 것인지 알 수 없습니다: {script} (name 에 스킬 이름을 주세요)")
+
+    def _env_values(self, name: str, sdir: Path, out_dir: Path) -> dict[str, str]:
+        vals = {"user": current_user.get() or "", "skills_dir": self.skills.root.resolve().as_posix(), "skill_dir": sdir.as_posix(), "skill": name,
+                "data_dir": (sdir / "data").as_posix(), "workspace": Path(self.ws.root).as_posix(), "output_dir": out_dir.as_posix()}
+        out = {}
+        for k, v in self.script_env.items():
+            for ph, val in vals.items():
+                v = v.replace("{" + ph + "}", val)
+            out[k] = v
+        return out
+
     async def run(self, name: str, rel: str, args: dict[str, Any] | None = None, argv: list[Any] | None = None,
-                  timeout: float | None = None, cwd: str = "output", stdin: str | None = None) -> ToolOutcome:
+                  timeout: float | None = None, cwd: str = "output", stdin: str | None = None, extra_env: dict[str, str] | None = None) -> ToolOutcome:
         if self.mode == "off":
             return ToolOutcome("오류: 스킬 스크립트 실행이 꺼져 있습니다 (skills.scripts: off).", True)
         try:
@@ -150,7 +250,12 @@ class SkillScriptRunner:
                 PYTHONIOENCODING="utf-8", PYTHONUTF8="1", SKILL_DIR=str(sdir), SKILL_NAME=name,
                 SKILL_ARGS=json.dumps(args or {}, ensure_ascii=False), AGENT_WORKSPACE=str(self.ws.root),
                 AGENT_DOWNLOAD_DIR=str(self.ws.downloads), AGENT_OUTPUT_DIR=str(out_dir), AGENT_USER=current_user.get() or "",
+                AGENT_SKILLS_DIR=str(self.skills.root.resolve()), AGENT_SKILL_DATA=str(sdir / "data"),
             )
+            env.update(self._env_values(name, sdir, out_dir))
+            env.update(extra_env or {})
+            for k in [k for k, v in env.items() if v == ""]:
+                env.pop(k)  # 빈 값(예: 사용자 ID 없음)은 넘기지 않음 → 스크립트 기본값 사용
             for k in [k for k in env if k.upper() in ("AZURE_OPENAI_API_KEY", "AGENT_API_TOKEN")]:
                 env.pop(k, None)  # 비밀값은 스크립트에 넘기지 않음
             proc = await asyncio.create_subprocess_exec(
@@ -187,7 +292,16 @@ class SkillScriptRunner:
         lines = [f"[스킬 스크립트] {name}/{script.relative_to(sdir).as_posix()} → {'성공' if ok else f'실패(종료코드 {rc})'} ({elapsed:.1f}초)"]
         if text:
             lines.append(text)
-        if stdout.strip():
+        data = None
+        try:
+            data = json.loads(stdout) if stdout.strip()[:1] in "{[" else None
+        except ValueError:
+            data = None
+        from .agent import view_of
+
+        if view_of(data):  # 화면 문서: 웹에는 메뉴로 보이고, LLM 에는 짧게 요약 (토큰 절약)
+            lines.append("[화면] (웹 화면에 버튼 메뉴로 표시됨)\n" + format_view(data))
+        elif stdout.strip():
             s = stdout.strip()
             lines.append("[출력]\n" + (s if len(s) <= 12000 else s[:12000] + "\n...(생략)"))
         if stderr.strip():
@@ -202,19 +316,25 @@ class SkillScriptRunner:
                         lines.append(f"  다운로드 링크: {self.links.url(st['path'])}")
                     except Exception:  # noqa: BLE001
                         pass
-        data = None
-        try:
-            data = json.loads(stdout) if stdout.strip()[:1] in "{[" else None
-        except ValueError:
-            data = None
         return ToolOutcome("\n".join(lines), not ok, statuses, data)
 
     def tools(self) -> list[BuiltinTool]:
         async def run_skill_script(args: dict[str, Any]) -> ToolOutcome:
+            name = str(args.get("name") or "") or None
+            argv = args.get("argv") if isinstance(args.get("argv"), list) else None
+            extra: dict[str, str] = {}
+            path = args.get("path")
+            if args.get("command"):  # 스킬 문서/화면이 알려준 명령줄 그대로
+                try:
+                    name, path, argv2, extra = self.parse_command(str(args["command"]), name)
+                except SkillError as e:
+                    return ToolOutcome(f"오류: {e}", True)
+                argv = [*argv2, *(argv or [])]
+            if not name or not path:
+                return ToolOutcome("오류: name+path 또는 command 가 필요합니다.", True)
             return await self.run(
-                str(args["name"]), str(args["path"]), args.get("args") if isinstance(args.get("args"), dict) else None,
-                args.get("argv") if isinstance(args.get("argv"), list) else None, args.get("timeout"), str(args.get("cwd") or "output"),
-                args.get("stdin"),
+                name, str(path), args.get("args") if isinstance(args.get("args"), dict) else None,
+                argv, args.get("timeout"), str(args.get("cwd") or "output"), args.get("stdin"), extra,
             )
 
         async def list_skill_scripts(args: dict[str, Any]) -> str:
@@ -236,19 +356,21 @@ class SkillScriptRunner:
                 "run_skill_script",
                 "스킬 폴더에 들어 있는 스크립트(예: scripts/make_menu.py - 메뉴/보고서 생성 등)를 실행하고 출력과 만든 파일을 돌려줍니다. "
                 "스킬 지침에 '스크립트를 실행' 하라고 되어 있으면 이 도구를 쓰세요. args 는 --키 값 으로 전달됩니다(argv 로 직접 줄 수도 있음). "
+                "스킬 문서나 스크립트 출력에 'python3 …/scripts/view.py model MDL-101' 같은 명령줄이 있으면 command 에 그대로 넣으세요. "
                 "만든 파일은 사용자 files/skill_<스킬>/ 아래에 저장됩니다.",
                 {
                     "type": "object",
                     "properties": {
                         "name": {"type": "string", "description": "스킬 이름"},
                         "path": {"type": "string", "description": "스킬 폴더 기준 스크립트 경로 (예: scripts/make_menu.py, 파일 이름만 줘도 됨)"},
+                        "command": {"type": "string", "description": "명령줄 그대로 (예: python3 .agents/skills/model-agents/scripts/view.py home --format json). name/path 대신"},
                         "args": {"type": "object", "description": "스크립트 인자 {키: 값} → --키 값"},
                         "argv": {"type": "array", "items": {"type": "string"}, "description": "명령줄 인자를 그대로 (args 대신)"},
                         "stdin": {"type": "string", "description": "표준입력으로 넘길 내용 (선택)"},
                         "cwd": {"type": "string", "enum": ["output", "skill"], "description": "작업 폴더: output(기본, 결과 폴더) | skill(스킬 폴더)"},
                         "timeout": {"type": "number", "description": f"최대 실행 초 (기본 {self.timeout:.0f})"},
                     },
-                    "required": ["name", "path"],
+                    "required": [],
                 },
                 run_skill_script,
             ),

@@ -155,6 +155,11 @@ skills:
                                 #  → 그 외 사용자는 보기·실행만 가능
   scripts: on                   # 스킬 폴더 스크립트(scripts/*.py 등) 실행: on | approve(실행 전 승인) | off
   script_timeout: 300           # 스크립트 최대 실행 초
+  # script_env:                 # 스크립트에 넘길 환경변수 ({user} {skills_dir} {skill_dir} {data_dir} {workspace} {output_dir})
+  #   MODEL_AGENTS_USER: "{user}"            # (기본값) model-agents 스킬: 사용자별 모델/이력
+  #   MODEL_AGENTS_SKILL_ROOTS: "{skills_dir}"
+  # git_token: ${AGENT_GIT_TOKEN:-}         # 비공개 GitHub/사내 Git 저장소에서 스킬 가져오기 (공개 저장소는 불필요)
+  # git_tokens: {github.company.com: "${GHE_TOKEN:-}"}
 
 # ---------------------------------------------------------------------
 # MCP 서버 (기존에 만들어 둔 사이트별 웹컨트롤 MCP)

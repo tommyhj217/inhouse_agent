@@ -302,6 +302,54 @@ inputs:                        # (선택) 웹 UI 입력 폼으로 표시
   웹컨트롤이 화면이 있는 브라우저를 쓰면 서비스(세션 0) 대신 **로그온한 사용자 세션**에서 실행해야 합니다.
 - **Linux**: systemd 유닛의 `ExecStart=/opt/inhouse_agent/.venv/bin/inhouse-agent serve`, `WorkingDirectory=/opt/inhouse_agent`
 
+### 스킬 가져오기 (GitHub · zip · 폴더 · 다른 에이전트용 스킬)
+
+스킬 탭의 **📦 가져오기**를 누르면 아래 방법 중 하나로 원본을 불러옵니다. 원본 안의 스킬 목록이 나오면 골라서 설치합니다.
+
+| 방법 | 넣는 것 | 갱신 |
+|---|---|---|
+| GitHub / 사내 Git 주소 | `https://github.com/org/repo`, `…/tree/<브랜치>/<폴더>`, `…/blob/<브랜치>/<폴더>/SKILL.md`, GitHub Enterprise 주소, `git@…`, `file://` | 🔄 원본에서 업데이트 |
+| zip / SKILL.md | GitHub **Code → Download ZIP** 파일을 그대로 올리거나 끌어놓기. SKILL.md 한 개도 가능 | 다시 가져오기 |
+| 폴더 선택 | 브라우저에서 스킬 폴더나 저장소 폴더를 선택 | 다시 가져오기 |
+| 서버 PC 폴더 | 에이전트 서버 PC에 있는 폴더 경로 (예: git으로 받아 둔 사내 스킬 저장소) | 🔄 원본에서 업데이트 |
+
+- **여러 스킬을 한 번에**: `.agents/skills/`, `.claude/skills/`, `skills/` 등 어디에 있든 SKILL.md가 있는 폴더를 모두 찾습니다.
+  - `.claude/skills/*`처럼 같은 스킬을 가리키는 링크(또는 링크 대신 생긴 텍스트 파일)는 한 번만 셉니다.
+  - 스킬 폴더 안에 중첩된 예시 SKILL.md는 무시합니다.
+- **Claude Code / Codex / Copilot / Gemini용 스킬도 그대로 동작합니다** (Agent Skills 형식):
+  - `allowed-tools`, `metadata` 같은 머리말을 그대로 둡니다.
+  - `description: Create a plan: scope, …`처럼 값 안에 `: `가 있는 머리말도 읽습니다.
+  - `ui.json`의 `inputs`는 입력 폼으로 보여줍니다.
+  - 본문의 `<this skill>`, `<skills dir>`, `.agents/skills/` 경로는 이 에이전트의 스킬 폴더로 바뀝니다.
+  - 본문에 적힌 명령줄(`python3 …/scripts/view.py home`)은 `run_skill_script`의 `command`로 그대로 실행됩니다. 다른 PC의 절대경로여도 경로 속 스킬 이름으로 찾습니다.
+  - `steps`가 없어도, 본문에 자리표시(`<MODEL>` 등)가 없는 명령이 있으면 그 명령으로 **토큰 없이 시작**합니다.
+- **화면 문서(JSON view)**: 스크립트가 `{"view", "sections", "form", "actions"}` 형식을 출력하면 채팅에 클릭할 수 있는 메뉴와 입력 폼으로 보여줍니다.
+  - 항목을 누르면 다음 명령이 실행되고, 폼은 `--set "이름=값"`으로 제출됩니다. ▶ 버튼은 해당 스킬을 실행합니다.
+  - LLM이 없어도 메뉴를 따라갈 수 있습니다. LLM에는 짧은 텍스트로 요약해 넘겨 토큰을 아낍니다.
+- **스크립트 환경변수** `skills.script_env`:
+  - 쓸 수 있는 자리표시: `{user}`(현재 사용자 ID), `{skills_dir}`, `{skill_dir}`, `{data_dir}`, `{workspace}`, `{output_dir}`
+  - 기본값: model-agents 스킬용으로 `MODEL_AGENTS_USER={user}`, `MODEL_AGENTS_SKILL_ROOTS={skills_dir}`가 들어 있습니다. 그래서 사용자마다 자기 모델과 이력을 봅니다.
+- **갱신**: Git이나 서버 폴더에서 가져온 스킬은 출처(주소, 브랜치, 커밋)가 기록됩니다.
+  - **🔄 원본에서 업데이트** 또는 `inhouse-agent skills update --all`로 새 버전을 받습니다. 커밋이 같으면 "이미 최신"으로 끝납니다.
+  - 스킬이 실행 중에 만든 `data/` 폴더, `*.db`/`*.sqlite` 파일, 편집 기록은 유지됩니다.
+- **비공개 저장소**:
+  - 설정: `skills.git_token`, 호스트별 `skills.git_tokens: {github.company.com: …}`, 또는 `AGENT_GIT_TOKEN`/`GITHUB_TOKEN` 환경변수
+  - 먼저 토큰 없이 시도하고, 실패하면 토큰으로 다시 받습니다.
+  - git이 설치되어 있으면 `git clone`을 쓰고(사내 Git 인증 설정 사용), 없으면 GitHub 압축 파일로 받습니다(`downloads.verify`의 사내 CA 사용).
+  - 주소의 브랜치가 없으면 있는 브랜치 목록을 보여줍니다.
+- **CLI**:
+  ```bash
+  inhouse-agent skills import https://github.com/tommyhj217/skill_test --list   # 들어 있는 스킬만 보기
+  inhouse-agent skills import https://github.com/tommyhj217/skill_test          # 전부 설치
+  inhouse-agent skills import skill_test-main.zip --only model-agents --overwrite
+  inhouse-agent skills update --all
+  ```
+- 가져오기와 업데이트는 편집자(`skills.editors`)만 할 수 있고, 설치한 스킬은 모든 사용자의 `/` 목록에 바로 보입니다.
+
+> **"Method Not Allowed"(405)가 뜨면**: 서버 코드가 화면보다 이전 버전이라는 뜻입니다.
+> - 원인: 웹 화면(index.html)은 바로 새 파일을 읽지만, API는 서버를 다시 켜야 바뀝니다. 그래서 `git pull` 뒤 서버를 재시작하지 않으면 새 기능의 API가 없습니다.
+> - 해결: 서버 창에서 Ctrl+C를 누르고 다시 실행하세요. 이제는 화면 맨 위에 빨간 경고도 나옵니다.
+
 ## 6. 다운로드 URL 받기
 
 MCP가 파일 대신 링크를 돌려주면(`파일 다운로드 주소: https://.../download?fileId=...`), 에이전트가 결과 뒤에
@@ -637,7 +685,7 @@ skills/menu_builder/
   ```
 - **설정**: `skills.scripts: on | approve(실행 전 승인) | off`, `skills.script_timeout: 300`
 - **스킬 탭에서 관리**:
-  - 📦 **가져오기**: 다른 곳에서 만든 스킬 폴더 zip(SKILL.md + scripts/ …)을 등록합니다. 이름에 `-`가 있어도 되고, 경로 탈출이나 숨김 파일은 무시합니다.
+  - 📦 **가져오기**: GitHub 주소, zip, 폴더, SKILL.md에서 가져옵니다 ([5장 스킬 가져오기](#스킬-가져오기-github--zip--폴더--다른-에이전트용-스킬)).
   - **파일 추가 / 삭제 / 보기**와 ▶ 실행.
   - 가져오기, 추가, 삭제는 편집자(`skills.editors`)만 할 수 있습니다.
 
@@ -708,7 +756,8 @@ src/inhouse_agent/
   users.py      사용자별 작업폴더(WorkspaceProxy), 대화 세션 저장/이어서 하기
   docstruct.py  PPT/엑셀/Word/PDF 장(슬라이드/시트) 단위 구조 추출
   compare.py    문서 비교 (PPT 장별 차이, 엑셀 합계·행 변경, PPT 숫자↔엑셀 교차 확인), 첨부 안내문
-  skill_scripts.py 스킬 폴더 스크립트 실행 (run_skill_script, list_skill_scripts)
+  skill_scripts.py 스킬 폴더 스크립트 실행 (run_skill_script: 명령줄 그대로, 화면 문서 요약, 환경변수)
+  skill_install.py 스킬 가져오기 (zip / GitHub·Git / 폴더 / SKILL.md → 여러 스킬 찾기 → 골라 설치 → 원본에서 갱신)
   usage.py      사용 이력(agent_usage) / 모델 목록(list_models)
   rulebook.py   장별 구성 도출, 규칙 후보 발굴, 규칙 검사·지지율·상태 자동 변경, 검증, 점검(reflect), 버전/변경기록
   rules_tools.py 규칙집 tool (learn/add/update/validate/judge/outline/reflect/record_product/export) + write_pptx
