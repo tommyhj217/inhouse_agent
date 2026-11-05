@@ -57,6 +57,16 @@ def setup_logging(cfg: AppConfig, level: str = "INFO", console: bool = True) -> 
 render_prompt = render_dates
 
 
+class OfflineChatModel:
+    """LLM 이 설정되지 않았을 때 쓰는 자리표시. 호출되면 사용법을 담은 오류를 냄."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+
+    async def chat(self, messages: Any, tools: Any = None, **kw: Any) -> Any:
+        raise RuntimeError(f"LLM 이 연결되어 있지 않습니다({self.reason}). / 로 스킬 워크플로나 도구를 직접 실행하세요.")
+
+
 class AgentRuntime:
     """CLI / 스케줄러 / API 서버가 공통으로 쓰는 실행 환경."""
 
@@ -102,6 +112,7 @@ class AgentRuntime:
         if any(c.is_remote for c in self.hub.connections.values()):
             self.hub.builtins.append(self._fetch_remote_tool())
         self.dynamic.hub = self.hub
+        self.dynamic.can_edit = self.can_edit_skills
         if dyn_cfg.mode != "off":
             self.dynamic.register_all()  # 저장해 둔 동적 도구 등록
         self._agent: Agent | None = None
@@ -160,12 +171,15 @@ class AgentRuntime:
     def llm(self) -> ChatModel:
         # LLM 설정이 없어도 tools/check 등 일부 명령은 동작하도록 지연 생성
         if self._llm is None:
+            ready, why = self.llm_status()
+            if not ready:
+                return OfflineChatModel(why)  # LLM 없이(토큰 없이) 쓰는 상태: 워크플로/도구는 계속 동작
             self._llm = AzureChatModel(self.cfg.llm)
         return self._llm
 
     @property
     def agent(self) -> Agent:
-        if self._agent is None:
+        if self._agent is None or (isinstance(self._agent.llm, OfflineChatModel) and self.llm_status()[0]):
             self._agent = Agent(self.llm, self.hub, self.cfg.agent, self.skills)
             self._agent.recent_sessions_in_prompt = self.users_cfg.recent_sessions_in_prompt
             self._agent.rules_path = self.rules_path
@@ -189,6 +203,17 @@ class AgentRuntime:
 
         return await run_workflow(self.hub, steps, inputs, timezone=self.cfg.agent.timezone, output_template=output_template,
                                   title=title, on_event=on_event, ask=ask, max_chars=self.cfg.agent.max_tool_result_chars)
+
+    def can_edit_skills(self, user: str | None = None) -> bool:
+        """스킬·동적 도구를 만들고 고칠 수 있는 사용자인지 (skills.editors 가 비어 있으면 모두 가능).
+        여러 사람에게 서비스할 때: 편집은 지정한 사람만, 사용(실행)은 모두."""
+        import fnmatch
+
+        editors = [str(x) for x in (self.cfg.raw.get("skills") or {}).get("editors") or []]
+        if not editors:
+            return True
+        user = user if user is not None else current_user.get()
+        return bool(user) and any(fnmatch.fnmatch(user, p) for p in editors)
 
     def sessions(self) -> SessionStore:
         """현재 사용자(없으면 공용)의 대화 세션 저장소."""

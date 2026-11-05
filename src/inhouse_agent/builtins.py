@@ -402,6 +402,8 @@ def make_builtin_tools(
         async def create_tool(args: dict[str, Any]) -> ToolOutcome:
             from .dynamic_tools import ToolCodeError, check_code
 
+            if getattr(dyn, "can_edit", None) is not None and not dyn.can_edit():
+                return ToolOutcome("오류: 이 사용자는 새 도구를 만들 권한이 없습니다 (skills.editors). 이미 있는 도구(custom__*)는 사용할 수 있습니다.", True)
             name = str(args.get("name", "")).strip()
             code = str(args.get("code", ""))
             desc = str(args.get("description", "")).strip()

@@ -78,6 +78,8 @@ class Skill:
     steps: list[dict[str, Any]] = field(default_factory=list)
     """LLM 없이 실행할 단계 (workflow.py). 비어 있으면 LLM 이 지침(body)을 보고 실행."""
     output_template: str | None = None
+    info: dict[str, Any] = field(default_factory=dict)
+    """누가 언제 만들고 고쳤는지 (.meta.json) - 모든 사용자에게 보여줌"""
 
     @property
     def files(self) -> list[str]:
@@ -130,6 +132,10 @@ class Skill:
             "path": str(self.path),
             "steps": len(self.steps),
             "workflow": bool(self.steps),
+            "created_by": self.info.get("created_by"),
+            "created": self.info.get("created"),
+            "updated_by": self.info.get("updated_by"),
+            "updated": self.info.get("updated"),
         }
 
 
@@ -241,15 +247,38 @@ class SkillStore:
             raise SkillError(f"잘못된 스킬 이름: {name}")
         return self.root / name
 
+    @staticmethod
+    def _info(d: Path) -> dict[str, Any]:
+        import json
+
+        info: dict[str, Any] = {}
+        mf = d / ".meta.json"
+        if mf.is_file():
+            try:
+                info = json.loads(mf.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                info = {}
+        f = d / "SKILL.md"
+        if f.is_file():
+            info.setdefault("updated", f.stat().st_mtime)  # 파일로 직접 넣은 스킬(GitHub 등)도 시각 표시
+            info.setdefault("created", f.stat().st_mtime)
+        return info
+
+    def _load(self, d: Path) -> Skill:
+        sk = parse_skill((d / "SKILL.md").read_text(encoding="utf-8"), d)
+        sk.info = self._info(d)
+        return sk
+
     def list(self) -> tuple[list[Skill], dict[str, str]]:
-        """(정상 스킬 목록, {폴더명: 오류}) - 오류난 스킬 때문에 전체가 멈추지 않도록."""
+        """(정상 스킬 목록, {폴더명: 오류}) - 오류난 스킬 때문에 전체가 멈추지 않도록. 매번 디스크에서 읽으므로
+        누가 추가/수정한 스킬이든 모든 사용자에게 바로 보임."""
         skills, errors = [], {}
         for d in sorted(p for p in self.root.iterdir() if p.is_dir() and not p.name.startswith((".", "_"))):
             f = d / "SKILL.md"
             if not f.is_file():
                 continue
             try:
-                skills.append(parse_skill(f.read_text(encoding="utf-8"), d))
+                skills.append(self._load(d))
             except (SkillError, OSError, UnicodeDecodeError) as e:
                 errors[d.name] = str(e)
         return skills, errors
@@ -259,12 +288,12 @@ class SkillStore:
         f = d / "SKILL.md"
         if not f.is_file():
             raise SkillError(f"스킬 '{name}' 을(를) 찾을 수 없습니다.")
-        return parse_skill(f.read_text(encoding="utf-8"), d)
+        return self._load(d)
 
     def raw(self, name: str) -> str:
         return (self._dir(name) / "SKILL.md").read_text(encoding="utf-8")
 
-    def save(self, name: str, content: str) -> Skill:
+    def save(self, name: str, content: str, user: str | None = None) -> Skill:
         d = self._dir(name)
         skill = parse_skill(content, d)  # 저장 전에 검증
         if skill.name != name:
@@ -281,14 +310,24 @@ class SkillStore:
             for old in backups[:-20]:
                 old.unlink(missing_ok=True)
         f.write_text(content, encoding="utf-8")
+        import json
+        import time
+
+        info = self._info(d) if (d / ".meta.json").is_file() else {}
+        now = time.time()
+        info.setdefault("created", now)
+        info.setdefault("created_by", user)
+        info.update(updated=now, updated_by=user)
+        (d / ".meta.json").write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
+        skill.info = info
         return skill
 
-    def create(self, name: str, description: str = "", content: str | None = None) -> Skill:
+    def create(self, name: str, description: str = "", content: str | None = None, user: str | None = None) -> Skill:
         d = self._dir(name)
         if (d / "SKILL.md").exists():
             raise SkillError(f"스킬 '{name}' 이(가) 이미 있습니다.")
         text = content or SKILL_TEMPLATE.format(name=name, description=description or f"{name} 스킬 설명을 적으세요")
-        return self.save(name, text)
+        return self.save(name, text, user)
 
     def delete(self, name: str) -> None:
         d = self._dir(name)

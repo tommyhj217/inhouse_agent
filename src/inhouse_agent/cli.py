@@ -157,6 +157,27 @@ def _print_links(rt: AgentRuntime, result: Any, saved: Any = None) -> None:
             print(f"  {name}: {url}")
 
 
+def _print_skill_menu(rt: AgentRuntime, show_tools: bool = False) -> None:
+    """CLI: 사용할 수 있는 스킬 목록 (모든 사용자 공용)."""
+    skills, errors = rt.skills.list()
+    ready = rt.llm_status()[0]
+    print("\n[사용할 수 있는 스킬]  /<이름> key=value 로 실행")
+    for sk in skills:
+        mark = "토큰 없이 가능" if sk.steps else ("LLM 필요" if not ready else "")
+        ins = " ".join(f"{i.name}={i.default if i.default not in (None, '') else '?'}" for i in sk.inputs)
+        print(f"  /{sk.name} {ins}  {('(' + mark + ')') if mark else ''}\n      {sk.description[:90]}")
+    for n, e in errors.items():
+        print(f"  /{n}  (오류: {e})")
+    tools = rt.hub.openai_tools()
+    if show_tools:
+        print("\n[기능(도구)]")
+        for t in tools:
+            print(f"  /{t['function']['name']}  {t['function']['description'][:80]}")
+    else:
+        print(f"  … 기능(도구) {len(tools)}개는 '/ tools' 로 보기")
+    print()
+
+
 def _parse_inputs(items: list[str] | None) -> dict[str, str]:
     out = {}
     for it in items or []:
@@ -172,7 +193,12 @@ async def cmd_chat(cfg: AppConfig, args: argparse.Namespace) -> int:
     async with AgentRuntime(cfg) as rt:
         _warn_failed(rt)
         print("사내 자료수집 에이전트 - 대화형 모드")
-        print("명령: /tools  /servers  /files  /skills  /skill <이름> [k=v ...]  /noskill  /image <경로>  /sessions  /reset  /save <이름>  /reconnect <서버>  /exit\n")
+        print("/ 만 입력하면 사용할 수 있는 스킬 목록, /<스킬이름> key=value 로 바로 실행, /<도구이름> key=value 로 기능 직접 실행")
+        print("명령: /tools  /servers  /files  /skills  /skill <이름> [k=v ...]  /noskill  /image <경로>  /sessions  /reset  /save <이름>  /reconnect <서버>  /exit")
+        ready, why = rt.llm_status()
+        if not ready:
+            print(f"[LLM 없음] {why} → 워크플로가 있는 스킬과 도구는 / 로 실행할 수 있습니다.")
+        _print_skill_menu(rt)
         skill = rt.skills.get(args.skill) if getattr(args, "skill", None) else None
         skill_inputs: dict[str, str] = _parse_inputs(getattr(args, "input", None))
         messages = rt.agent.new_conversation(servers)
@@ -264,8 +290,34 @@ async def cmd_chat(cfg: AppConfig, args: argparse.Namespace) -> int:
                         print("저장할 결과가 없습니다.")
                     else:
                         print(f"저장: {rt.save_result(rest.strip() or 'chat', last[0], last[1])}")
+                elif cmd in ("/", "/?"):
+                    _print_skill_menu(rt, show_tools=bool(rest.strip() == "tools"))
+                elif rt.skills.root.joinpath(cmd[1:], "SKILL.md").is_file():  # /<스킬이름> k=v
+                    try:
+                        res, path = await rt.run_skill(cmd[1:], _parse_inputs(rest.split()), "", on_event=_print_event(args.verbose), ask=_cli_ask)
+                    except Exception as e:  # noqa: BLE001
+                        print(f"오류: {e}")
+                        continue
+                    print(f"\n에이전트> {res.output}\n[저장] {path}\n")
+                    last = (line, res)
+                elif rt.hub.route_of(cmd[1:]) is not None:  # /<도구이름> k=v (LLM 없이)
+                    vals: dict[str, Any] = {}
+                    for k, v in _parse_inputs(rest.split()).items():
+                        try:
+                            vals[k] = json.loads(v)
+                        except ValueError:
+                            vals[k] = v
+                    out = await rt.hub.call(cmd[1:], vals)
+                    print(out.text + "\n")
                 else:
-                    print("알 수 없는 명령")
+                    print("알 수 없는 명령 - / 를 입력하면 스킬 목록이 나옵니다.")
+                continue
+            if not rt.llm_status()[0] and not (skill and skill.steps and line == "실행"):
+                print("LLM 이 연결되어 있지 않아 자유 질문에는 답할 수 없습니다. / 를 입력하면 실행할 수 있는 스킬이 나옵니다.\n")
+                continue
+            if skill and skill.steps and not rt.llm_status()[0]:  # 스킬 모드 + LLM 없음 → 워크플로
+                res, path = await rt.run_skill(skill.name, skill_inputs, "", on_event=_print_event(args.verbose), ask=_cli_ask)
+                print(f"\n에이전트> {res.output}\n[저장] {path}\n")
                 continue
             try:
                 result = await rt.agent.run(
@@ -541,11 +593,52 @@ async def cmd_scheduler(cfg: AppConfig, args: argparse.Namespace) -> int:
     return 0
 
 
+def lan_addresses() -> list[str]:
+    """이 PC 의 사내망 IP (다른 사람이 접속할 주소)."""
+    import socket
+
+    ips: list[str] = []
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))  # 실제로 보내지 않음 - 기본 경로의 내 IP 확인용
+        ips.append(s.getsockname()[0])
+        s.close()
+    except OSError:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            if info[4][0] not in ips:
+                ips.append(info[4][0])
+    except OSError:
+        pass
+    return [ip for ip in ips if not ip.startswith("127.")]
+
+
 def cmd_serve(cfg: AppConfig, args: argparse.Namespace) -> int:
+    import socket
+
     import uvicorn
 
     from .server import create_app
 
+    ips = lan_addresses() if args.host in ("0.0.0.0", "") else [args.host]
+    urls = [f"http://{ip}:{args.port}" for ip in ips]
+    server_cfg = cfg.raw.setdefault("server", {}) if isinstance(cfg.raw, dict) else {}
+    if urls and not str(server_cfg.get("public_url") or "").strip():
+        server_cfg["public_url"] = urls[0]  # 메일/메신저 공유 링크도 다른 PC 에서 열리도록
+    name = socket.gethostname()
+    print("=" * 64)
+    print(" 사내 자료수집 에이전트 서버")
+    print(f"  이 PC 에서:      http://localhost:{args.port}")
+    for u in urls:
+        print(f"  다른 PC 에서:    {u}")
+    print(f"  (PC 이름으로:    http://{name}:{args.port})")
+    print("  사용자는 접속 후 오른쪽 위 👤 에 자기 ID 를 입력하면 각자 작업폴더에서 씁니다.")
+    if args.host in ("127.0.0.1", "localhost"):
+        print("  ※ --host 127.0.0.1 이라 이 PC 에서만 접속됩니다. 다른 사람에게 열려면 --host 0.0.0.0")
+    print("  다른 PC 에서 안 열리면 Windows 방화벽에서 이 포트를 허용하세요: scripts\\windows_firewall.bat")
+    print("  종료: Ctrl+C")
+    print("=" * 64, flush=True)
     app = create_app(cfg, enable_scheduler=not args.no_scheduler)
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0

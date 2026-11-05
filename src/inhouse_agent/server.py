@@ -506,6 +506,7 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
             "public_url": rt.links.public_url,
             "users": {"enabled": rt.users_cfg.enabled, "require": rt.users_cfg.require},
             "llm": {"ready": rt.llm_status()[0], "reason": rt.llm_status()[1]},
+            "can_edit_skills": rt.can_edit_skills(),
             "user": current_user.get(),
             "auth": bool(token),
         }
@@ -522,7 +523,10 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
         ]
         for sk in skills:
             items.append({"kind": "skill", "name": sk.name, "description": sk.description, "inputs": [i.to_dict() for i in sk.inputs],
-                          "workflow": bool(sk.steps), "steps": len(sk.steps), "offline": bool(sk.steps)})
+                          "workflow": bool(sk.steps), "steps": len(sk.steps), "offline": bool(sk.steps),
+                          "updated": sk.info.get("updated"), "updated_by": sk.info.get("updated_by"), "created_by": sk.info.get("created_by"),
+                          # 화면에서 사용자가 추가한(작성자가 기록된) 스킬만 3일간 '새 스킬' (git 으로 받은 파일은 제외)
+                          "new": bool(sk.info.get("created_by")) and time.time() - float(sk.info.get("created") or 0) < 3 * 86400})
         for t in rt.hub.openai_tools():
             f = t["function"]
             items.append({"kind": "tool", "name": f["name"], "description": f["description"], "parameters": f["parameters"], "offline": True})
@@ -805,10 +809,15 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
             parsed, err = None, str(e)
         return {"name": name, "content": raw, "parsed": parsed, "error": err, "history": rt.skills.history(name)}
 
+    def need_editor() -> None:
+        if not rt.can_edit_skills():
+            raise HTTPException(403, f"스킬/도구 편집 권한이 없습니다 (편집자: skills.editors). 사용(실행)은 누구나 할 수 있습니다. 현재 사용자: {current_user.get() or '(없음)'}")
+
     @app.put("/api/skills/{name}", dependencies=A)
     async def skill_save(name: str, req: SkillSaveRequest) -> dict[str, Any]:
+        need_editor()
         try:
-            sk = rt.skills.save(name, req.content)
+            sk = rt.skills.save(name, req.content, current_user.get())
         except SkillError as e:
             raise HTTPException(400, str(e)) from e
         return {"ok": True, "parsed": sk.summary()}
@@ -825,14 +834,16 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
 
     @app.post("/api/skills", dependencies=A)
     async def skill_create(req: SkillCreateRequest) -> dict[str, Any]:
+        need_editor()
         try:
-            sk = rt.skills.create(req.name, req.description, req.content)
+            sk = rt.skills.create(req.name, req.description, req.content, current_user.get())
         except SkillError as e:
             raise HTTPException(400, str(e)) from e
         return {"ok": True, "parsed": sk.summary()}
 
     @app.delete("/api/skills/{name}", dependencies=A)
     async def skill_delete(name: str) -> dict[str, Any]:
+        need_editor()
         try:
             rt.skills.delete(name)
         except SkillError as e:
@@ -1041,6 +1052,7 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
 
     @app.put("/api/ctools/{name}", dependencies=A)
     async def ctools_save(name: str, req: ToolSaveRequest) -> dict[str, Any]:
+        need_editor()
         # 사람이 화면에서 직접 저장 → 승인 절차 없이 저장 (정적 검사는 적용)
         try:
             t = rt.dynamic.save(name, req.description, req.parameters, req.code, created_by="user")
@@ -1066,6 +1078,7 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
 
     @app.delete("/api/ctools/{name}", dependencies=A)
     async def ctools_delete(name: str) -> dict[str, Any]:
+        need_editor()
         try:
             rt.dynamic.delete(name)
         except ToolCodeError as e:
