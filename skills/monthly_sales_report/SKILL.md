@@ -18,6 +18,34 @@ inputs:
     label: 실행 중 부서 확인 질문
     type: boolean
     default: false
+# LLM 없이(토큰 없이) 실행할 단계: 채팅창에서 /monthly_sales_report 로 바로 테스트
+steps:
+  - id: dl
+    title: 매출 엑셀 다운로드
+    tool: demo__download_sales_excel
+    args: {month: "{month}", wait: true}
+  - id: dept
+    title: 부서별 집계
+    tool: query_table
+    when: "{dept} == 전체"
+    args: {path: "{steps.dl.file}", group_by: [부서], aggregates: [{column: 금액, func: sum}, {column: 수량, func: sum}, {func: count}]}
+  - id: one
+    title: 선택 부서의 제품별 집계
+    tool: query_table
+    when: "{dept} != 전체"
+    args: {path: "{steps.dl.file}", filters: [{column: 부서, op: "==", value: "{dept}"}], group_by: [제품], aggregates: [{column: 금액, func: sum}]}
+  - id: prod
+    title: 제품별 집계
+    tool: query_table
+    args: {path: "{steps.dl.file}", group_by: [제품], aggregates: [{column: 금액, func: sum}]}
+output: |
+  ## {month} 매출 집계 (부서: {dept})
+  {steps.dept.text}{steps.one.text}
+
+  ### 제품별
+  {steps.prod.text}
+
+  사용 파일: {steps.dl.file}
 ---
 # 목표
 {month} 매출 엑셀을 ERP 에서 받아 정확한 수치로 집계한다. 추측한 숫자는 절대 쓰지 않는다.

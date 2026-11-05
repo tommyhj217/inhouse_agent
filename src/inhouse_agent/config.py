@@ -89,6 +89,8 @@ class LLMConfig:
     extra_body: dict[str, Any] = field(default_factory=dict)
     vision: bool = True
     """배포 모델이 이미지 입력을 지원하는지 (미지원이면 이미지를 텍스트 안내로 바꿔 보냄)"""
+    provider: str = "azure"
+    """azure | none (none: LLM 없이 사용 - 스킬 워크플로/도구 직접 실행만)"""
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "LLMConfig":
@@ -110,6 +112,7 @@ class LLMConfig:
             extra_headers={k: str(v) for k, v in (d.get("extra_headers") or {}).items() if _none_if_blank(v) is not None},
             extra_body=dict(d.get("extra_body") or {}),
             vision=_to_bool(d.get("vision"), True),
+            provider=str(d.get("provider") or "azure").lower(),
         )
 
     def validate(self) -> None:

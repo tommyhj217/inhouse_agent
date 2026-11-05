@@ -15,6 +15,32 @@ inputs:
     type: text
     required: true
     description: 예) uploads/past_reports
+# LLM 없이(토큰 없이) 실행: 학습 → 점검 → 엑셀 내보내기까지 (후보 규칙 검토·판단 규칙 추가는 LLM 이 있을 때 지침대로)
+steps:
+  - id: create
+    title: 규칙집 만들기 (이미 있으면 건너뜀)
+    tool: rulebook_create
+    args: {name: "{rulebook}", description: "{description}"}
+    on_error: continue
+  - id: learn
+    title: 과거 자료 학습
+    tool: rulebook_learn
+    args: {name: "{rulebook}", paths: "{paths|lines}", label: exemplar}
+  - id: reflect
+    title: 스스로 점검
+    tool: rulebook_reflect
+    args: {name: "{rulebook}"}
+  - id: export
+    title: 엑셀로 내보내기
+    tool: rulebook_export
+    args: {name: "{rulebook}"}
+output: |
+  ## '{rulebook}' 규칙집 학습 결과 (워크플로 실행 - 후보 규칙 검토는 LLM 연결 후 또는 규칙 탭에서)
+  {steps.learn.text}
+
+  {steps.reflect.text}
+
+  내보낸 엑셀: {steps.export.file}
 ---
 # 목표
 {paths} 의 과거 자료를 **좋은 예시**로 보고, '{rulebook}' 규칙집에 다음을 만든다.

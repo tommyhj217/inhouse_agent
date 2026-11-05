@@ -38,6 +38,7 @@
 | 사용자별 작업폴더 / 이어서 하기 | 사용자 ID별로 `workspace/users/<ID>/` 폴더를 따로 씁니다. 대화는 자동으로 저장되어 "내 작업" 목록에서 골라 이어서 진행할 수 있고, 서버를 다시 켜도 유지됩니다. 에이전트가 최근 작업을 기억합니다. |
 | 채팅 이미지 | 🖼 버튼, 붙여넣기(Ctrl+V), 끌어놓기로 첨부합니다. 비전 모델이 직접 보고, 저장된 이미지(MCP 캡처 등)는 `view_image`로 봅니다. |
 | 과거 자료 학습 / 규칙 | 과거 보고서(PPT/엑셀/Word/PDF)를 장별로 분석해 장별 구성과 규칙을 만듭니다. 새 제품(예: 뮤즈, AI 비서)을 분석해 같은 형식의 PPT를 만들고 규칙으로 검증합니다. 검증 결과와 승인된 결과물로 규칙을 스스로 고쳐 나가고, 버전과 변경 기록을 남깁니다. |
+| / 명령 · 토큰 없이 사용 | 첫 화면 채팅창에 `/`를 치면 등록된 스킬과 기능(도구)이 나와 바로 실행됩니다. 스킬에 `steps`(실행 단계)를 적어 두면 LLM이나 토큰 없이 순서대로 실행되고, 도구는 모두 LLM 없이 직접 실행됩니다. |
 | 인터랙티브 UI | 스킬을 편집하면 입력 폼이 즉시 바뀌고, 바로 테스트 실행할 수 있습니다. 실행 과정은 실시간으로 표시되고, 에이전트의 질문(`ask_user`)에 화면에서 답할 수 있습니다. 결과를 보고 후속 지시를 내릴 수 있습니다. |
 | 사용 방식 | 대화형 CLI, 1회 실행 CLI, 웹 채팅 화면과 REST API(`serve`), 예약 데몬(`scheduler`) |
 | SDK 호환 | mcp SDK 1.x와 2.x, openai SDK 1.x 이상에서 테스트했습니다. |
@@ -402,7 +403,65 @@ downloads/  uploads/images/  files/  results/  sessions/  memory.json
 - `view_image`로는 MCP 화면 캡처나 다운로드한 이미지도 에이전트가 직접 볼 수 있습니다.
 - 배포 모델이 이미지를 지원하지 않으면 `llm.vision: false`로 설정하세요. 그러면 이미지 대신 안내 문구를 보냅니다.
 
-## 9. 과거 자료 학습 → 규칙 → 검증 → 규칙 갱신
+## 9. / 명령과 LLM 없이(토큰 없이) 쓰기
+
+**채팅창 `/` 메뉴** (조사 탭)
+
+- `/`를 치거나 🧩 버튼을 누르면 목록이 나옵니다.
+  - **스킬**: "토큰 없이 가능" / "LLM 필요"가 표시됩니다.
+  - **명령**: `/new`, `/help`
+  - **기능(도구)**: 모든 tool
+- 글자를 치면 걸러지고, ↑↓로 고른 뒤 Enter/Tab으로 선택합니다. Esc는 닫기입니다.
+- 선택하면 **입력 카드**가 열립니다. 스킬 입력 폼이나 도구 인자 폼이 나오고, 실행 방식을 고릅니다: 자동(LLM 있으면 에이전트, 없으면 워크플로) / 워크플로 / 에이전트.
+- 한 줄로 바로 실행할 수도 있습니다: `/monthly_sales_report month=2026-10 dept=전체`, `/analyze_file path=downloads/a.xlsx`, `/query_table path=... group_by=["부서"]`
+  - 필수 입력이 빠지면 카드가 열립니다.
+- 스킬 실행은 "내 작업"에 따로 저장됩니다. 도구 실행은 지금 대화에 이어서 기록됩니다.
+
+**LLM 없이(토큰 없이) 쓰기**: 사내 테스트용
+
+- `llm.provider: none`으로 설정하거나 Azure 키가 없으면, 화면 위에 "LLM 없음"이 표시됩니다.
+- 이 상태에서는 다음처럼 동작합니다.
+  - 도구(기능)는 모두 실행됩니다.
+  - `steps`가 있는 스킬도 실행됩니다.
+  - 자유 질문에는 사용법을 안내합니다.
+- 서버에 `AGENT_API_TOKEN`이 없으면 화면의 API 토큰 입력칸은 숨겨집니다. 토큰 없이 그대로 씁니다.
+
+**스킬 워크플로** (`SKILL.md` 머리말)
+
+```yaml
+steps:
+  - id: dl
+    title: 매출 엑셀 다운로드
+    tool: demo__download_sales_excel
+    args: {month: "{month}", wait: true}
+  - id: one
+    tool: query_table
+    when: "{dept} != 전체"            # 조건이 맞을 때만
+    args: {path: "{steps.dl.file}", filters: [{column: 부서, op: "==", value: "{dept}"}], group_by: [제품]}
+    on_error: continue                # 실패해도 계속 (기본 stop)
+output: |
+  ## {month} 매출
+  {steps.one.text}
+```
+
+- 쓸 수 있는 변수:
+  - 입력값 `{입력이름}`, 날짜 `{yesterday}` `{last_month}` 등
+  - 이전 단계 결과 `{prev}`, `{steps.<id>.text}`, `{steps.<id>.file}`(첫 파일), `{steps.<id>.data.0.id}`(구조화 결과)
+  - 필터 `{paths|lines}`(여러 줄 → 목록)
+- 값 전체가 변수 하나면 원래 타입(숫자/목록/dict)으로 들어갑니다.
+- LLM이 있어도 실행 방식을 "워크플로"로 고르면 LLM을 호출하지 않습니다. 같은 결과를 반복 테스트할 때 씁니다.
+- 실행 중에는 단계별 진행이 작업 계획(✅/⏭)으로 표시되고, 결과는 `outputs/skill_<이름>/`(사용자면 `users/<ID>/results/`)에 저장됩니다.
+- 샘플 스킬 4개(`monthly_sales_report`, `notice_digest`, `learn_rules`, `product_analysis`)에 모두 워크플로가 들어 있습니다. 규칙 학습은 만들기 → 학습 → 점검 → 엑셀, 제품 분석은 장별 계획 → 이전 제품 기록까지 진행합니다.
+
+**CLI**
+
+| 명령 | 용도 |
+|---|---|
+| `inhouse-agent call list` | 도구 목록 |
+| `inhouse-agent call analyze_file path=downloads/a.xlsx` | 도구 직접 실행 |
+| `inhouse-agent skills run monthly_sales_report -i month=2026-10 --mode workflow` | 스킬을 LLM 없이 실행 |
+
+## 10. 과거 자료 학습 → 규칙 → 검증 → 규칙 갱신
 
 ```
 과거 자료(PPT/Excel) ─▶ ① 장별 구조 추출 ─▶ ② 장별 구성(blueprint) 도출 + 규칙 후보 자동 발굴
@@ -479,7 +538,7 @@ downloads/  uploads/images/  files/  results/  sessions/  memory.json
 - 웹 UI **규칙** 탭에서 장별 구성, 규칙(상태·중요도·문장 바로 수정), 검증(장별 체크리스트), 점검, 제품, 변경 기록을 보고 자료 학습, 문서 검증, 엑셀 내보내기를 합니다. 🤖 버튼은 에이전트에게 작업을 넘깁니다.
 - 스킬: `learn_rules`(과거 자료 학습과 규칙 정리), `product_analysis`(새 제품 분석, 검증, 규칙 갱신)
 
-## 10. 결과 파일 받기 / 공유 링크
+## 11. 결과 파일 받기 / 공유 링크
 
 - **웹 화면**: 답변이나 tool 결과에 실제로 있는 파일/폴더 경로가 나오면 📎 링크로 바뀝니다. 파일명에 공백이나 한글이 있어도 됩니다.
   - 경로 클릭: 내려받기 (폴더는 zip으로 묶음)
@@ -496,7 +555,7 @@ downloads/  uploads/images/  files/  results/  sessions/  memory.json
   - CLI 결과 (`[파일 받기]`)
 - **CLI로 링크 만들기**: `inhouse-agent link files/reports/10월_매출.xlsx --hours 24`
 
-## 11. 범용 자동화 도구
+## 12. 범용 자동화 도구
 
 공개 자동화 에이전트(OpenAI Agents SDK, smolagents, Manus, n8n, LangChain, Claude Code)의 도구를 비교한 결과와,
 무엇을 넣고 무엇을 뺐는지(예: 셸 명령)는 [docs/agent_tools_analysis.md](docs/agent_tools_analysis.md)에 정리했습니다.
@@ -517,7 +576,7 @@ downloads/  uploads/images/  files/  results/  sessions/  memory.json
 | `send_email` | 사내 SMTP 메일 (첨부와 다운로드 링크) | `notify.email.smtp_host`와 `allowed_recipients`가 필요. 대화형에서는 승인 |
 | `send_message` | Teams/Slack 웹훅 | `notify.webhooks`에 등록된 채널로만 발송 |
 
-## 12. 구조
+## 13. 구조
 
 ```
 src/inhouse_agent/
@@ -536,6 +595,7 @@ src/inhouse_agent/
   rulebook.py   장별 구성 도출, 규칙 후보 발굴, 규칙 검사·지지율·상태 자동 변경, 검증, 점검(reflect), 버전/변경기록
   rules_tools.py 규칙집 tool (learn/add/update/validate/judge/outline/reflect/record_product/export) + write_pptx
   pptxgen.py    PPT 생성 (과거 보고서 템플릿 디자인 사용)
+  workflow.py   스킬 steps 를 LLM 없이 실행 (템플릿 변수, 조건, 필터)
   images.py     채팅 이미지 → 비전 모델 입력 (축소/변환, 이전 이미지 정리)
   remote_files.py 원격 MCP 서버 파일 가져오기 (path_map, fetch_tool, resource, localhost 링크 변환)
   toolkit.py    범용 도구 (web_fetch, http_request, sql_query, write_excel, make_chart, send_email ...)
@@ -557,7 +617,7 @@ tests/                          통합 테스트 (실제 MCP 서버, 가짜 Azur
   현재 시각과 서버 목록, 서버 설명은 자동으로 붙습니다.
 - 결과를 디버깅할 때는 `outputs/<작업>/_trace/*.json`에서 LLM이 어떤 tool을 어떤 인자로 불렀는지 확인할 수 있습니다.
 
-## 13. 테스트
+## 14. 테스트
 
 ```bash
 pip install -e ".[server,dev]"
@@ -576,6 +636,8 @@ pytest -q
 - 스킬 파싱/검증/버전 백업, 스킬 실행 중 ask_user 답변 반영과 다운로드 감지
 - 웹 API 흐름: 스킬 생성/저장 → 실행 → SSE 이벤트 → 질문 답변 → 후속 지시 → 파일 업로드/분석
 - 다운로드: 한글 파일명 복원, 리다이렉트, 404, 크기 제한, 호스트 제한, 링크로컬 차단, 사이트별 헤더/쿠키, 로그인 페이지 감지, 링크 감지/자동 받기
+- / 명령·토큰 없이: 템플릿/필터/조건, 샘플 스킬 4개 워크플로 실행(규칙 학습 포함), 워크플로 모드는 LLM 미호출, /api/commands, 스킬/도구 직접 실행·세션 기록,
+  LLM 없는 자유 질문 안내, 스킬 대화 후속 말은 워크플로 재실행 안 함, 건너뛴 단계 표시, 잘못된 요청 거절
 - 규칙집: 슬라이드 구조(표/차트/노트, python-pptx 없이도), 제목 유사도, 장별 구성(공통 이름), 후보 발굴·중복 방지, PPT/엑셀 분리,
   검증 체크리스트, 판단형 판정, 승인 자료 학습 → 자동 재검토, 잠금 우선, 점검 제안, 장별 계획, PPT 생성(템플릿) → 검증 100점, tool/API 경로
 - 사용자: ID 검증, 사용자 간 파일/기억/세션/실행 분리, 공용 다운로드 → 사용자 폴더 이동, ID 필수/허용 목록, 예약작업 user

@@ -13,6 +13,8 @@
     inhouse-agent ctools list|show|test|delete  # 동적 도구 관리
     inhouse-agent -u <ID> chat [--resume 작업ID]  # 사용자별 작업폴더 / 이전 작업 이어서
     inhouse-agent -u <ID> sessions           # 저장된 작업 목록
+    inhouse-agent call <도구> key=value      # 도구 직접 실행 (LLM 없이)
+    inhouse-agent skills run <스킬> --mode workflow  # 스킬을 LLM 없이 steps 로 실행
     inhouse-agent scheduler                  # 예약작업 데몬
     inhouse-agent serve --port 8080          # 웹/API 서버 + 예약작업
 """
@@ -359,7 +361,7 @@ async def cmd_skills(cfg: AppConfig, args: argparse.Namespace) -> int:
         _warn_failed(rt)
         result, path = await rt.run_skill(
             args.name, _parse_inputs(args.input), args.prompt or "",
-            on_event=_print_event(args.verbose), ask=None if args.no_ask else _cli_ask,
+            on_event=_print_event(args.verbose), ask=None if args.no_ask else _cli_ask, mode=args.mode,
         )
         print()
         print(result.output)
@@ -467,6 +469,27 @@ async def cmd_fetch(cfg: AppConfig, args: argparse.Namespace) -> int:
         if args.filename:
             a["filename"] = args.filename
         out = await rt.hub.call("download_url", a)
+        print(out.text)
+        return 1 if out.is_error else 0
+
+
+async def cmd_call(cfg: AppConfig, args: argparse.Namespace) -> int:
+    """도구(기능) 직접 실행 - LLM/토큰 불필요. 값은 key=value (JSON 도 가능: columns='["a","b"]')."""
+    vals: dict[str, Any] = {}
+    for k, v in _parse_inputs(args.args).items():
+        try:
+            vals[k] = json.loads(v)
+        except ValueError:
+            vals[k] = v
+    async with AgentRuntime(cfg) as rt:
+        if args.tool in ("list", "ls"):
+            for t in rt.hub.openai_tools():
+                print(f"- {t['function']['name']}: {t['function']['description'][:100]}")
+            return 0
+        if rt.hub.route_of(args.tool) is None:
+            print(f"없는 도구입니다: {args.tool} (inhouse-agent call list 로 목록 확인)")
+            return 1
+        out = await rt.hub.call(args.tool, vals)
         print(out.text)
         return 1 if out.is_error else 0
 
@@ -582,6 +605,7 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("-i", "--input", action="append", help="입력값 key=value (여러 번)")
     x.add_argument("-p", "--prompt", help="추가 지시")
     x.add_argument("--no-ask", action="store_true", help="ask_user 질문 없이 기본값으로 진행")
+    x.add_argument("--mode", choices=["auto", "agent", "workflow"], default="auto", help="workflow: LLM 없이 steps 로 실행")
     x.add_argument("-v", "--verbose", action="store_true")
 
     fl = sub.add_parser("files", help="파일 상태 점검/분석 (LLM 없이)")
@@ -625,6 +649,10 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--cookies", help="'A=1; B=2'")
     x.add_argument("--filename")
 
+    x = sub.add_parser("call", help="도구(기능) 직접 실행 - LLM 없이 (예: call analyze_file path=downloads/a.xlsx)")
+    x.add_argument("tool", help="도구 이름 (list: 목록)")
+    x.add_argument("args", nargs="*", help="key=value")
+
     x = sub.add_parser("sessions", help="저장된 작업(대화) 목록")
     x.add_argument("-q", "--query")
 
@@ -645,7 +673,7 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigError, OSError) as e:
         print(f"설정 오류: {e}", file=sys.stderr)
         return 1
-    setup_logging(cfg, args.log_level, console=args.cmd not in ("chat", "skills", "ctools", "fetch", "link", "sessions"))
+    setup_logging(cfg, args.log_level, console=args.cmd not in ("chat", "skills", "ctools", "fetch", "link", "sessions", "call"))
     if args.user:
         from .users import UserError, current_user, normalize_user
 
@@ -669,6 +697,7 @@ def main(argv: list[str] | None = None) -> int:
         "fetch": cmd_fetch,
         "link": cmd_link,
         "sessions": cmd_sessions,
+        "call": cmd_call,
         "scheduler": cmd_scheduler,
     }
     try:

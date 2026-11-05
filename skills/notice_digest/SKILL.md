@@ -8,6 +8,32 @@ inputs:
     type: date
     default: "{yesterday}"
     required: true
+steps:
+  - id: list
+    title: 공지 목록
+    tool: demo__list_notices
+    args: {date_from: "{date}"}
+  - id: body
+    title: 첫 공지 본문
+    tool: demo__get_notice
+    args: {notice_id: "{steps.list.data.0.id}"}
+  - id: att
+    title: 첨부파일 받기
+    tool: demo__export_notice_attachment
+    args: {notice_id: "{steps.list.data.0.id}"}
+  - id: ana
+    title: 첨부파일 분석
+    tool: analyze_file
+    args: {path: "{steps.att.file}", sample_rows: 5}
+output: |
+  ## {date} 공지 요약 (워크플로 실행)
+  {steps.list.text}
+
+  ### 첫 공지 ({steps.list.data.0.title} / {steps.list.data.0.dept})
+  {steps.body.text}
+
+  ### 첨부파일
+  {steps.ana.text}
 ---
 # 절차
 1. `list_notices` 로 {date} 공지 목록을 가져온다.

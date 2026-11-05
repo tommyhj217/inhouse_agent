@@ -111,6 +111,16 @@ table.grid tbody tr{cursor:pointer}
 .mono{font-family:ui-monospace,Consolas,"D2Coding",monospace;font-size:13px;line-height:1.5;tab-size:4}
 #t-code{flex:1;min-height:260px;width:100%}
 .ask pre{max-height:280px}
+.slash{position:absolute;bottom:100%;left:0;right:0;max-height:min(50vh,420px);overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.15);z-index:30;margin-bottom:6px}
+.slash .grp{font-size:11px;color:var(--muted);padding:6px 10px 2px;position:sticky;top:0;background:var(--panel)}
+.slash .it{padding:6px 10px;cursor:pointer;display:flex;gap:8px;align-items:baseline}
+.slash .it.sel,.slash .it:hover{background:var(--soft)}
+.slash .it .nm{font-weight:600;white-space:nowrap}
+.slash .it .ds{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+.cmdcard{border:1px solid var(--accent);border-radius:10px;padding:10px 12px;margin-top:8px;background:var(--soft)}
+.cmdcard .form{grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}
+.composer{position:relative}
+.llmbadge{font-size:12px}
 .rules{display:grid;grid-template-columns:230px minmax(0,1fr);gap:12px}
 .subnav{display:flex;gap:4px;flex-wrap:wrap;border-bottom:1px solid var(--line);margin:8px 0}
 .subnav button{border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;padding:6px 10px}
@@ -121,8 +131,10 @@ table.grid select{padding:2px 4px;font-size:12px}
 .pick label{display:flex;gap:6px;align-items:center;font-size:13px;padding:2px 0}
 .status-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}
 .hidden{display:none!important}
+.chatwrap>*{min-width:0}
+.sess .t{min-width:0}
 @media (max-width:800px){
-  .chatwrap{grid-template-columns:1fr;height:auto}
+  .chatwrap{grid-template-columns:minmax(0,1fr);height:auto}
   .chatwrap>.side{max-height:180px}
   .chat{height:calc(100vh - 300px);min-height:420px}
 }
@@ -150,6 +162,7 @@ table.grid select{padding:2px 4px;font-size:12px}
     <button data-tab="status">상태</button>
   </nav>
   <div class="right">
+    <span id="llmbadge" class="badge llmbadge hidden"></span>
     <span id="userchip" class="userchip" title="사용자 바꾸기">👤 <span id="userlabel">사용자 ID 입력</span></span>
     <input id="token" type="password" placeholder="API 토큰" style="width:130px" title="AGENT_API_TOKEN 을 설정한 경우 입력">
     <button id="theme" title="밝게/어둡게">◐</button>
@@ -176,10 +189,13 @@ table.grid select{padding:2px 4px;font-size:12px}
       실행 중에는 tool 호출과 다운로드한 파일의 상태가 실시간으로 표시됩니다. 에이전트가 확인을 요청하면 여기서 답할 수 있습니다.</div>
     </div>
     <div id="chat-thumbs" class="thumbs"></div>
+    <div id="cmd-card"></div>
     <div class="composer">
+      <div id="slash" class="slash hidden"></div>
+      <button id="chat-skill" title="스킬·기능 실행 (입력창에 / 를 쳐도 됩니다)">🧩</button>
       <button id="chat-img" title="이미지 첨부 (붙여넣기 Ctrl+V / 끌어놓기도 됩니다)">🖼</button>
       <input id="chat-img-file" type="file" accept="image/*" multiple class="hidden">
-      <textarea id="chat-input" placeholder="요청을 입력하세요 (Enter 전송, Shift+Enter 줄바꿈 · 이미지는 붙여넣기/끌어놓기)"></textarea>
+      <textarea id="chat-input" placeholder="요청을 입력하세요 · / 를 치면 스킬과 기능 목록 (Enter 전송, Shift+Enter 줄바꿈 · 이미지는 붙여넣기/끌어놓기)"></textarea>
       <div style="display:grid;gap:6px">
         <button id="chat-send" class="primary">전송</button>
         <button id="chat-cancel" class="danger hidden">중단</button>
@@ -587,7 +603,13 @@ async function sendChat(text) {
 }
 $("#chat-send").onclick = () => sendChat();
 $("#chat-cancel").onclick = () => chatRun && chatRun.cancel();
-chatInput.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendChat(); } });
+chatInput.addEventListener("keydown", e => {
+  if (slashKey(e)) return;
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    if (chatInput.value.trim().startsWith("/")) runSlashText(chatInput.value.trim()); else sendChat();
+  }
+});
 function newChat() { chatSession = null; chatLog.innerHTML = ""; $("#chat-session").textContent = "새 대화"; document.querySelectorAll("#sess-list .item").forEach(x => x.classList.remove("active")); }
 $("#sess-new").onclick = newChat;
 
@@ -630,6 +652,162 @@ document.addEventListener("click", e => {
   const img = e.target.closest(".thumb img"); if (!img) return;
   const lb = document.createElement("div"); lb.className = "lightbox"; lb.innerHTML = `<img src="${img.dataset.full}">`; lb.onclick = () => lb.remove(); document.body.appendChild(lb);
 });
+
+// ---- / 명령: 등록된 스킬 · 기능(도구) · 내장 명령 (LLM/토큰 없이도 실행 가능한 것 표시)
+let cmdCache = null, cmdLLM = {ready: true, reason: ""}, slashItems = [], slashSel = 0;
+async function loadCommands(force) {
+  if (cmdCache && !force) return cmdCache;
+  const r = await api("/api/commands"); cmdCache = r.items; cmdLLM = r.llm; updateLLMBadge(); return cmdCache;
+}
+function updateLLMBadge() {
+  const b = $("#llmbadge"); b.classList.remove("hidden");
+  b.className = "badge llmbadge " + (cmdLLM.ready ? "b-ok" : "b-warn");
+  b.textContent = cmdLLM.ready ? "LLM 연결" : "LLM 없음 · / 명령 사용";
+  b.title = cmdLLM.ready ? "LLM(Azure) 설정이 있습니다" : "LLM 없이(토큰 없이) 쓰는 상태: " + cmdLLM.reason + "\n워크플로가 있는 스킬과 모든 기능은 / 메뉴에서 바로 실행됩니다.";
+}
+const KIND = {skill: "스킬", tool: "기능(도구)", command: "명령"};
+function canRun(it) { return it.kind !== "skill" || it.offline || cmdLLM.ready; }
+async function showSlash(q) {
+  const items = await loadCommands().catch(() => []);
+  const ql = q.toLowerCase();
+  slashItems = items.filter(it => !ql || it.name.toLowerCase().includes(ql) || (it.description || "").toLowerCase().includes(ql))
+    .sort((a, b) => (["skill", "command", "tool"].indexOf(a.kind) - ["skill", "command", "tool"].indexOf(b.kind)) || ((b.name.toLowerCase().startsWith(ql)) - (a.name.toLowerCase().startsWith(ql))))
+    .slice(0, 80);
+  slashSel = 0; renderSlash();
+}
+function renderSlash() {
+  const box = $("#slash");
+  if (!slashItems.length) { box.innerHTML = `<div class="it"><span class="ds">일치하는 스킬/기능이 없습니다</span></div>`; box.classList.remove("hidden"); return; }
+  let html = "", last = null;
+  slashItems.forEach((it, i) => {
+    if (it.kind !== last) { html += `<div class="grp">${KIND[it.kind]}</div>`; last = it.kind; }
+    const tag = it.kind === "skill" ? (it.offline ? `<span class="badge b-ok" title="steps 워크플로로 LLM 없이 실행">토큰 없이 가능</span>` : `<span class="badge ${cmdLLM.ready ? "" : "b-warn"}" title="LLM 이 지침을 보고 실행">LLM 필요</span>`) : "";
+    html += `<div class="it ${i === slashSel ? "sel" : ""}" data-i="${i}"><span class="nm">/${esc(it.name)}</span>${tag}<span class="ds">${esc((it.description || "").replace(/^\[[^\]]*\]\s*/, ""))}</span></div>`;
+  });
+  box.innerHTML = html; box.classList.remove("hidden");
+  box.querySelectorAll(".it[data-i]").forEach(el => { el.onmousedown = e => { e.preventDefault(); pickSlash(slashItems[+el.dataset.i]); }; });
+  const sel = box.querySelector(".it.sel"); if (sel) sel.scrollIntoView({block: "nearest"});
+}
+function hideSlash() { $("#slash").classList.add("hidden"); slashItems = []; }
+function slashKey(e) {
+  if ($("#slash").classList.contains("hidden") || !slashItems.length) { if (e.key === "Escape") hideSlash(); return false; }
+  if (e.key === "ArrowDown") { slashSel = (slashSel + 1) % slashItems.length; renderSlash(); e.preventDefault(); return true; }
+  if (e.key === "ArrowUp") { slashSel = (slashSel - 1 + slashItems.length) % slashItems.length; renderSlash(); e.preventDefault(); return true; }
+  if (e.key === "Escape") { hideSlash(); e.preventDefault(); return true; }
+  const typed = chatInput.value.trim();
+  if (e.key === "Tab" || (e.key === "Enter" && !e.isComposing && !/\s/.test(typed))) {
+    e.preventDefault(); pickSlash(slashItems[slashSel]); return true;
+  }
+  return false;
+}
+chatInput.addEventListener("input", () => {
+  const v = chatInput.value;
+  const m = v.match(/^\/([^\s]*)$/);
+  if (m) showSlash(m[1]); else hideSlash();
+});
+chatInput.addEventListener("blur", () => setTimeout(hideSlash, 150));
+$("#chat-skill").onclick = () => { chatInput.value = "/"; chatInput.focus(); showSlash(""); };
+
+function parseArgs(text) {  // key=value "따옴표 값" key2=[1,2]
+  const out = {}; const re = /([^\s=]+)=("([^"]*)"|'([^']*)'|(\[[^\]]*\]|\{[^}]*\}|\S+))/g; let m, rest = text;
+  while ((m = re.exec(text))) {
+    let v = m[3] ?? m[4] ?? m[5];
+    if (m[5] !== undefined) { try { v = JSON.parse(m[5]); } catch { v = m[5]; } }
+    out[m[1]] = v; rest = rest.replace(m[0], "");
+  }
+  return {args: out, rest: rest.trim()};
+}
+async function runSlashText(text) {
+  hideSlash();
+  const [, name, tail] = text.match(/^\/(\S+)\s*([\s\S]*)$/) || [];
+  if (!name) return;
+  const items = await loadCommands().catch(() => []);
+  const it = items.find(x => x.name === name);
+  if (!it) { toast(`없는 명령입니다: /${name}`); return; }
+  const {args, rest} = parseArgs(tail || "");
+  const need = it.kind === "skill" ? it.inputs.filter(i => i.required && (i.default == null || i.default === "") && args[i.name] == null)
+    : it.kind === "tool" ? (it.parameters.required || []).filter(k => args[k] == null) : [];
+  if (need.length || (it.kind !== "command" && !tail.trim() && (it.kind === "skill" ? it.inputs.length : Object.keys(it.parameters.properties || {}).length))) {
+    pickSlash(it, args, rest); return;  // 입력이 더 필요하면 입력 카드로
+  }
+  chatInput.value = "";
+  execCommand(it, args, rest);
+}
+function pickSlash(it, preset = {}, prompt = "") {
+  hideSlash();
+  if (it.kind === "command") { chatInput.value = ""; execCommand(it, {}, ""); return; }
+  chatInput.value = "";
+  const card = $("#cmd-card");
+  let fields = "";
+  if (it.kind === "skill") {
+    fields = it.inputs.map(inp => fieldHtml(inp.name, inp.label || inp.name, inp.type, preset[inp.name] ?? inp.default ?? "", inp.required, inp.description, inp.options)).join("");
+  } else {
+    const props = it.parameters.properties || {}, req = it.parameters.required || [];
+    fields = Object.entries(props).map(([k, sc]) => {
+      const t = sc.enum ? "select" : sc.type === "boolean" ? "boolean" : (sc.type === "number" || sc.type === "integer") ? "number" : (sc.type === "array" || sc.type === "object" || !sc.type) ? "json" : "string";
+      const v = preset[k] ?? (sc.default ?? "");
+      return fieldHtml(k, k, t, typeof v === "object" && v !== "" ? JSON.stringify(v) : v, req.includes(k), sc.description, sc.enum);
+    }).join("") || `<div class="small muted">입력값이 없는 기능입니다.</div>`;
+  }
+  const modeSel = it.kind === "skill" ? `<select id="cc-mode" title="실행 방식">
+      <option value="auto">자동 (LLM 있으면 에이전트, 없으면 워크플로)</option>
+      <option value="workflow" ${it.workflow ? "" : "disabled"}>워크플로 (LLM 없이, steps ${it.steps}단계)</option>
+      <option value="agent" ${cmdLLM.ready ? "" : "disabled"}>에이전트 (LLM)</option></select>` : `<span class="small muted">LLM 없이 바로 실행됩니다</span>`;
+  const warn = it.kind === "skill" && !canRun(it) ? `<div class="small b-warn">이 스킬은 steps(워크플로)가 없고 LLM 도 연결되지 않아 실행할 수 없습니다. 스킬 탭에서 SKILL.md 에 steps 를 추가하세요.</div>` : "";
+  card.innerHTML = `<div class="cmdcard"><div class="row"><b class="grow">${it.kind === "skill" ? "🧩" : "🔧"} /${esc(it.name)}</b><button id="cc-x" title="닫기">✕</button></div>
+    <div class="small muted">${esc(it.description || "")}</div>${warn}
+    <div class="form" id="cc-form">${fields}</div>
+    ${it.kind === "skill" ? `<label style="display:grid;gap:2px;margin-top:4px"><span class="small muted">추가 지시 (선택, 에이전트 실행 때 사용)</span><input id="cc-prompt" value="${esc(prompt)}"></label>` : ""}
+    <div class="row" style="margin-top:8px">${modeSel}<span class="grow"></span><button id="cc-run" class="primary" ${canRun(it) ? "" : "disabled"}>▶ 실행</button></div></div>`;
+  card.querySelector("#cc-x").onclick = () => card.innerHTML = "";
+  card.querySelector("#cc-run").onclick = () => {
+    const args = {};
+    for (const el of card.querySelectorAll("[data-k]")) {
+      let v = el.type === "checkbox" ? el.checked : el.value;
+      if (el.dataset.t === "number" && v !== "") v = Number(v);
+      if (el.dataset.t === "json" && v !== "") { try { v = JSON.parse(v); } catch { toast(`${el.dataset.k}: JSON 형식이 아닙니다`); return; } }
+      if (v === "" && el.dataset.t !== "string") continue;
+      if (v === "" && it.kind === "tool") continue;
+      args[el.dataset.k] = v;
+    }
+    const pr = card.querySelector("#cc-prompt")?.value || "";
+    const mode = card.querySelector("#cc-mode")?.value || "auto";
+    card.innerHTML = "";
+    execCommand(it, args, pr, mode);
+  };
+  const first = card.querySelector("[data-k]"); if (first) first.focus();
+}
+function fieldHtml(k, label, type, val, required, desc, options) {
+  const lab = `<span>${esc(label)}${required ? " *" : ""}${desc ? ` <span class="muted">— ${esc(String(desc).slice(0, 80))}</span>` : ""}</span>`;
+  let ctl;
+  if (type === "select" && options && options.length) ctl = `<select data-k="${esc(k)}" data-t="string">${options.map(o => `<option ${String(o) === String(val) ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>`;
+  else if (type === "boolean") ctl = `<input type="checkbox" data-k="${esc(k)}" data-t="boolean" ${val === true || val === "true" ? "checked" : ""}>`;
+  else if (type === "text" || type === "json") ctl = `<textarea rows="2" data-k="${esc(k)}" data-t="${type === "json" ? "json" : "string"}" placeholder="${type === "json" ? "JSON 예: [\"a\"] 또는 {\"k\": 1}" : ""}">${esc(val)}</textarea>`;
+  else if (type === "file") ctl = `<input data-k="${esc(k)}" data-t="string" list="sk-file-list" value="${esc(val)}" placeholder="파일 경로">`;
+  else ctl = `<input data-k="${esc(k)}" data-t="${type === "number" ? "number" : "string"}" value="${esc(val)}" ${type === "date" ? 'placeholder="YYYY-MM-DD 또는 {yesterday}"' : ""}>`;
+  return `<label>${lab}${ctl}</label>`;
+}
+async function execCommand(it, args, prompt, mode = "auto") {
+  if (it.kind === "command") {
+    if (it.name === "new") { newChat(); toast("새 대화"); }
+    if (it.name === "help") {
+      chatLog.insertAdjacentHTML("beforeend", `<div class="answer">${md("## / 명령 사용법\n- 입력창에 **/** 를 치면 등록된 **스킬**과 **기능(도구)** 목록이 나옵니다. ↑↓ 로 고르고 Enter/Tab.\n- 바로 실행: `/monthly_sales_report month=2026-10 dept=전체` · `/analyze_file path=downloads/a.xlsx`\n- 입력이 필요하면 입력 카드가 열립니다.\n- **토큰 없이 가능** 표시가 있는 스킬은 steps 워크플로로 LLM 없이 실행되고, 기능(도구)은 모두 LLM 없이 실행됩니다.\n- 현재 LLM: " + (cmdLLM.ready ? "연결됨" : "없음 (" + cmdLLM.reason + ")"))}</div>`);
+      chatLog.scrollTop = chatLog.scrollHeight;
+    }
+    return;
+  }
+  if (chatRun) { toast("실행 중입니다. 끝난 뒤 다시 시도하세요."); return; }
+  const label = `/${it.name} ${Object.entries(args).map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join(" ")}${prompt ? " · " + prompt : ""}`;
+  chatLog.insertAdjacentHTML("beforeend", `<div class="msg-user">${esc(label)}</div>`);
+  $("#chat-send").disabled = true; $("#chat-cancel").classList.remove("hidden");
+  const view = new RunView(chatLog, {onDone: () => { chatRun = null; $("#chat-send").disabled = false; $("#chat-cancel").classList.add("hidden"); loadSessions(); }});
+  chatRun = view;
+  try {
+    const body = it.kind === "skill" ? {skill: it.name, inputs: args, prompt, mode, new_session: true} : {tool: it.name, args, session_id: chatSession};
+    const run = await view.start(body);
+    chatSession = run.session_id; $("#chat-session").textContent = (it.kind === "skill" ? "스킬 " : "기능 ") + "/" + it.name;
+  } catch (e) { chatLog.insertAdjacentHTML("beforeend", `<div class="b-err">오류: ${esc(e.message)}</div>`); chatRun = null; $("#chat-send").disabled = false; $("#chat-cancel").classList.add("hidden"); }
+}
 
 // ---- 내 작업 (저장된 대화) : 클릭하면 불러와서 이어서
 async function loadSessions() {
@@ -762,7 +940,7 @@ async function saveSkill() {
   if (!skCurrent) return false;
   try {
     const r = await api(`/api/skills/${encodeURIComponent(skCurrent)}`, {method: "PUT", json: {content: editor.value}});
-    skSaved = editor.value; markDirty(); applyParsed(r.parsed, null);
+    skSaved = editor.value; markDirty(); applyParsed(r.parsed, null); cmdCache = null;
     const d = await api(`/api/skills/${encodeURIComponent(skCurrent)}`);
     $("#sk-history").innerHTML = `<option value="">이전 버전 (${d.history.length})</option>` + d.history.map(h => `<option>${esc(h)}</option>`).join("");
     loadSkills(); return true;
@@ -931,7 +1109,7 @@ $("#t-new").onclick = () => {
 };
 $("#t-save").onclick = async () => {
   let params; try { params = JSON.parse($("#t-params").value || "{}"); } catch (e) { return alert("인자 스키마 JSON 오류: " + e.message); }
-  try { await api(`/api/ctools/${encodeURIComponent(tCurrent)}`, {method: "PUT", json: {description: $("#t-desc").value, parameters: params, code: $("#t-code").value}}); tSaved = ""; await loadTools(tCurrent); }
+  try { await api(`/api/ctools/${encodeURIComponent(tCurrent)}`, {method: "PUT", json: {description: $("#t-desc").value, parameters: params, code: $("#t-code").value}}); tSaved = ""; cmdCache = null; await loadTools(tCurrent); }
   catch (e) { $("#t-check").innerHTML = `<span class="b-err">저장 실패: ${esc(e.message)}</span>`; }
 };
 $("#t-delete").onclick = async () => {
@@ -1113,6 +1291,8 @@ $("#st-refresh").onclick = loadStatus;
   $("#userlabel").textContent = currentUser || "사용자 ID 입력";
   try {
     const info = await api("/api/info");
+    if (!info.auth && !tokenEl.value) tokenEl.classList.add("hidden");  // 서버에 API 토큰이 없으면 입력칸 숨김 (토큰 없이 사용)
+    cmdLLM = info.llm || cmdLLM; updateLLMBadge();
     if (!info.users.enabled) $("#userchip").classList.add("hidden");
     else if (!currentUser && info.users.require) askUser(true);
   } catch (e) { if (String(e.message).includes("사용자 ID")) askUser(true); }

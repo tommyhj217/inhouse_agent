@@ -53,6 +53,9 @@ class RunRequest(BaseModel):
     inputs: dict[str, Any] | None = None
     new_session: bool = False
     images: list[str] | None = None  # /api/images/upload 로 올린 이미지 경로
+    mode: str = "auto"  # auto(LLM 있으면 에이전트, 없으면 워크플로) | agent | workflow
+    tool: str | None = None  # 도구(기능) 직접 실행 - LLM 불필요
+    args: dict[str, Any] | None = None
 
 
 class RulebookCreate(BaseModel):
@@ -159,6 +162,10 @@ class Run:
     answer_future: asyncio.Future[str] | None = None
     saved_to: str | None = None
     user: str | None = None
+    mode: str = "auto"
+    tool: str | None = None
+    args: dict[str, Any] | None = None
+    skill_start: bool = False  # 이번 요청이 스킬 실행 자체인지 (아니면 스킬 대화에 이어서 하는 말)
     cond: asyncio.Condition = field(default_factory=asyncio.Condition)
 
     async def push(self, kind: str, data: dict[str, Any]) -> None:
@@ -240,9 +247,18 @@ class RunManager:
             sess.skill = None
         if req.servers is not None:
             sess.servers = req.servers
-        kind = "skill" if sess.skill else "chat"
-        title = (req.prompt or f"[스킬] {sess.skill}")[:80]
-        run = Run(uuid.uuid4().hex[:12], sess.id, kind, title, user=sess.user)
+        if req.mode not in ("auto", "agent", "workflow"):
+            raise SkillError("mode 는 auto / agent / workflow 중 하나입니다.")
+        if req.tool:
+            if self.rt.hub.route_of(req.tool) is None:
+                raise SkillError(f"알 수 없는 도구입니다: {req.tool}")
+            kind, title = "tool", f"/{req.tool} " + json.dumps(req.args or {}, ensure_ascii=False)[:60]
+        else:
+            if req.mode == "agent" and not self.rt.llm_status()[0]:
+                raise SkillError(f"LLM 을 쓸 수 없습니다: {self.rt.llm_status()[1]}")
+            kind = "skill" if sess.skill else "chat"
+            title = (req.prompt or f"[스킬] {sess.skill}")[:80]
+        run = Run(uuid.uuid4().hex[:12], sess.id, kind, title, user=sess.user, mode=req.mode, tool=req.tool, args=req.args, skill_start=bool(req.skill))
         self.runs[run.id] = run
         run.task = asyncio.create_task(self._execute(run, sess, req.prompt, images))
         return run
@@ -268,20 +284,35 @@ class RunManager:
                 run.status = "running"
             return answer
 
-        await run.push("start", {"kind": run.kind, "prompt": prompt, "skill": sess.skill, "inputs": sess.inputs,
+        await run.push("start", {"kind": run.kind, "prompt": prompt, "skill": sess.skill if run.kind != "tool" else None, "inputs": sess.inputs, "tool": run.tool, "mode": run.mode,
                                  "session_id": sess.id, "images": images or [], "user": sess.user})
         result = None
         try:
             async with sess.lock:
                 sess.touched = time.time()
-                if sess.skill:
+                ready, why = self.rt.llm_status()
+                if run.kind == "tool":  # 도구 직접 실행 (LLM/토큰 불필요)
+                    step = {"id": "t", "tool": run.tool, "args": run.args or {}, "on_error": "continue", "title": run.tool}
+                    result = await self.rt.run_workflow([step], {}, title=f"/{run.tool}", on_event=on_event, ask=ask)
+                    sess.messages = (sess.messages or []) + result.messages
+                elif sess.skill and (run.skill_start or ready):  # LLM 이 없으면 스킬 대화의 후속 말은 워크플로를 다시 돌리지 않음
                     result, path = await self.rt.run_skill(
                         sess.skill, sess.inputs, prompt, on_event=on_event, ask=ask,
-                        messages=sess.messages if sess.messages else None, save=True, images=images,
+                        messages=sess.messages if sess.messages else None, save=True, images=images, mode=run.mode,
                     )
                     if not sess.messages:
                         sess.messages = result.messages
+                    elif result.messages and result.messages is not sess.messages:
+                        sess.messages = sess.messages + result.messages  # 워크플로 결과도 대화에 이어 붙임
                     run.saved_to = str(path) if path else None
+                elif not ready:
+                    from .agent import AgentResult
+
+                    msg = (f"LLM 이 연결되어 있지 않아(사유: {why}) 자유 질문에는 답할 수 없습니다.\n\n"
+                           "토큰 없이 쓰는 방법:\n- 입력창에 **/** 를 치면 스킬과 기능(도구) 목록이 나옵니다.\n"
+                           "- 워크플로(steps)가 있는 스킬과 모든 도구는 LLM 없이 바로 실행됩니다.")
+                    await on_event("final", {"content": msg})
+                    result = AgentResult(msg, [], stopped_reason="completed")
                 else:
                     if not sess.messages:
                         sess.messages = self.rt.agent.new_conversation(sess.servers)
@@ -319,7 +350,8 @@ class RunManager:
         done = next((e for e in reversed(run.events) if e["type"] == "done"), {})
         turn = {
             "time": time.time(),
-            "prompt": prompt or (f"[스킬 실행] {sess.skill} {json.dumps(sess.inputs or {}, ensure_ascii=False)}" if sess.skill else ""),
+            "prompt": prompt or (f"/{run.tool} {json.dumps(run.args or {}, ensure_ascii=False)}" if run.kind == "tool" else
+                                 f"/{sess.skill} {json.dumps(sess.inputs or {}, ensure_ascii=False)}" if sess.skill else ""),
             "images": images or [],
             "status": run.status,
             "output": done.get("output", ""),
@@ -473,9 +505,28 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
             "skills_dir": str(rt.skills.root),
             "public_url": rt.links.public_url,
             "users": {"enabled": rt.users_cfg.enabled, "require": rt.users_cfg.require},
+            "llm": {"ready": rt.llm_status()[0], "reason": rt.llm_status()[1]},
             "user": current_user.get(),
             "auth": bool(token),
         }
+
+    # ---------------- / 명령 (스킬·도구) ----------------
+    @app.get("/api/commands", dependencies=A)
+    async def commands() -> dict[str, Any]:
+        """채팅창 / 메뉴: 등록된 스킬 + 도구(기능) + 내장 명령. LLM 없이 실행 가능한지도 표시."""
+        ready, why = rt.llm_status()
+        skills, errors = rt.skills.list()
+        items: list[dict[str, Any]] = [
+            {"kind": "command", "name": "new", "description": "새 대화 시작", "offline": True},
+            {"kind": "command", "name": "help", "description": "/ 명령 사용법", "offline": True},
+        ]
+        for sk in skills:
+            items.append({"kind": "skill", "name": sk.name, "description": sk.description, "inputs": [i.to_dict() for i in sk.inputs],
+                          "workflow": bool(sk.steps), "steps": len(sk.steps), "offline": bool(sk.steps)})
+        for t in rt.hub.openai_tools():
+            f = t["function"]
+            items.append({"kind": "tool", "name": f["name"], "description": f["description"], "parameters": f["parameters"], "offline": True})
+        return {"llm": {"ready": ready, "reason": why}, "items": items, "skill_errors": errors}
 
     # ---------------- 사용자 / 세션 ----------------
     @app.get("/api/me", dependencies=A)
@@ -658,8 +709,8 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
     # ---------------- 실행(대화/스킬) ----------------
     @app.post("/api/runs", dependencies=A)
     async def start_run(req: RunRequest) -> dict[str, Any]:
-        if not req.prompt.strip() and not req.skill:
-            raise HTTPException(400, "prompt 또는 skill 이 필요합니다.")
+        if not req.prompt.strip() and not req.skill and not req.tool:
+            raise HTTPException(400, "prompt, skill 또는 tool 이 필요합니다.")
         try:
             run = await mgr.start(req)
         except (SkillError, UserError, PermissionError) as e:

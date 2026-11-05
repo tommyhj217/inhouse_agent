@@ -7,6 +7,7 @@
 # =====================================================================
 
 llm:
+  # provider: none                                # LLM(토큰) 없이 쓰기: 채팅창 / 명령으로 스킬 워크플로·도구만 실행 (사내 테스트용)
   # --- Azure OpenAI ---
   endpoint: ${AZURE_OPENAI_ENDPOINT}
   base_url: ${AZURE_OPENAI_BASE_URL:-}          # APIM 게이트웨이 사용 시에만

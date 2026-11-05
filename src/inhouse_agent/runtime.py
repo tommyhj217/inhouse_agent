@@ -171,6 +171,25 @@ class AgentRuntime:
             self._agent.rules_path = self.rules_path
         return self._agent
 
+    def llm_status(self) -> tuple[bool, str]:
+        """LLM(Azure) 을 쓸 수 있는 설정인지. (가능?, 이유) - 토큰/키 없이도 워크플로·도구 직접 실행은 가능."""
+        if self._llm is not None:
+            return True, "사용 가능"
+        if str(getattr(self.cfg.llm, "provider", "azure")).lower() in ("none", "off", "offline"):
+            return False, "llm.provider: none (LLM 없이 사용하는 설정)"
+        try:
+            self.cfg.llm.validate()
+        except Exception as e:  # noqa: BLE001
+            return False, str(e)
+        return True, "사용 가능"
+
+    async def run_workflow(self, steps: list[dict[str, Any]], inputs: dict[str, Any], *, title: str = "", output_template: str | None = None,
+                           on_event: EventCallback | None = None, ask: AskFn | None = None) -> AgentResult:
+        from .workflow import run_workflow
+
+        return await run_workflow(self.hub, steps, inputs, timezone=self.cfg.agent.timezone, output_template=output_template,
+                                  title=title, on_event=on_event, ask=ask, max_chars=self.cfg.agent.max_tool_result_chars)
+
     def sessions(self) -> SessionStore:
         """현재 사용자(없으면 공용)의 대화 세션 저장소."""
         return SessionStore(self.workspace)
@@ -241,12 +260,28 @@ class AgentRuntime:
         messages: list[dict[str, Any]] | None = None,
         save: bool = True,
         images: list[str] | None = None,
+        mode: str = "auto",
     ) -> tuple[AgentResult, Path | None]:
         """스킬 1회 실행 (테스트용). 결과는 outputs/skill_<이름>/ (사용자면 그 사용자의 results/) 에 저장."""
         skill = self.skills.get(name)
-        result = await self.agent.run(
-            prompt, messages=messages, on_event=on_event, ask=ask, skill=skill, skill_inputs=inputs, images=images
-        )
+        ready, why = self.llm_status()
+        use_workflow = mode == "workflow" or (mode == "auto" and not ready)
+        if use_workflow:
+            if not skill.steps:
+                from .skills import SkillError
+
+                raise SkillError(
+                    f"LLM 을 쓸 수 없어({why}) 스킬 '{name}' 을 실행할 수 없습니다. "
+                    "토큰 없이 테스트하려면 SKILL.md 에 steps(실행 단계)를 추가하세요."
+                    if not ready else f"스킬 '{name}' 에는 steps(실행 단계)가 없어 워크플로로 실행할 수 없습니다."
+                )
+            vals = skill.resolve_inputs(inputs, self.cfg.agent.timezone)
+            result = await self.run_workflow(skill.steps, vals, title=f"[스킬] {name}", output_template=skill.output_template, on_event=on_event, ask=ask)
+            result.skills_used = [name]
+        else:
+            result = await self.agent.run(
+                prompt, messages=messages, on_event=on_event, ask=ask, skill=skill, skill_inputs=inputs, images=images
+            )
         path = None
         if save:
             label = prompt or f"[스킬 실행] {name} 입력값={json.dumps(inputs or {}, ensure_ascii=False)}"

@@ -127,7 +127,10 @@ def tool_result_to_text(result: Any, saver: BlobSaver | None = None) -> tuple[st
                 parts.append(f"[리소스 {res.get('uri', '')}]\n{res['text']}")
             elif res.get("blob"):
                 uri = str(res.get("uri", ""))
-                name = uri.rstrip("/").split("/")[-1] or "download"
+                import urllib.parse
+
+                # SDK 버전에 따라 URI 의 한글이 %인코딩되어 오므로 원래 이름으로 복원
+                name = urllib.parse.unquote(uri.split("?")[0].rstrip("/").split("/")[-1]) or "download"
                 note = _save(res["blob"], name, res.get("mimeType"))
                 parts.append(f"[바이너리 리소스 {uri} {res.get('mimeType', '')} - {note}]")
             else:

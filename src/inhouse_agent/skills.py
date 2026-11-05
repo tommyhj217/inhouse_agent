@@ -75,6 +75,9 @@ class Skill:
     inputs: list[SkillInput] = field(default_factory=list)
     raw: str = ""
     meta: dict[str, Any] = field(default_factory=dict)
+    steps: list[dict[str, Any]] = field(default_factory=list)
+    """LLM 없이 실행할 단계 (workflow.py). 비어 있으면 LLM 이 지침(body)을 보고 실행."""
+    output_template: str | None = None
 
     @property
     def files(self) -> list[str]:
@@ -125,6 +128,8 @@ class Skill:
             "inputs": [i.to_dict() for i in self.inputs],
             "files": self.files,
             "path": str(self.path),
+            "steps": len(self.steps),
+            "workflow": bool(self.steps),
         }
 
 
@@ -168,6 +173,12 @@ def parse_skill(text: str, folder: Path) -> Skill:
     dup = sorted({n for n in names if names.count(n) > 1})
     if dup:
         raise SkillError(f"입력 이름이 중복됩니다: {', '.join(dup)}")
+    from .workflow import WorkflowError, validate_steps
+
+    try:
+        steps = validate_steps(meta.get("steps"))
+    except WorkflowError as e:
+        raise SkillError(str(e)) from e
     servers = meta.get("servers")
     return Skill(
         name=name,
@@ -178,6 +189,8 @@ def parse_skill(text: str, folder: Path) -> Skill:
         inputs=inputs,
         raw=text,
         meta=meta,
+        steps=steps,
+        output_template=str(meta["output"]) if meta.get("output") else None,
     )
 
 
@@ -191,6 +204,16 @@ inputs:
     type: date
     default: "{{yesterday}}"
     required: true
+# (선택) LLM 없이(토큰 없이) 실행할 단계 - 채팅창에서 /{name} 으로 바로 테스트
+# steps:
+#   - id: s1
+#     tool: get_current_time
+#   - id: s2
+#     tool: list_downloads
+#     args: {{recent_minutes: 60}}
+# output: |
+#   {{date}} 결과
+#   {{steps.s2.text}}
 ---
 # 목표
 {description}

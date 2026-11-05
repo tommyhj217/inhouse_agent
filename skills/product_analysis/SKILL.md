@@ -16,6 +16,23 @@ inputs:
   - name: template
     label: 디자인 템플릿 (과거 PPT, 선택)
     type: file
+# LLM 없이(토큰 없이) 실행: 장별 계획과 이전 제품 기록까지 (조사·작성·검증은 LLM 이 있을 때 지침대로)
+steps:
+  - id: plan
+    title: 장별 계획
+    tool: rulebook_outline
+    args: {name: "{rulebook}", product: "{product}"}
+  - id: products
+    title: 이전에 분석한 제품
+    tool: rulebook_show
+    args: {name: "{rulebook}", view: products}
+output: |
+  {steps.plan.text}
+
+  ## 이전에 분석한 제품 기록
+  {steps.products.text}
+
+  ※ LLM 없이 실행해서 계획까지만 만들었습니다. 장별로 자료를 모아 write_pptx 로 작성한 뒤 /rulebook_validate 로 검증할 수 있습니다.
 ---
 # 목표
 '{rulebook}' 규칙집 기준으로 '{product}' 분석 보고서를 만들고, 규칙을 지켰는지 검증한 뒤, 이번 분석에서 배운 점을 규칙집에 반영한다.
