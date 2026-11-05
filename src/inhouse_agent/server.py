@@ -12,7 +12,6 @@ import asyncio
 import json
 import os
 import re
-import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -28,7 +27,7 @@ from .skills import SkillError
 from .users import UserError, current_user
 
 try:
-    from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+    from fastapi import FastAPI, HTTPException, Query, Request
     from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
     from pydantic import BaseModel
 except ImportError as e:  # pragma: no cover
@@ -493,7 +492,6 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
     rt = runtime or AgentRuntime(cfg)
     sched = AgentScheduler(rt)
     mgr = RunManager(rt)
-    token = os.environ.get("AGENT_API_TOKEN", "")
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -515,15 +513,8 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
     app.state.runtime = rt
     app.state.runs = mgr
 
-    def auth(authorization: str = Header(default=""), token_q: str | None = Query(default=None, alias="token")) -> None:
-        if not token:
-            return
-        # EventSource/다운로드 링크는 헤더를 못 붙이므로 ?token= 도 허용
-        if secrets.compare_digest(authorization, f"Bearer {token}") or (token_q and secrets.compare_digest(token_q, token)):
-            return
-        raise HTTPException(status_code=401, detail="인증 실패 (API 토큰 확인)")
-
-    A = [Depends(auth)]
+    # 사내 전용: 별도 인증(API 토큰) 없이 접속하면 바로 사용. 사용자 구분은 사용자 ID(작업폴더)로만 함.
+    A: list[Any] = []
 
     # ---------------- 기본 ----------------
     @app.get("/health")
@@ -547,7 +538,6 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
             "can_edit_skills": rt.can_edit_skills(),
             "api": API_VERSION,  # 화면(index.html)과 서버 코드 버전 확인용 - 다르면 서버 재시작 필요
             "user": current_user.get(),
-            "auth": bool(token),
         }
 
     # ---------------- / 명령 (스킬·도구) ----------------

@@ -109,7 +109,7 @@ def test_web_slash_commands_offline(tmp_path: Path) -> None:
 
     with TestClient(app) as c:
         info = c.get("/api/info").json()
-        assert info["auth"] is False and info["llm"]["ready"] is False  # 토큰 없이 사용
+        assert "auth" not in info and info["llm"]["ready"] is False  # 토큰 없이 사용
         cmds = c.get("/api/commands", headers=H).json()
         by = {(x["kind"], x["name"]): x for x in cmds["items"]}
         assert by[("skill", "monthly_sales_report")]["offline"] is True and by[("skill", "monthly_sales_report")]["steps"] == 4

@@ -107,7 +107,7 @@ def test_web_links_scan_and_signed_download(tmp_path: Path, monkeypatch) -> None
 
     from inhouse_agent.server import create_app
 
-    monkeypatch.setenv("AGENT_API_TOKEN", "secret-token")
+    monkeypatch.setenv("AGENT_API_TOKEN", "secret-token")  # 예전 설정이 남아 있어도 인증 없이 동작해야 함
     cfg = load_config(_cfg(tmp_path, "server:\n  public_url: http://agent.local:8080\n"))
     rt = AgentRuntime(cfg, llm=ScriptedLLM([]))
     (rt.workspace.files / "reports").mkdir(parents=True)
@@ -117,7 +117,8 @@ def test_web_links_scan_and_signed_download(tmp_path: Path, monkeypatch) -> None
     app = create_app(cfg, runtime=rt, enable_scheduler=False)
     H = {"Authorization": "Bearer secret-token"}
     with TestClient(app) as c:
-        assert c.post("/api/files/scan", json={"text": "x"}).status_code == 401
+        assert c.post("/api/files/scan", json={"text": "x"}).status_code == 200  # 토큰 없이 접속
+        assert c.post("/api/files/scan", json={"text": "x"}, headers={"Authorization": "Bearer wrong"}).status_code == 200
         text = f"엑셀은 {f} 에 저장했고, 차트는 files/reports/chart.png 입니다. 없는파일 /tmp/none.xlsx"
         found = c.post("/api/files/scan", json={"text": text}, headers=H).json()
         matches = {x["match"]: x for x in found}

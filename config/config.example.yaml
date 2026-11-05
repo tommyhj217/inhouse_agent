@@ -69,11 +69,12 @@ rules:
 # ---------------------------------------------------------------------
 # 사용자별 작업폴더 (workspace/users/<ID>/ : downloads, uploads, files, results, sessions, memory.json)
 #   웹 화면 오른쪽 위에서 ID 입력, CLI 는 -u <ID>. 대화는 sessions/ 에 저장되어 '내 작업' 에서 이어서 진행.
-#   ※ ID 는 인증이 아닙니다(사내 식별용). 접근 통제가 필요하면 AGENT_API_TOKEN 과 함께 쓰세요.
+#   ※ 별도 인증(API 토큰·비밀번호) 없이 접속하면 바로 쓰고, 웹 화면은 처음 접속할 때 ID 를 물어봅니다(사내 식별용).
+#     허용할 ID 를 제한하려면 users.allowed 를 쓰세요.
 # ---------------------------------------------------------------------
 users:
   enabled: true
-  require: false                # true 면 ID 없이는 API 사용 불가 (화면에서 ID 를 먼저 물어봄)
+  require: false                # true 면 ID 없는 API 호출(스크립트 등)도 거부. 웹 화면은 항상 ID 를 먼저 물어봄
   allowed: []                   # 허용 ID 패턴 (비우면 모두). 예: ["2023*", "*.hj"]
   claim_downloads: move         # 공용 다운로드 폴더(MCP 저장 위치)에 생긴 파일을 요청한 사용자 폴더로: move | copy | none
   recent_sessions_in_prompt: 5  # 시스템 프롬프트에 넣을 '최근 작업' 개수

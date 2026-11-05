@@ -195,7 +195,6 @@ table.grid select{padding:2px 4px;font-size:12px}
   <div class="right">
     <span id="llmbadge" class="badge llmbadge hidden"></span>
     <span id="userchip" class="userchip" title="사용자 바꾸기">👤 <span id="userlabel">사용자 ID 입력</span></span>
-    <input id="token" type="password" placeholder="API 토큰" style="width:130px" title="AGENT_API_TOKEN 을 설정한 경우 입력">
     <button id="theme" title="밝게/어둡게">◐</button>
   </div>
 </header>
@@ -397,9 +396,7 @@ const store = {
   get(k, d){ try { const v = localStorage.getItem(k); return v === null ? d : v; } catch { return d; } },
   set(k, v){ try { localStorage.setItem(k, v); } catch {} },
 };
-const tokenEl = $("#token");
-tokenEl.value = store.get("agent_token", "");
-tokenEl.onchange = () => store.set("agent_token", tokenEl.value);
+try { localStorage.removeItem("agent_token"); } catch {}  // 예전 API 토큰 기록 정리 (인증 없이 사용)
 const theme = store.get("agent_theme", "");
 if (theme) document.documentElement.dataset.theme = theme;
 $("#theme").onclick = () => {
@@ -412,7 +409,6 @@ $("#theme").onclick = () => {
 let currentUser = store.get("agent_user", "");
 async function api(path, opts={}) {
   const headers = Object.assign({}, opts.headers || {});
-  if (tokenEl.value) headers["Authorization"] = "Bearer " + tokenEl.value;
   if (currentUser) headers["X-Agent-User"] = encodeURIComponent(currentUser);
   if (opts.json !== undefined) { headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(opts.json); }
   const r = await fetch(path, {method: opts.method || (opts.body ? "POST" : "GET"), headers, body: opts.body});
@@ -431,7 +427,7 @@ function staleBanner(serverApi) {
   document.body.insertAdjacentHTML("afterbegin", `<div class="stale">⚠ 서버가 이전 버전으로 실행 중입니다 (화면 v${UI_API} / 서버 v${serverApi ?? "?"}). 코드를 받은 뒤에는 서버를 다시 시작해야 새 기능(스킬 가져오기 등)이 동작합니다. <b>서버 창에서 Ctrl+C 후 다시 실행</b>하세요.</div>`);
 }
 const withToken = url => {  // EventSource / 링크는 헤더를 못 붙이므로 쿼리로
-  const q = []; if (tokenEl.value) q.push("token=" + encodeURIComponent(tokenEl.value)); if (currentUser) q.push("user=" + encodeURIComponent(currentUser));
+  const q = []; if (currentUser) q.push("user=" + encodeURIComponent(currentUser));
   return q.length ? url + (url.includes("?") ? "&" : "?") + q.join("&") : url;
 };
 const fileUrl = (path, inline) => withToken("/api/files/download?path=" + encodeURIComponent(path) + (inline ? "&inline=true" : ""));
@@ -961,9 +957,9 @@ function setUser(uid) {
 }
 function askUser(force) {
   const m = document.createElement("div"); m.className = "modal";
-  m.innerHTML = `<div class="card"><b>사용자 ID</b><div class="small muted" style="margin:6px 0">사번이나 사내 ID 를 입력하세요. 사용자별 작업폴더가 만들어지고, 했던 작업을 다음에 이어서 할 수 있습니다.</div>
+  m.innerHTML = `<div class="card"><b>사용자 ID</b><div class="small muted" style="margin:6px 0">사번이나 사내 ID 를 입력하세요 (비밀번호·인증 없음). 사용자별 작업폴더가 만들어지고, 같은 ID 로 접속하면 했던 작업을 이어서 할 수 있습니다. 바꾸려면 오른쪽 위 👤 를 누르세요.</div>
     <div class="row"><input id="uid-in" class="grow" value="${esc(currentUser)}" placeholder="예) kim.hj 또는 20231234"><button id="uid-ok" class="primary">확인</button></div>
-    <div id="uid-err" class="small b-err"></div>${force ? "" : '<div class="small" style="margin-top:6px"><a href="#" id="uid-none">사용자 없이 쓰기 (공용 폴더)</a></div>'}</div>`;
+    <div id="uid-err" class="small b-err"></div>${force ? "" : '<div class="small" style="margin-top:6px"><a href="#" id="uid-cancel">취소</a></div>'}</div>`;
   document.body.appendChild(m);
   const inp = m.querySelector("#uid-in"); inp.focus(); inp.select();
   const ok = async () => {
@@ -972,7 +968,7 @@ function askUser(force) {
     try { await api("/api/me"); m.remove(); setUser(v); } catch (e) { currentUser = prev; m.querySelector("#uid-err").textContent = e.message; }
   };
   m.querySelector("#uid-ok").onclick = ok; inp.onkeydown = e => { if (e.key === "Enter") ok(); };
-  const none = m.querySelector("#uid-none"); if (none) none.onclick = e => { e.preventDefault(); m.remove(); setUser(""); };
+  const cancel = m.querySelector("#uid-cancel"); if (cancel) cancel.onclick = e => { e.preventDefault(); m.remove(); };
 }
 $("#userchip").onclick = () => askUser(false);
 
@@ -1578,11 +1574,10 @@ $("#st-refresh").onclick = loadStatus;
   try {
     const info = await api("/api/info");
     staleBanner(info.api);
-    if (!info.auth && !tokenEl.value) tokenEl.classList.add("hidden");  // 서버에 API 토큰이 없으면 입력칸 숨김 (토큰 없이 사용)
     cmdLLM = info.llm || cmdLLM; updateLLMBadge();
     applyEditPermission(info.can_edit_skills !== false);
     if (!info.users.enabled) $("#userchip").classList.add("hidden");
-    else if (!currentUser && info.users.require) askUser(true);
+    else if (!currentUser) askUser(true);  // 처음 접속하면 사용자 ID 를 물어봄 → 사용자별 작업폴더
   } catch (e) { if (String(e.message).includes("사용자 ID")) askUser(true); }
   loadSessions();
   if (!chatSession) renderWelcome();

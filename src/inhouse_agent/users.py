@@ -5,7 +5,7 @@
   '지금 사용자의' 작업폴더를 씁니다 (MCP 연결, 스킬, 동적 도구는 모두가 공유).
 - 대화(세션)는 sessions/<id>.json 에 저장되어 다음에 그대로 이어서 할 수 있습니다.
 
-※ 사용자 ID 는 인증이 아닙니다 (사내 식별용). 접근 통제가 필요하면 AGENT_API_TOKEN 과 함께 쓰세요.
+※ 사용자 ID 는 인증이 아닙니다 (사내 식별용, 비밀번호 없음). 허용할 ID 는 users.allowed 패턴으로 제한할 수 있습니다.
 """
 
 from __future__ import annotations

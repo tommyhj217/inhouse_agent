@@ -256,7 +256,7 @@ class SkillScriptRunner:
             env.update(extra_env or {})
             for k in [k for k, v in env.items() if v == ""]:
                 env.pop(k)  # 빈 값(예: 사용자 ID 없음)은 넘기지 않음 → 스크립트 기본값 사용
-            for k in [k for k in env if k.upper() in ("AZURE_OPENAI_API_KEY", "AGENT_API_TOKEN")]:
+            for k in [k for k in env if k.upper() in ("AZURE_OPENAI_API_KEY", "AGENT_API_TOKEN", "AGENT_GIT_TOKEN")]:
                 env.pop(k, None)  # 비밀값은 스크립트에 넘기지 않음
             proc = await asyncio.create_subprocess_exec(
                 *cmd, cwd=str(sdir if cwd == "skill" else out_dir), env=env,

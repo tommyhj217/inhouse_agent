@@ -276,7 +276,7 @@ inputs:                        # (선택) 웹 UI 입력 폼으로 표시
 
 ### REST API (`serve`)
 
-`.env`에 `AGENT_API_TOKEN`을 설정하면 모든 `/api/*` 요청에 `Authorization: Bearer <토큰>` 헤더가 필요합니다.
+별도 인증(API 토큰) 없이 호출합니다. 사용자별 작업폴더를 쓰려면 `X-Agent-User: <ID>` 헤더(또는 `?user=<ID>`)를 붙이세요.
 
 | 메서드 | 경로 | 설명 |
 |---|---|---|
@@ -406,7 +406,7 @@ def run(args, ctx):
 | 승인 모드 | `dynamic_tools.mode`: `approve`(기본, 사용자 승인), `auto`(자동), `off`(사용 안 함). 예약작업처럼 사람이 없는 실행에서는 approve 모드일 때 새 도구를 만들지 않고, 이미 저장된 도구만 씁니다. |
 
 > ⚠️ 이 장치는 프로세스 격리, 정적 검사, 승인 절차를 합친 것이고, **완전한 보안 샌드박스는 아닙니다**.
-> 신뢰할 수 있는 사내 서버에서 운영하고, 웹 UI를 다른 사람과 같이 쓰면 반드시 `AGENT_API_TOKEN`을 설정하세요.
+> 신뢰할 수 있는 사내망에서만 운영하세요. 웹 화면은 인증 없이 접속되므로, 사내망 밖으로 포트를 열지 마세요.
 > 웹 UI의 도구 탭에서는 코드를 직접 실행할 수 있습니다. 운영 환경에서는 `approve` 모드를 권장합니다.
 
 도구 관리:
@@ -498,8 +498,9 @@ downloads/  uploads/images/  uploads/attachments/  files/  results/  sessions/  
 
 - PC가 절전 모드에 들어가면 서비스가 끊깁니다. Windows 전원 설정에서 "절전 안 함"으로 두세요.
 - 부팅할 때 자동으로 켜려면 **작업 스케줄러**에 `scripts\start_server.bat`을 "로그온할 때"로 등록합니다.
-- 접근을 제한하려면 `.env`에 `AGENT_API_TOKEN`을 설정하고(사용자는 화면에 토큰을 입력), `users.allowed`로 허용할 ID 패턴을 정합니다.
-  - 토큰을 쓰지 않으면 입력칸은 숨겨집니다.
+- 별도 인증(API 토큰, 비밀번호)은 없습니다. 주소로 접속하면 바로 쓰고, 처음 접속할 때 사용자 ID를 입력하면 그 ID의 작업폴더(`workspace/users/<ID>/`)를 씁니다.
+  - 같은 ID로 다시 접속하면 이전 작업을 이어서 합니다. ID는 오른쪽 위 👤에서 바꿉니다.
+  - 허용할 ID를 제한하려면 `users.allowed`로 ID 패턴을 정합니다.
 - MCP 서버(웹컨트롤)는 여러 사용자가 같이 씁니다. 같은 사이트에 대한 호출은 자동으로 순서대로 처리되고, 받은 파일은 요청한 사람의 폴더로 옮겨집니다.
 
 **CLI**: `inhouse-agent chat`에서 `/`만 입력하면 스킬 목록이 나오고, `/스킬이름 key=value`로 실행하며, `/도구이름 key=value`로 기능을 직접 실행합니다.
@@ -525,7 +526,6 @@ downloads/  uploads/images/  uploads/attachments/  files/  results/  sessions/  
   - 도구(기능)는 모두 실행됩니다.
   - `steps`가 있는 스킬도 실행됩니다.
   - 자유 질문에는 사용법을 안내합니다.
-- 서버에 `AGENT_API_TOKEN`이 없으면 화면의 API 토큰 입력칸은 숨겨집니다. 토큰 없이 그대로 씁니다.
 
 **스킬 워크플로** (`SKILL.md` 머리말)
 
