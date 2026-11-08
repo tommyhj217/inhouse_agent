@@ -127,6 +127,10 @@ class AgentRuntime:
         self.hub.downloader = self.downloader
         if any(c.is_remote for c in self.hub.connections.values()):
             self.hub.builtins.append(self._fetch_remote_tool())
+        if cfg.agent.subagents:  # 큰 작업을 나눠 별도 대화에서 처리 (LLM 이 있을 때만 동작)
+            from .subagent import make_subagent_tool
+
+            self.hub.builtins.append(make_subagent_tool(self))
         self.dynamic.hub = self.hub
         self.dynamic.can_edit = self.can_edit_skills
         if dyn_cfg.mode != "off":

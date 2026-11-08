@@ -134,6 +134,8 @@ class AgentConfig:
     max_history_messages: int = 200  # 넘으면 앞부분을 요약 (토큰 기준 자동 압축과 함께 동작)
     context_window: int = 128000  # 배포 모델의 입력 한도(토큰). 자동 압축 기준
     compact_at: float = 0.75  # 한도의 이 비율을 넘으면 자동 압축
+    subagents: bool = True  # run_subagent (여러 파일·사이트를 나눠 별도 대화에서 처리)
+    subagent_max_iterations: int = 12
     parallel_tool_calls: bool = True
     output_dir: str = "outputs"
     log_dir: str = "logs"
@@ -149,6 +151,8 @@ class AgentConfig:
             max_history_messages=_to_int(d.get("max_history_messages"), 200) or 200,
             context_window=_to_int(d.get("context_window"), 128000) or 128000,
             compact_at=min(0.95, max(0.3, _to_float(d.get("compact_at"), 0.75) or 0.75)),
+            subagents=_to_bool(d.get("subagents"), True),
+            subagent_max_iterations=_to_int(d.get("subagent_max_iterations"), 12) or 12,
             parallel_tool_calls=_to_bool(d.get("parallel_tool_calls"), True),
             output_dir=str(d.get("output_dir") or "outputs"),
             log_dir=str(d.get("log_dir") or "logs"),

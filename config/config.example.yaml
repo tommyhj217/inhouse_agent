@@ -38,6 +38,8 @@ agent:
   max_history_messages: 200     # 대화 메시지가 이보다 많아지면 앞부분을 요약 (지우지 않음)
   context_window: 128000        # 배포 모델의 입력 한도(토큰). 모델에 맞게 (예: 272000, 400000)
   compact_at: 0.75              # 대화가 한도의 75% 를 넘으면 자동 압축: 오래된 도구 결과 줄이기 → 앞 대화 요약
+  subagents: true               # run_subagent: 여러 파일·사이트를 하위 에이전트에게 나눠 맡김 (LLM 있을 때)
+  subagent_max_iterations: 12   # 하위 에이전트 1개의 최대 도구 왕복 횟수
   parallel_tool_calls: true     # 서로 다른 서버는 병렬, 같은 서버는 자동으로 순차 실행
   output_dir: outputs
   log_dir: logs

@@ -502,6 +502,7 @@ class RunView {
     on("answer", d => { this.status.innerHTML = `<span class="badge b-run">실행 중…</span>`; if (d.timeout) this.add(`<div class="small muted">답변 시간 초과 - 기본값 사용</div>`); });
     on("error", d => this.add(`<div class="b-err small">${esc(d.error)}</div>`));
     on("plan", d => this.plan(d));
+    on("subagent", d => this.subagent(d));
     on("compact", d => this.add(`<div class="small muted">🗜 대화가 길어져 자동으로 줄였습니다 (약 ${Number(d.before).toLocaleString()} → ${Number(d.after).toLocaleString()} 토큰${d.masked ? " · 이전 도구 결과 " + d.masked + "개 축약" : ""}${d.summarized ? " · 앞 대화 " + d.summarized + "개 요약" : ""})</div>`));
     on("done", d => this.done(d));
     this.es.onerror = () => { if (this.es && this.es.readyState === 2) this.es = null; };
@@ -534,6 +535,15 @@ class RunView {
     linkifyPaths(el.querySelector(".body pre:last-child"));
     if (d.is_error) el.open = true;
     if (d.view) { this.hadView = true; const box = this.add(renderView(d.view, (d.arguments || {}).name)); bindView(box); }
+  }
+  subagent(d) {  // 하위 에이전트 진행 상황: 작업마다 한 줄
+    this.subs = this.subs || {};
+    let el = this.subs[d.sid];
+    if (!el) { el = this.subs[d.sid] = this.add(`<div class="small muted">🤖 하위 작업 <b>${esc(d.task)}</b> <span class="st">시작</span></div>`); el.tools = 0; }
+    const st = el.querySelector(".st");
+    if (d.event === "tool_end") { el.tools++; st.textContent = `진행 중 · 도구 ${el.tools}회 (${d.tool || ""})`; }
+    else if (d.event === "compact") st.textContent = "진행 중 · 대화 압축";
+    else if (d.event === "done") { st.innerHTML = `${d.status === "completed" ? "완료" : esc(d.status)} · 도구 ${el.tools}회 · ${d.elapsed}s${d.tokens ? " · 토큰 " + Number(d.tokens).toLocaleString() : ""}`; }
   }
   askBox(d) {
     this.status.innerHTML = `<span class="badge b-warn">답변 대기</span>`;

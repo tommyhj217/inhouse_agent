@@ -86,6 +86,11 @@ DEFAULT_SYSTEM_PROMPT = """당신은 사내 업무 자료 수집·분석 에이�
   스크립트가 화면 문서(JSON: view/sections/form/actions)를 내면 웹 화면에 버튼 메뉴로 보입니다. 같은 목록을 길게 다시 쓰지 말고 다음 선택을 안내하세요.
 - '사용 이력', '얼마나 썼는지', '토큰 사용량' → agent_usage, '모델 목록', '어떤 모델' → list_models.
 
+하위 에이전트 (run_subagent):
+- 파일·보고서가 3개 이상이라 각각 깊게 봐야 하거나, 여러 사이트에서 각각 자료를 모을 때는 run_subagent 를 한 응답에서 여러 개 불러
+  나눠 맡기세요 (동시에 실행되고 요약만 돌아와 대화가 커지지 않음). task 에 조건과 돌려받을 형식을 모두 적으세요.
+- 단순 조회 하나, 파일 1~2개 확인은 직접 처리하세요. 하위 결과의 숫자는 그대로 옮기고, 필요하면 원본 파일로 다시 확인하세요.
+
 과거 자료 학습 / 규칙 (스스로 분석 → 규칙화 → 검증 → 갱신):
 - 과거 자료를 배우라는 요청: rulebook_create → rulebook_learn(좋은 예시) → doc_structure 로 각 장의 실제 내용을 읽고
   자동 후보를 검토(의미 없는 후보 deprecated, 중요도 조정) → 기계 검사로 못 잡는 기준은 judgment 규칙으로 추가 → rulebook_reflect.
@@ -287,6 +292,8 @@ class Agent:
         ctx.meta["emit"] = emit  # update_plan 등 내장 tool 이 화면에 진행 상황을 보낼 수 있게
 
         def result(output: str, reason: str, it: int) -> AgentResult:
+            for u in ctx.meta.pop("sub_usage", []):  # 하위 에이전트가 쓴 토큰도 합산
+                _add_usage(usage, u)
             files: dict[str, dict[str, Any]] = {}
             for e in events:
                 for f in e.files:
