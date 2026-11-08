@@ -502,6 +502,7 @@ class RunView {
     on("answer", d => { this.status.innerHTML = `<span class="badge b-run">실행 중…</span>`; if (d.timeout) this.add(`<div class="small muted">답변 시간 초과 - 기본값 사용</div>`); });
     on("error", d => this.add(`<div class="b-err small">${esc(d.error)}</div>`));
     on("plan", d => this.plan(d));
+    on("compact", d => this.add(`<div class="small muted">🗜 대화가 길어져 자동으로 줄였습니다 (약 ${Number(d.before).toLocaleString()} → ${Number(d.after).toLocaleString()} 토큰${d.masked ? " · 이전 도구 결과 " + d.masked + "개 축약" : ""}${d.summarized ? " · 앞 대화 " + d.summarized + "개 요약" : ""})</div>`));
     on("done", d => this.done(d));
     this.es.onerror = () => { if (this.es && this.es.readyState === 2) this.es = null; };
   }
@@ -1541,7 +1542,8 @@ $("#rb-agent").onclick = () => {
 async function loadStatus() {
   try {
     const [info, servers, jobs, runs] = await Promise.all([api("/api/info"), api("/api/servers"), api("/api/jobs"), api("/api/runs")]);
-    $("#st-info").textContent = `배포: ${info.deployment} · 작업폴더: ${info.workspace} · 스킬폴더: ${info.skills_dir}`;
+    $("#st-info").innerHTML = esc(`배포: ${info.deployment} · 작업폴더: ${info.workspace} · 스킬폴더: ${info.skills_dir}`)
+      + (info.editors_set === false ? `<div class="b-warn" style="margin-top:4px">⚠ 편집자(skills.editors)가 지정되지 않아 접속한 모든 사람이 스킬 편집과 코드 실행을 할 수 있습니다. 여러 사람이 쓰면 config.yaml 에 담당자 ID 를 지정하세요.</div>` : "");
     $("#st-servers").innerHTML = servers.map(s => `<div class="card"><div class="row"><b class="grow">${esc(s.name)}</b>${s.connected ? '<span class="badge b-ok">연결됨</span>' : '<span class="badge b-err">끊김</span>'}<button data-re="${esc(s.name)}">재연결</button></div>
       <div class="small muted">${esc(s.transport)} · ${esc(s.description)}</div>${s.error ? `<div class="small b-err">${esc(s.error)}</div>` : ""}
       <div class="small" style="margin-top:4px">${s.tools.map(t => `<code>${esc(t)}</code>`).join(" ")}</div></div>`).join("") || `<div class="muted">설정된 서버 없음</div>`;

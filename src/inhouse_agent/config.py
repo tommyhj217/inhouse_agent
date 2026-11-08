@@ -131,7 +131,9 @@ class AgentConfig:
     system_prompt: str = ""
     max_iterations: int = 25
     max_tool_result_chars: int = 30000
-    max_history_messages: int = 60
+    max_history_messages: int = 200  # 넘으면 앞부분을 요약 (토큰 기준 자동 압축과 함께 동작)
+    context_window: int = 128000  # 배포 모델의 입력 한도(토큰). 자동 압축 기준
+    compact_at: float = 0.75  # 한도의 이 비율을 넘으면 자동 압축
     parallel_tool_calls: bool = True
     output_dir: str = "outputs"
     log_dir: str = "logs"
@@ -144,7 +146,9 @@ class AgentConfig:
             system_prompt=str(d.get("system_prompt") or ""),
             max_iterations=_to_int(d.get("max_iterations"), 25) or 25,
             max_tool_result_chars=_to_int(d.get("max_tool_result_chars"), 30000) or 30000,
-            max_history_messages=_to_int(d.get("max_history_messages"), 60) or 60,
+            max_history_messages=_to_int(d.get("max_history_messages"), 200) or 200,
+            context_window=_to_int(d.get("context_window"), 128000) or 128000,
+            compact_at=min(0.95, max(0.3, _to_float(d.get("compact_at"), 0.75) or 0.75)),
             parallel_tool_calls=_to_bool(d.get("parallel_tool_calls"), True),
             output_dir=str(d.get("output_dir") or "outputs"),
             log_dir=str(d.get("log_dir") or "logs"),

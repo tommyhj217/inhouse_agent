@@ -449,6 +449,10 @@ def make_builtin_tools(
             )
 
         async def run_python(args: dict[str, Any]) -> ToolOutcome:
+            # 서버에서 임의 코드를 실행하므로 도구 만들기(create_tool)와 같은 권한(skills.editors)만 허용
+            if getattr(dyn, "can_edit", None) is not None and not dyn.can_edit():
+                return ToolOutcome("오류: 이 사용자는 파이썬 코드를 실행할 권한이 없습니다 (skills.editors). "
+                                   "이미 있는 도구(custom__*)나 다른 분석 도구(query_table, sql_query 등)를 쓰세요.", True)
             code = str(args.get("code", ""))
             inputs = args.get("args") or {}
             ok, why = await dyn.approve(

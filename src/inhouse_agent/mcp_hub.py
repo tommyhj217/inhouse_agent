@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import hashlib
 import json
 import logging
@@ -411,6 +413,54 @@ class ToolOutcome:
     data: Any = None  # 구조화 결과 (동적 도구의 ctx.call_tool_data 용)
 
 
+_IN_BATON: "contextvars.ContextVar[bool]" = contextvars.ContextVar("in_baton", default=False)
+
+
+class UserBaton:
+    """공용 다운로드 폴더 비교(호출 전후 스냅샷)가 사용자끼리 겹치지 않게 하는 순번.
+
+    같은 사용자의 호출은 동시에 진행하고, 다른 사용자의 호출은 앞 사용자의 호출이 모두 끝난 뒤 시작합니다.
+    다른 사용자가 기다리는 중이면 지금 사용자의 새 호출도 차례를 기다립니다 (한 사람이 계속 독점하지 않게).
+    → A 가 ERP, B 가 그룹웨어를 동시에 써도 B 의 파일이 A 의 '새 파일' 로 잡혀 A 폴더로 옮겨지지 않음."""
+
+    def __init__(self) -> None:
+        self.owner: str | None = None
+        self.active = 0
+        self.waiting: dict[str, int] = {}
+        self._cond: asyncio.Condition | None = None
+
+    def _c(self) -> asyncio.Condition:
+        if self._cond is None:
+            self._cond = asyncio.Condition()
+        return self._cond
+
+    def _can_enter(self, user: str) -> bool:
+        if self.active == 0:
+            return True
+        return self.owner == user and not any(n for u, n in self.waiting.items() if u != user)
+
+    @contextlib.asynccontextmanager
+    async def hold(self, user: str):
+        cond = self._c()
+        async with cond:
+            self.waiting[user] = self.waiting.get(user, 0) + 1
+            try:
+                await cond.wait_for(lambda: self._can_enter(user))
+            finally:
+                self.waiting[user] -= 1
+                if not self.waiting[user]:
+                    del self.waiting[user]
+            self.owner, self.active = user, self.active + 1
+        try:
+            yield
+        finally:
+            async with cond:
+                self.active -= 1
+                if self.active == 0:
+                    self.owner = None
+                cond.notify_all()
+
+
 @dataclass
 class MCPHub:
     servers: dict[str, MCPServerConfig]
@@ -427,6 +477,7 @@ class MCPHub:
         self._functions: list[tuple[str, dict[str, Any]]] = []  # (server, openai tool spec)
         self.custom_tools: list[BuiltinTool] = []  # 에이전트가 만든 동적 도구 (custom__<이름>)
         self.downloader: Any = None  # downloader.Downloader (다운로드 링크 자동 처리용)
+        self.baton = UserBaton()
 
     async def __aenter__(self) -> "MCPHub":
         await self.start()
@@ -522,6 +573,21 @@ class MCPHub:
         route = self._routes.get(function_name)
         if route is None:
             return ToolOutcome(f"오류: 알 수 없는 tool '{function_name}'", True)
+        ws = self.workspace
+        # 다운로드 폴더 비교를 하는 호출(MCP·동적 도구)은 사용자끼리 시간이 겹치지 않게 순번을 지킴
+        watches = ws is not None and self.auto_detect and (route.builtin is None or route.server == "custom")
+        if watches and not _IN_BATON.get():  # 동적 도구 안에서 부른 도구는 이미 순번을 가진 상태 (다시 기다리면 교착)
+            from .users import current_user
+
+            async with self.baton.hold(current_user.get() or ""):
+                tok = _IN_BATON.set(True)
+                try:
+                    return await self._call(route, arguments)
+                finally:
+                    _IN_BATON.reset(tok)
+        return await self._call(route, arguments)
+
+    async def _call(self, route: "_Route", arguments: dict[str, Any]) -> ToolOutcome:
         ws = self.workspace
         if route.builtin is not None:
             # 동적 도구는 파일을 내려받는 경우가 많으므로 MCP tool 처럼 폴더 변화도 점검

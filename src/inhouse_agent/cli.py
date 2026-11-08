@@ -691,6 +691,9 @@ def cmd_serve(cfg: AppConfig, args: argparse.Namespace) -> int:
     if args.host in ("127.0.0.1", "localhost"):
         print("  ※ --host 127.0.0.1 이라 이 PC 에서만 접속됩니다. 다른 사람에게 열려면 --host 0.0.0.0")
     print("  다른 PC 에서 안 열리면 Windows 방화벽에서 이 포트를 허용하세요: scripts\\windows_firewall.bat")
+    if not (cfg.raw.get("skills") or {}).get("editors"):
+        print("  ⚠ skills.editors 가 비어 있어 접속한 모든 사람이 스킬 편집·코드 실행(run_python, 도구 만들기)을 할 수 있습니다.")
+        print("    여러 사람에게 서비스하면 config.yaml 의 skills.editors 에 담당자 ID 를 적으세요.")
     print("  종료: Ctrl+C")
     print("=" * 64, flush=True)
     app = create_app(cfg, enable_scheduler=not args.no_scheduler)

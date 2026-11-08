@@ -536,6 +536,7 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
             "users": {"enabled": rt.users_cfg.enabled, "require": rt.users_cfg.require},
             "llm": {"ready": rt.llm_status()[0], "reason": rt.llm_status()[1]},
             "can_edit_skills": rt.can_edit_skills(),
+            "editors_set": bool((cfg.raw.get("skills") or {}).get("editors")),
             "api": API_VERSION,  # 화면(index.html)과 서버 코드 버전 확인용 - 다르면 서버 재시작 필요
             "user": current_user.get(),
         }
