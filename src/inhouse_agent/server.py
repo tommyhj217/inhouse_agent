@@ -1264,11 +1264,16 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
 
     @app.post("/api/ctools/{name}/check", dependencies=A)
     async def ctools_check(name: str, req: ToolTestRequest) -> dict[str, Any]:
+        need_editor()
         problems = check_code(req.code or "", rt.dynamic.cfg, require_run=True)
         return {"ok": not problems, "problems": problems}
 
     @app.post("/api/ctools/{name}/test", dependencies=A)
     async def ctools_test(name: str, req: ToolTestRequest) -> dict[str, Any]:
+        # 코드를 실제로 실행하므로 저장과 같은 권한(편집자) + 동적 도구가 켜져 있어야 함
+        need_editor()
+        if rt.dynamic.cfg.mode == "off":
+            raise HTTPException(400, "동적 도구 기능이 꺼져 있습니다 (dynamic_tools.mode: off).")
         try:
             if req.code is not None:
                 r = await rt.dynamic.test_draft(name, req.code, req.args)

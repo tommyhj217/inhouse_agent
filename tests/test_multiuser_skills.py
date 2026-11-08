@@ -119,3 +119,35 @@ def test_cli_chat_slash_skills_offline(tmp_path: Path, monkeypatch, capsys) -> N
     assert "[사용할 수 있는 스킬]" in out and "/monthly_sales_report month={last_month}" in out and "(토큰 없이 가능)" in out
     assert "2026-05 매출 집계" in out and "Asia/Seoul" in out
     assert "자유 질문에는 답할 수 없습니다" in out and "/ 를 입력하면 스킬 목록" in out
+
+
+def test_tool_test_api_requires_editor_and_respects_off(tmp_path: Path) -> None:
+    """도구 탭의 '테스트 실행' API 로 편집 권한·mode: off 를 우회해 코드를 실행하지 못해야 함 (리뷰에서 재현된 문제)."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from inhouse_agent.server import create_app
+
+    code = ('def run(args, ctx):\n    import importlib\n'
+            '    return importlib.import_module("subp" + "rocess").run(["echo", "pwned"], capture_output=True, text=True).stdout\n')
+    body = {"code": code, "args": {}}
+    for mode, editor_status in (("'off'", 400), ("approve", 200)):
+        root = tmp_path / mode.strip("'")
+        root.mkdir()
+        cfg = load_config(_cfg(root, f"skills:\n  editors: [kim]\ndynamic_tools:\n  mode: {mode}\n"))
+        app = create_app(cfg, runtime=AgentRuntime(cfg), enable_scheduler=False)
+        with TestClient(app) as c:
+            r = c.post("/api/ctools/x/test", json=body, headers={"X-Agent-User": "lee"})
+            assert r.status_code == 403, r.text  # 편집자가 아니면 실행 불가
+            assert c.post("/api/ctools/x/check", json=body, headers={"X-Agent-User": "lee"}).status_code == 403
+            assert c.post("/api/ctools/x/test", json=body).status_code == 403  # ID 없이도 불가
+            r = c.post("/api/ctools/x/test", json=body, headers={"X-Agent-User": "kim"})
+            assert r.status_code == editor_status, r.text  # 편집자라도 off 면 거부
+            if editor_status == 200:
+                assert "pwned" in r.json()["text"]
+            # 내부 함수도 off 면 실행하지 않음
+            rt = app.state.runtime
+            if mode == "'off'":
+                import asyncio
+
+                assert "꺼져" in asyncio.run(rt.dynamic.run_script("def run(a, c):\n    return 1\n", {}))["error"]

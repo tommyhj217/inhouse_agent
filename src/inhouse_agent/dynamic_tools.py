@@ -398,7 +398,15 @@ class DynamicToolManager:
         r = await self.execute("tool", tool.path, args)
         return ToolOutcome(self.format_result(r), not r["ok"])
 
+    def _off(self) -> dict[str, Any] | None:
+        if self.cfg.mode != "off":
+            return None
+        return {"ok": False, "error": "동적 도구 기능이 꺼져 있습니다 (dynamic_tools.mode: off).", "value": None, "stdout": "", "stderr": "",
+                "traceback": None, "elapsed": 0, "tool_calls": []}
+
     async def run_script(self, code: str, args: dict[str, Any], timeout: float | None = None) -> dict[str, Any]:
+        if (off := self._off()) is not None:  # 어느 경로로 불러도 꺼져 있으면 실행하지 않음
+            return off
         problems = check_code(code, self.cfg, require_run=False)
         if problems:
             return {"ok": False, "error": "코드 검사 실패: " + "; ".join(problems), "value": None, "stdout": "", "stderr": "", "traceback": None, "elapsed": 0, "tool_calls": []}
@@ -409,6 +417,8 @@ class DynamicToolManager:
         return await self.execute("script", p, args, timeout)
 
     async def test_draft(self, name: str, code: str, args: dict[str, Any]) -> dict[str, Any]:
+        if (off := self._off()) is not None:
+            return off
         problems = check_code(code, self.cfg, require_run=True)
         if problems:
             return {"ok": False, "error": "코드 검사 실패: " + "; ".join(problems), "value": None, "stdout": "", "stderr": "", "traceback": None, "elapsed": 0, "tool_calls": []}
