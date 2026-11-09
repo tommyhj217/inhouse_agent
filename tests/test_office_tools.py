@@ -103,3 +103,73 @@ async def test_fill_excel_insert_rows(tmp_path: Path) -> None:
         assert not res.is_error and "끼워 넣었습니다" in res.text
         ws = load_workbook(Path(res.files[0]["path"]))["보고서"]
         assert ws["A11"].value == "품목5" and ws["A15"].value == "합계"  # 합계 행이 아래로 밀림
+
+
+def _sales(p: Path, rows: list[list]) -> Path:
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "매출"
+    ws.append(["문서번호", "일자", "부서", "금액", "거래처코드", "비고"])
+    for r in rows:
+        ws.append(r)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(p)
+    return p
+
+
+async def test_excel_data_rules_learn_validate_update(tmp_path: Path) -> None:
+    from datetime import datetime
+
+    cfg = load_config(_cfg(tmp_path))
+    async with AgentRuntime(cfg) as rt:
+        past = Path(rt.workspace.files) / "과거"
+        depts = ["영업1팀", "영업2팀", "기술팀"]
+        n = 0
+        for m in (8, 9):
+            rows = []
+            for i in range(12):
+                n += 1
+                rows.append([f"S-2026-{n:04d}", datetime(2026, m, i + 1), depts[i % 3], 10000 * (i + 1), f"{(i % 4) + 1:05d}", "" if i % 2 else "확인"])
+            _sales(past / f"{m}월.xlsx", rows)
+        csv = past / "10월.csv"
+        lines = ["문서번호,일자,부서,금액,거래처코드,비고"] + [f"S-2026-{n + i + 1:04d},2026-10-{i + 1:02d},{depts[i % 3]},\"{10000 * (i + 1):,}\",{(i % 4) + 1:05d}," for i in range(12)]
+        csv.write_bytes("\n".join(lines).encode("cp949"))  # 사내 CSV 는 cp949 가 많음
+
+        out = await rt.hub.call("excel_rules_learn", {"name": "월매출", "paths": [str(past)], "description": "월별 매출 대장"})
+        assert not out.is_error, out.text
+        c = out.data["columns"]
+        assert c["문서번호"]["type"] == "code" and c["문서번호"]["unique"] and c["문서번호"]["pattern"] == r"^[A-Z]\-\d{4}\-\d{4}$"
+        assert c["일자"]["type"] == "date" and c["일자"]["required"]
+        assert c["부서"]["allowed"] == sorted(depts) and c["부서"]["required"]
+        assert c["금액"]["type"] == "number" and c["금액"]["min"] == 10000 and c["금액"]["max"] == 120000 and c["금액"]["nonneg"]
+        assert c["거래처코드"]["type"] == "code" and c["거래처코드"]["pattern"] == r"^\d{5}$"  # 00001 같은 코드는 숫자로 보지 않음
+        assert not c["비고"].get("required")
+
+        bad = _sales(Path(rt.workspace.files) / "11월.xlsx", [
+            ["S-2026-0100", datetime(2026, 11, 1), "영업1팀", 50000, "00001", ""],
+            ["S-2026-0100", datetime(2026, 11, 2), "", -5000, "00002", ""],            # 중복 번호, 빈 부서, 음수
+            ["X1", "2026/13/40", "마케팅팀", 99000000, "123", "메모"],                    # 모양·날짜·새 부서·범위·코드 모양
+        ])
+        out = await rt.hub.call("excel_rules_validate", {"name": "월매출", "path": str(bad)})
+        r = out.data
+        got = {(x["column"], x["rule"]) for x in r["issues"]}
+        assert {("문서번호", "unique"), ("부서", "required"), ("금액", "nonneg"), ("일자", "type"), ("부서", "allowed"),
+                ("금액", "range"), ("문서번호", "pattern"), ("거래처코드", "pattern")} <= got, got
+        dup = next(x for x in r["issues"] if x["rule"] == "unique")
+        assert dup["rows"] == [3] and not r["passed"]  # 엑셀 행 번호 (머리글 1행)
+        assert "❌ [문서번호] 중복 값 1개 (행 3)" in out.text
+
+        # 마케팅팀은 새로 생긴 정상 부서 → 규칙 고치기 (이유 필수), 다시 배워도 유지
+        assert (await rt.hub.call("excel_rules_update", {"name": "월매출", "column": "부서", "changes": {"allowed": depts + ["마케팅팀"]}, "reason": ""})).is_error
+        up = await rt.hub.call("excel_rules_update", {"name": "월매출", "column": "부서", "changes": {"allowed": depts + ["마케팅팀"]}, "reason": "11월 신설 부서"})
+        assert not up.is_error and "✏️" in up.text
+        await rt.hub.call("excel_rules_learn", {"name": "월매출", "paths": [str(past)], "append": True})
+        r2 = (await rt.hub.call("excel_rules_validate", {"name": "월매출", "path": str(bad)})).data
+        assert ("부서", "allowed") not in {(x["column"], x["rule"]) for x in r2["issues"]} and r2["version"] == 3
+        lst = await rt.hub.call("excel_rules_list", {})
+        assert "월매출: 월별 매출 대장 (v3" in lst.text
+        good = _sales(Path(rt.workspace.files) / "정상.xlsx", [["S-2026-0200", datetime(2026, 11, 3), "기술팀", 30000, "00003", ""]])
+        ok = (await rt.hub.call("excel_rules_validate", {"name": "월매출", "path": str(good)})).data
+        assert ok["passed"] and ok["score"] == 100

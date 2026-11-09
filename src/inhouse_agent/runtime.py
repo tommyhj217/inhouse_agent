@@ -108,6 +108,9 @@ class AgentRuntime:
         # 규칙집: 과거 자료로 규칙을 배우고 검증하며 갱신 (모든 사용자가 공유해 지식이 쌓이도록 프로젝트 폴더에 저장)
         self.rules_path = cfg.resolve_path(str((cfg.raw.get("rules") or {}).get("dir") or "rulebooks"))
         builtin_tools += make_rule_tools(self.workspace, self.rules_path)
+        from .data_rules import make_data_rule_tools
+
+        builtin_tools += make_data_rule_tools(self.workspace, self.rules_path)  # 엑셀 데이터 규칙 (열 형식·범위·허용값)
         # 스킬 폴더의 스크립트 실행, 문서 비교, 사용 이력/모델 목록
         from .compare import make_compare_tools
         from .skill_scripts import SkillScriptRunner
