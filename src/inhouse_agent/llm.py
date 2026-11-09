@@ -1,7 +1,16 @@
-"""Azure OpenAI (Chat Completions + function calling) 클라이언트 래퍼."""
+"""Azure OpenAI 클라이언트 래퍼.
+
+- AzureChatModel      : Chat Completions (기본, llm.api: chat)
+- AzureResponsesModel : Responses API (llm.api: responses) - 추론 내용을 다음 요청에 이어 줌
+  store=false + include=reasoning.encrypted_content 로 받은 추론 항목(암호화)을 대화에 보관했다가,
+  같은 배포에 다시 보낼 때 그대로 넣음. 그러면 모델이 도구 결과를 받을 때마다 처음부터 다시 생각하지 않아
+  도구 왕복과 출력(추론) 토큰이 줄어듦 (OpenAI 권장 방식, pi 의 Azure 구현과 같음).
+두 클래스 모두 같은 chat() 인터페이스와 내부 메시지 형식(Chat Completions 형식)을 씁니다.
+"""
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -25,6 +34,10 @@ class LLMResponse:
     finish_reason: str | None = None
     usage: dict[str, int] = field(default_factory=dict)
     model: str | None = None  # 답한 모델 이름 (여러 모델을 쓸 때)
+    # Responses API: 응답 출력 항목(추론 항목 + 메시지 + 도구 호출) 원본과 그것을 만든 배포.
+    # 다음 요청에 그대로 다시 보내 추론을 이어 받음 (같은 배포일 때만 - pi 방식)
+    raw_items: list[dict[str, Any]] | None = None
+    raw_source: str | None = None
 
     def to_message(self) -> dict[str, Any]:
         """대화 이력에 넣을 assistant 메시지(dict)."""
@@ -34,6 +47,11 @@ class LLMResponse:
                 {"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": tc.arguments}}
                 for tc in self.tool_calls
             ]
+        if self.raw_items:
+            ids = {tc.id for tc in self.tool_calls}
+            # 실행하지 않을 도구 호출(예: 마지막 정리에서 막은 호출)은 빼야 '결과 없는 도구 호출' 오류가 안 남
+            items = [i for i in self.raw_items if i.get("type") != "function_call" or i.get("call_id") in ids]
+            msg["_resp_items"], msg["_resp_source"] = items, self.raw_source
         return msg
 
 
@@ -76,6 +94,17 @@ def _api_messages(messages: list[dict[str, Any]], vision: bool) -> list[dict[str
     return out
 
 
+def _auth_kwargs(cfg: LLMConfig) -> dict[str, Any]:
+    if cfg.auth == "entra_id":
+        try:
+            from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+        except ImportError as e:  # pragma: no cover
+            raise RuntimeError("auth: entra_id 를 쓰려면 `pip install azure-identity` 가 필요합니다.") from e
+        # azure.identity 의 동기 토큰 공급자를 사용합니다 (openai SDK 가 동기 provider 도 지원).
+        return {"azure_ad_token_provider": get_bearer_token_provider(DefaultAzureCredential(), cfg.entra_scope)}
+    return {"api_key": cfg.api_key}
+
+
 def cached_tokens(usage: Any) -> int:
     """usage.prompt_tokens_details.cached_tokens (SDK 객체 또는 dict). 없으면 0."""
     details = usage.get("prompt_tokens_details") if isinstance(usage, dict) else getattr(usage, "prompt_tokens_details", None)
@@ -111,16 +140,7 @@ class AzureChatModel:
         else:
             kwargs["azure_endpoint"] = cfg.endpoint
 
-        if cfg.auth == "entra_id":
-            try:
-                from azure.identity import DefaultAzureCredential, get_bearer_token_provider
-            except ImportError as e:  # pragma: no cover
-                raise RuntimeError("auth: entra_id 를 쓰려면 `pip install azure-identity` 가 필요합니다.") from e
-            # azure.identity 의 동기 토큰 공급자를 사용합니다 (openai SDK 가 동기 provider 도 지원).
-            kwargs["azure_ad_token_provider"] = get_bearer_token_provider(DefaultAzureCredential(), cfg.entra_scope)
-        else:
-            kwargs["api_key"] = cfg.api_key
-
+        kwargs.update(_auth_kwargs(cfg))
         self._client = AsyncAzureOpenAI(**kwargs)
         self._cache_key_ok = True
 
@@ -192,3 +212,240 @@ class AzureChatModel:
 
     async def aclose(self) -> None:
         await self._client.close()
+
+
+# ---------------------------------------------------------------------------
+# Responses API
+# ---------------------------------------------------------------------------
+
+RESPONSES_MIN_OUTPUT_TOKENS = 16
+_V1_VERSIONS = ("v1", "preview", "latest")
+
+
+def responses_base_url(cfg: LLMConfig) -> str | None:
+    """Responses API 주소. v1(기본): <리소스>/openai/v1 (pi 와 같음). 날짜 버전이면 None (azure_endpoint 방식).
+    APIM 등 게이트웨이(base_url)를 쓰면 '/openai' 앞부분을 살려 …/openai/v1 로, 다르면 responses_base_url 로 직접 지정."""
+    if cfg.responses_base_url:
+        return cfg.responses_base_url.rstrip("/")
+    if cfg.responses_api_version not in _V1_VERSIONS:
+        return None
+    root = cfg.endpoint or ""
+    if not root and cfg.base_url:
+        i = cfg.base_url.find("/openai")
+        root = cfg.base_url[:i] if i >= 0 else cfg.base_url
+    root = root.rstrip("/")
+    for tail in ("/openai/v1", "/openai"):
+        if root.endswith(tail):
+            root = root[: -len(tail)]
+    return f"{root}/openai/v1"
+
+
+def responses_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Chat Completions 형식 도구 → Responses 형식 (function 이 한 단계 펼쳐짐)."""
+    out = []
+    for t in tools:
+        f = t.get("function") or t
+        out.append({"type": "function", "name": f["name"], "description": f.get("description") or "",
+                    "parameters": f.get("parameters") or {"type": "object", "properties": {}}, "strict": False})
+    return out
+
+
+def _user_parts(content: Any) -> list[dict[str, Any]]:
+    if isinstance(content, list):
+        parts = []
+        for p in content:
+            if p.get("type") == "image_url":
+                url = (p.get("image_url") or {}).get("url") if isinstance(p.get("image_url"), dict) else p.get("image_url")
+                parts.append({"type": "input_image", "image_url": url, "detail": "auto"})
+            else:
+                parts.append({"type": "input_text", "text": str(p.get("text") or "")})
+        return parts
+    return [{"type": "input_text", "text": str(content or "")}]
+
+
+def responses_input(messages: list[dict[str, Any]], vision: bool, source: str) -> tuple[list[dict[str, Any]], int]:
+    """내부 메시지(Chat Completions 형식) → Responses input 항목. (항목, 다시 보낸 추론 항목 수)
+    - assistant 메시지에 같은 배포(source)가 만든 _resp_items 가 있으면 그대로 (추론 항목 포함, pi 방식)
+    - 아니면(다른 모델·Chat Completions 로 만든 대화) 텍스트·도구 호출만, 항목 id 없이 (추론 짝 검사 피함)"""
+    items: list[dict[str, Any]] = []
+    replayed = 0
+    for raw, m in zip(messages, _api_messages(messages, vision)):
+        role = m.get("role")
+        if role in ("system", "developer"):
+            items.append({"role": "developer" if role == "developer" else "system", "content": str(m.get("content") or "")})
+        elif role == "user":
+            items.append({"role": "user", "content": _user_parts(m.get("content"))})
+        elif role == "assistant":
+            saved = raw.get("_resp_items")
+            ids = [tc["id"] for tc in m.get("tool_calls") or []]
+            if saved and raw.get("_resp_source") == source and \
+                    [i.get("call_id") for i in saved if i.get("type") == "function_call"] == ids:
+                items += [dict(i) for i in saved]
+                replayed += sum(1 for i in saved if i.get("type") == "reasoning")
+                continue
+            if m.get("content"):
+                items.append({"role": "assistant", "content": str(m["content"])})
+            for tc in m.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                items.append({"type": "function_call", "call_id": tc["id"], "name": fn.get("name"), "arguments": fn.get("arguments") or "{}"})
+        elif role == "tool":
+            c = m.get("content")
+            items.append({"type": "function_call_output", "call_id": m.get("tool_call_id"),
+                          "output": c if isinstance(c, str) else json.dumps(c, ensure_ascii=False)})
+    return items, replayed
+
+
+def _replayable(output: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """다시 보낼 출력 항목. 추론 항목에 암호화 내용이 없으면(store=false 에서는 다시 쓸 수 없음)
+    추론 항목을 빼고, 짝 검사에 걸리지 않게 다른 항목의 id 도 뺌."""
+    keep = [i for i in output if i.get("type") in ("reasoning", "message", "function_call")]
+    if all(i.get("encrypted_content") for i in keep if i.get("type") == "reasoning"):
+        return keep
+    out = []
+    for i in keep:
+        if i.get("type") == "reasoning":
+            continue
+        i = {k: v for k, v in i.items() if k != "id"}
+        out.append(i)
+    return out
+
+
+def parse_response(data: dict[str, Any], source: str) -> LLMResponse:
+    """Responses API 응답(dict) → LLMResponse."""
+    if data.get("error"):
+        err = data["error"]
+        raise RuntimeError(f"{err.get('code') or 'error'}: {err.get('message') or err}")
+    output = [i for i in data.get("output") or [] if isinstance(i, dict)]
+    texts: list[str] = []
+    calls: list[ToolCall] = []
+    for i in output:
+        if i.get("type") == "message":
+            for c in i.get("content") or []:
+                if c.get("type") == "output_text":
+                    texts.append(c.get("text") or "")
+                elif c.get("type") == "refusal":
+                    texts.append(f"(모델이 답변을 거절했습니다: {c.get('refusal') or ''})")
+        elif i.get("type") == "function_call":
+            calls.append(ToolCall(id=i.get("call_id") or i.get("id") or "", name=i.get("name") or "", arguments=i.get("arguments") or "{}"))
+    reason = (data.get("incomplete_details") or {}).get("reason") if data.get("status") == "incomplete" else None
+    finish = {"max_output_tokens": "length", "content_filter": "content_filter"}.get(str(reason), None) if reason else None
+    if finish is None:
+        finish = "tool_calls" if calls else ("stop" if output else "empty")
+    u = data.get("usage") or {}
+    usage: dict[str, int] = {}
+    if u:
+        usage = {
+            "prompt_tokens": int(u.get("input_tokens") or 0),
+            "completion_tokens": int(u.get("output_tokens") or 0),
+            "total_tokens": int(u.get("total_tokens") or 0),
+            "cached_tokens": int((u.get("input_tokens_details") or {}).get("cached_tokens") or 0),
+            "reasoning_tokens": int((u.get("output_tokens_details") or {}).get("reasoning_tokens") or 0),
+        }
+    content = "".join(texts) or None
+    if not output:
+        content = "(모델 응답이 비어 있습니다. 콘텐츠 필터 여부를 확인하세요.)"
+    return LLMResponse(content=content, tool_calls=calls, finish_reason=finish, usage=usage,
+                       raw_items=_replayable(output) or None, raw_source=source)
+
+
+class AzureResponsesModel:
+    """Responses API 기반 ChatModel (llm.api: responses). 인터페이스·메시지 형식은 AzureChatModel 과 같음."""
+
+    def __init__(self, cfg: LLMConfig, http_client: Any = None):
+        cfg.validate()
+        self.cfg = cfg
+        from openai import AsyncAzureOpenAI
+
+        kwargs: dict[str, Any] = {"api_version": cfg.responses_api_version, "timeout": cfg.timeout, "max_retries": cfg.max_retries}
+        if http_client is not None:  # 테스트·사내 프록시용
+            kwargs["http_client"] = http_client
+        if cfg.extra_headers:
+            kwargs["default_headers"] = cfg.extra_headers
+        base = responses_base_url(cfg)
+        if base:
+            kwargs["base_url"] = base  # → POST <리소스>/openai/v1/responses?api-version=v1
+        else:
+            kwargs["azure_endpoint"] = cfg.endpoint  # → POST <리소스>/openai/responses?api-version=<날짜 버전>
+        kwargs.update(_auth_kwargs(cfg))
+        self._client = AsyncAzureOpenAI(**kwargs)
+        if not hasattr(self._client, "responses"):  # pragma: no cover - 오래된 SDK
+            raise RuntimeError("llm.api: responses 는 openai 패키지 1.66 이상이 필요합니다: pip install -U openai")
+        self.source = f"{cfg.deployment}@{base or cfg.endpoint}"  # 추론 항목은 같은 배포에만 다시 보냄
+        self._cache_key_ok = True
+        self._replay_ok = cfg.reasoning_replay
+        self.stats = {"replayed": 0}
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        *,
+        tool_choice: str | None = None,
+        parallel_tool_calls: bool | None = None,
+        model: str | None = None,
+        cache_key: str | None = None,
+    ) -> LLMResponse:
+        cfg = self.cfg
+        items, replayed = responses_input(messages, cfg.vision, self.source if self._replay_ok else "")
+        params: dict[str, Any] = {"model": cfg.deployment, "input": items, "store": False}
+        if tools:
+            params["tools"] = responses_tools(tools)
+            if tool_choice:
+                params["tool_choice"] = tool_choice
+            if parallel_tool_calls is not None:
+                params["parallel_tool_calls"] = parallel_tool_calls
+        if cfg.max_output_tokens:
+            params["max_output_tokens"] = max(cfg.max_output_tokens, RESPONSES_MIN_OUTPUT_TOKENS)
+        if cfg.temperature is not None:
+            params["temperature"] = cfg.temperature
+        if cfg.reasoning_effort:
+            params["reasoning"] = {"effort": cfg.reasoning_effort}
+        if self._replay_ok:
+            params["include"] = ["reasoning.encrypted_content"]
+        body = dict(cfg.extra_body or {})
+        if cache_key and cfg.prompt_cache_key and self._cache_key_ok:
+            body.setdefault("prompt_cache_key", cache_key[:CACHE_KEY_MAX])
+        if body:
+            params["extra_body"] = body
+
+        for _ in range(3):  # 배포가 모르는 인자(캐시 키 / 추론 내용 포함)는 빼고 다시
+            try:
+                resp = await self._client.responses.create(**params)
+                break
+            except Exception as e:
+                if "prompt_cache_key" in body and _rejects_cache_key(e):
+                    self._cache_key_ok = False
+                    log.warning("배포 %s 가 prompt_cache_key 를 지원하지 않아 빼고 보냅니다: %s", cfg.deployment, str(e)[:200])
+                    body.pop("prompt_cache_key")
+                    if body:
+                        params["extra_body"] = body
+                    else:
+                        params.pop("extra_body", None)
+                    continue
+                if "include" in params and getattr(e, "status_code", None) == 400 and \
+                        any(k in str(e) for k in ("encrypted_content", "reasoning", "include")):
+                    # 추론 모델이 아니거나 이 배포가 추론 내용 반환을 지원하지 않음 → 이어 받기 없이
+                    self._replay_ok = False
+                    log.warning("배포 %s 가 추론 내용 이어 받기를 지원하지 않아 끄고 보냅니다: %s", cfg.deployment, str(e)[:200])
+                    params.pop("include")
+                    params["input"], replayed = responses_input(messages, cfg.vision, "")
+                    continue
+                raise
+        else:  # pragma: no cover
+            raise RuntimeError("Responses API 호출 재시도 초과")
+        data = resp.model_dump(exclude_none=True) if hasattr(resp, "model_dump") else dict(resp)
+        out = parse_response(data, self.source if self._replay_ok else "")
+        if not self._replay_ok:
+            out.raw_items = None
+        self.stats["replayed"] += replayed
+        if replayed:
+            out.usage["reasoning_replayed"] = replayed
+        return out
+
+    async def aclose(self) -> None:
+        await self._client.close()
+
+
+def make_chat_model(cfg: LLMConfig) -> "AzureChatModel | AzureResponsesModel":
+    """llm.api 에 맞는 클라이언트 (chat: Chat Completions, responses: Responses API)."""
+    return AzureResponsesModel(cfg) if cfg.api == "responses" else AzureChatModel(cfg)

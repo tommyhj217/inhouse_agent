@@ -82,6 +82,35 @@ def _warn_failed(rt: AgentRuntime) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def llm_roundtrip(llm: Any, model: str | None = None) -> str:
+    """도구를 한 번 부르게 하고 결과를 돌려준 뒤 최종 답을 받는 점검 (에이전트 실행과 같은 경로)."""
+    tools = [{"type": "function", "function": {"name": "get_secret_number", "description": "점검용 비밀 숫자를 돌려줍니다.",
+                                               "parameters": {"type": "object", "properties": {}}}}]
+    msgs: list[dict[str, Any]] = [
+        {"role": "system", "content": "연결 점검입니다. 도구를 써서 답하세요."},
+        {"role": "user", "content": "get_secret_number 도구로 숫자를 받은 뒤, 그 숫자에 1을 더한 값을 숫자만 답하세요."}]
+    kw = {"model": model} if model else {}
+    try:
+        r1 = await llm.chat(msgs, tools, cache_key="check-roundtrip", **kw)
+        if not r1.tool_calls:
+            return f"✗ 도구를 부르지 않았습니다 (답: {(r1.content or '')[:60]!r}) - 도구 호출을 지원하는 배포인지 확인하세요"
+        msgs.append(r1.to_message())
+        msgs += [{"role": "tool", "tool_call_id": tc.id, "content": "41"} for tc in r1.tool_calls]
+        r2 = await llm.chat(msgs, tools, cache_key="check-roundtrip", **kw)
+    except Exception as e:  # noqa: BLE001
+        return f"✗ 도구 왕복 실패: {type(e).__name__}: {str(e)[:300]}"
+    extra = []
+    if r1.usage.get("reasoning_tokens"):
+        extra.append(f"추론 토큰 {r1.usage['reasoning_tokens']}")
+    if r2.usage.get("reasoning_replayed"):
+        extra.append(f"추론 항목 {r2.usage['reasoning_replayed']}개를 이어 받음")
+    elif getattr(getattr(llm._client(model)[1] if model and callable(getattr(llm, "_client", None)) else llm, "cfg", None), "api", "chat") == "responses":
+        extra.append("추론 항목 없음 (추론 모델이 아니거나 reasoning_replay 가 꺼짐)")
+    answer = (r2.content or "").strip()
+    mark = "✓" if "42" in answer else "△"
+    return f"{mark} 도구 왕복: 답 {answer[:40]!r}" + (" (기대값 42)" if mark != "✓" else "") + (f" · {', '.join(extra)}" if extra else "")
+
+
 async def cmd_check(cfg: AppConfig, args: argparse.Namespace) -> int:
     ok = True
     print("== MCP 서버 ==")
@@ -97,13 +126,19 @@ async def cmd_check(cfg: AppConfig, args: argparse.Namespace) -> int:
                 print(f"  ✓ {name}: tool {len(conn.tools)}개 ({', '.join(t.name for t in conn.tools)})")
         if not results:
             print("  (설정된 MCP 서버 없음)")
-        print("== Azure OpenAI ==")
+        print(f"== Azure OpenAI ({'Responses API' if cfg.llm.api == 'responses' else 'Chat Completions'}) ==")
         try:
             resp = await rt.llm.chat([{"role": "user", "content": "연결 테스트입니다. 'OK' 라고만 답하세요."}])
             print(f"  ✓ deployment '{cfg.llm.deployment}' 응답: {(resp.content or '').strip()[:50]!r} usage={resp.usage}")
         except Exception as e:  # noqa: BLE001
             ok = False
             print(f"  ✗ LLM 호출 실패: {type(e).__name__}: {e}")
+        else:
+            names = [s.name for s in rt.router.specs] if len(rt.router.specs) > 1 else [None]
+            for name in names:  # 도구 호출 → 결과 → 답 (Responses API 면 추론 항목을 다시 보내는 경로까지)
+                line = await llm_roundtrip(rt.llm, name)
+                ok = ok and line.startswith("✓")
+                print(f"  {line}" if name is None else f"  [{name}] {line}")
     finally:
         await rt.close()
     return 0 if ok else 1

@@ -26,6 +26,12 @@ llm:
   max_retries: 3
   vision: true                                    # 배포 모델이 이미지 입력을 지원하는지 (채팅 이미지 첨부). 미지원이면 false
   prompt_cache_key: true                          # 대화마다 캐시 키를 보내 프롬프트 캐시 적중률을 높임 (배포가 모르면 자동으로 끔)
+  # --- Responses API (추론 내용을 다음 요청에 이어 줌 - 도구를 여러 번 쓰는 작업에서 추론 토큰·헛도는 호출 감소) ---
+  #   켜기 전에 `inhouse-agent check` 로 도구 왕복이 되는지 확인하세요. 모델마다 llm.models 에서 api 를 따로 줄 수도 있습니다.
+  api: chat                                       # chat (Chat Completions) | responses (Responses API)
+  # responses_api_version: v1                     # v1 → <리소스>/openai/v1/responses | 2025-04-01-preview 같은 날짜 버전
+  # responses_base_url:                           # 게이트웨이 주소가 …/openai/v1 형태가 아니면 직접 지정
+  # reasoning_replay: true                        # 추론 내용(암호화)을 받아 다음 요청에 다시 보냄 (배포가 모르면 자동으로 끔)
   extra_headers:
     # Ocp-Apim-Subscription-Key: ${APIM_SUBSCRIPTION_KEY:-}
 

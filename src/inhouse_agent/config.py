@@ -89,6 +89,14 @@ class LLMConfig:
     extra_body: dict[str, Any] = field(default_factory=dict)
     vision: bool = True
     """배포 모델이 이미지 입력을 지원하는지 (미지원이면 이미지를 텍스트 안내로 바꿔 보냄)"""
+    api: str = "chat"
+    """chat (Chat Completions) | responses (Responses API: 추론 내용을 다음 요청에 이어 줌)"""
+    responses_api_version: str = "v1"
+    """Responses API 버전. v1(기본, <리소스>/openai/v1/responses) 또는 2025-04-01-preview 같은 날짜 버전"""
+    responses_base_url: str | None = None
+    """Responses API 주소를 직접 지정 (게이트웨이 주소가 …/openai/v1 형태가 아닐 때)"""
+    reasoning_replay: bool = True
+    """api: responses 일 때 추론 내용(암호화)을 받아 다음 요청에 다시 보냄 (배포가 지원하지 않으면 자동으로 끔)"""
     prompt_cache_key: bool = True
     """대화마다 prompt_cache_key 를 보내 프롬프트 캐시 적중률을 높임 (배포가 모르는 인자라고 거절하면 자동으로 끔)"""
     provider: str = "azure"
@@ -116,6 +124,10 @@ class LLMConfig:
             vision=_to_bool(d.get("vision"), True),
             provider=str(d.get("provider") or "azure").lower(),
             prompt_cache_key=_to_bool(d.get("prompt_cache_key"), True),
+            api=str(d.get("api") or "chat").strip().lower(),
+            responses_api_version=str(d.get("responses_api_version") or "v1").strip(),
+            responses_base_url=_none_if_blank(d.get("responses_base_url")),
+            reasoning_replay=_to_bool(d.get("reasoning_replay"), True),
         )
 
     def validate(self) -> None:
@@ -123,6 +135,8 @@ class LLMConfig:
             raise ConfigError("llm.deployment(AZURE_OPENAI_DEPLOYMENT) 가 비어 있습니다.")
         if not (self.endpoint or self.base_url):
             raise ConfigError("llm.endpoint(AZURE_OPENAI_ENDPOINT) 또는 llm.base_url 이 필요합니다.")
+        if self.api not in ("chat", "responses"):
+            raise ConfigError("llm.api 는 chat 또는 responses 이어야 합니다.")
         if self.auth not in ("api_key", "entra_id"):
             raise ConfigError("llm.auth 는 api_key 또는 entra_id 이어야 합니다.")
         if self.auth == "api_key" and not self.api_key:

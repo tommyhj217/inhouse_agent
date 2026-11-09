@@ -25,7 +25,7 @@ from .rules_tools import make_rule_tools
 from .toolkit import ToolkitConfig, make_toolkit
 from .users import SessionStore, UserWorkspaces, UsersConfig, WorkspaceProxy, current_user
 from .interaction import AskFn
-from .llm import AzureChatModel, ChatModel
+from .llm import ChatModel, make_chat_model
 from .mcp_hub import MCPHub
 from .runtime_utils import render_dates
 from .skills import SkillStore
@@ -219,7 +219,7 @@ class AgentRuntime:
 
                 self._llm = ModelPool(self.cfg.llm, self.router)
             else:
-                self._llm = AzureChatModel(self.cfg.llm)
+                self._llm = make_chat_model(self.cfg.llm)
         return self._llm
 
     @property

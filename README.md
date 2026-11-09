@@ -85,6 +85,35 @@ AZURE_OPENAI_API_VERSION=2024-10-21
   `llm.extra_headers`(예: `Ocp-Apim-Subscription-Key`)를 설정합니다.
 - 키 대신 Entra ID(Managed Identity, az login)를 쓰려면 `llm.auth: entra_id`로 설정합니다.
 
+#### Responses API로 쓰기 (추론 내용 이어 받기)
+
+`llm.api: responses`로 두면 Chat Completions 대신 Responses API를 씁니다. opencode·pi가 Azure에서 쓰는 방식입니다.
+
+- **추론 이어 받기**: 추론 모델(sol·terra·luna 등)은 답하기 전에 속으로 추론합니다.
+  - Chat Completions에서는 도구 결과를 받을 때마다 그 추론이 사라져 처음부터 다시 생각합니다.
+  - Responses API에서는 추론 내용을 암호화된 항목으로 받아 다음 요청에 그대로 다시 보냅니다(`store: false` + `reasoning.encrypted_content`). 서버에 대화를 저장하지 않습니다.
+  - 그래서 도구를 여러 번 쓰는 작업에서 같은 생각을 반복하지 않아 추론(출력) 토큰과 헛도는 도구 호출이 줄어듭니다.
+- **같은 모델에만**: 추론 항목은 그것을 만든 배포에만 다시 보냅니다.
+  - 실행 중에 모델이 바뀌면(승격·다른 모델로 넘어가기) 앞 대화는 텍스트와 도구 호출만 넘깁니다.
+  - Chat Completions로 만든 예전 대화도 그대로 이어집니다.
+- **주소**:
+  - 기본(`responses_api_version: v1`)은 `<리소스>/openai/v1/responses`입니다.
+  - 날짜 버전(예: `2025-04-01-preview`)을 쓰면 `<리소스>/openai/responses?api-version=…`입니다.
+  - APIM 게이트웨이(`base_url`)를 쓰면 `/openai` 앞부분을 살려 `…/openai/v1`로 갑니다. 주소가 다르면 `llm.responses_base_url`로 직접 지정합니다.
+- **자동으로 끄기**: 배포가 추론 내용 반환(`include`)이나 캐시 키를 모른다고 거절하면 그 기능만 끄고 다시 보냅니다.
+- **모델마다 다르게**: `llm.models`의 모델마다 `api: responses` / `api: chat`을 줄 수 있습니다.
+- **필요한 패키지**: openai 1.66 이상
+
+**켜기 전에 점검**하세요. `inhouse-agent check`를 실행하면 모델마다 실제 도구 왕복(도구 호출 → 결과 → 답)을 해 봅니다.
+
+```text
+== Azure OpenAI (Responses API) ==
+  ✓ deployment 'sol' 응답: 'OK' usage={... 'reasoning_tokens': 20}
+  ✓ 도구 왕복: 답 '42' · 추론 토큰 20, 추론 항목 1개를 이어 받음
+```
+
+"추론 항목 1개를 이어 받음"이 나오면 정상입니다. 실패하면 오류 내용이 그대로 나오니 `api: chat`으로 되돌리면 됩니다.
+
 ### 2-2. 기존 MCP 서버 등록 (`config/config.yaml`)
 
 ```yaml
@@ -1017,7 +1046,7 @@ Azure는 요청의 앞부분(1,024 토큰 이상)이 직전 요청과 같으면 
 ```
 src/inhouse_agent/
   config.py     설정 로딩 (${ENV} 치환, .env)
-  llm.py        Azure OpenAI Chat Completions + function calling
+  llm.py        Azure OpenAI: Chat Completions 또는 Responses API (추론 내용 이어 받기) + function calling
   mcp_hub.py    MCP 서버 연결, tool 변환, 호출 (재연결, 순차 실행, 제한 시간, 다운로드 파일 자동 감지)
   files.py      작업폴더(sandbox), 다운로드 감지, 파일 상태 점검, 다운로드 대기
   analyzers.py  엑셀/CSV/HTML표/PDF/DOCX/PPTX/JSON/ZIP 분석, query_table
@@ -1046,6 +1075,7 @@ src/inhouse_agent/
   routing.py    비용 기준 모델 선택 (난이도 판별, 승격, 다른 모델로 넘어가기, 모델별 비용), 배포별 연결(ModelPool)
   context.py    토큰 기준 자동 압축 (오래된 도구 결과 줄이기 → 앞 대화 요약, 컨텍스트 초과 재시도)
   subagent.py   하위 에이전트 run_subagent (별도 대화, 동시 실행, 깊이 1)
+  batch.py      도구 묶음 실행 run_tool_batch (연쇄 호출, 항목마다 실행, 결과 줄이기)
   runtime.py    조립, 예약작업 실행, 결과 저장, 웹훅
   scheduler.py  APScheduler cron 등록
   server.py     FastAPI: 실행 관리(SSE 스트리밍, 질문/답변, 중단), 스킬/파일 API

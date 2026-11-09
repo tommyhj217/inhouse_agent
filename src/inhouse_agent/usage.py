@@ -182,6 +182,7 @@ async def list_models(rt: "AgentRuntime", remote: bool = True) -> dict[str, Any]
         "provider": c.provider, "ready": ready, "status": why, "endpoint": c.base_url or c.endpoint, "deployment": c.deployment,
         "api_version": c.api_version, "auth": c.auth, "vision": c.vision, "max_output_tokens": c.max_output_tokens,
         "reasoning_effort": c.reasoning_effort, "models": [], "configured": [],
+        "api": c.api, "responses_api_version": c.responses_api_version, "reasoning_replay": c.reasoning_replay,
     }
     info["configured"] = rt.router.catalog() if len(rt.router.specs) > 1 else []
     info["routing"] = {"mode": rt.router.mode, "classifier": rt.router.classifier, "escalate": rt.router.escalation,
@@ -189,7 +190,7 @@ async def list_models(rt: "AgentRuntime", remote: bool = True) -> dict[str, Any]
     if remote and ready:
         try:
             llm = rt.llm
-            # ModelPool 이면 기본 모델의 연결, AzureChatModel 이면 그 연결
+            # ModelPool 이면 기본 모델의 연결, 단일 모델(AzureChatModel/AzureResponsesModel)이면 그 연결
             client = getattr(llm._client(None)[1], "_client", None) if callable(getattr(llm, "_client", None)) else getattr(llm, "_client", None)
             if client is not None:
                 page = await asyncio.wait_for(client.models.list(), 20)
@@ -207,6 +208,8 @@ async def list_models(rt: "AgentRuntime", remote: bool = True) -> dict[str, Any]
 def format_models(i: dict[str, Any]) -> str:
     lines = ["## 모델 목록",
              f"- 현재 사용 모델(배포): **{i['deployment'] or '(없음)'}** · provider {i['provider']} · 상태: {'연결 가능' if i['ready'] else '사용 불가'} ({i['status']})",
+             f"- API: " + ("Responses API (" + i.get("responses_api_version", "v1") + (", 추론 내용 이어 받기" if i.get("reasoning_replay") else "") + ")"
+                          if i.get("api") == "responses" else "Chat Completions") + "\n"
              f"- 엔드포인트: {i['endpoint'] or '-'} · api_version {i['api_version']} · 인증 {i['auth']} · 이미지 입력 {'지원' if i['vision'] else '미지원'}"
              + (f" · 최대 출력 {i['max_output_tokens']}" if i["max_output_tokens"] else "") + (f" · reasoning {i['reasoning_effort']}" if i["reasoning_effort"] else "")]
     if i["configured"]:

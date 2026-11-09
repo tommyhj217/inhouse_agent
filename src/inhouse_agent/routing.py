@@ -41,6 +41,10 @@ LIGHT = ("조회", "알려줘", "몇 ", "몇개", "몇 개", "언제", "날짜",
 CORRECTION = ("틀렸", "틀린", "잘못", "아니야", "아니라", "다시 해", "다시해", "그게 아니", "제대로")
 CONTINUE = ("계속", "이어서", "continue")
 
+# 모델마다 따로 줄 수 있는 연결 설정 (예: luna 는 api: chat, sol 은 api: responses)
+OVERRIDE_KEYS = ("endpoint", "base_url", "api_key", "api_version", "max_output_tokens", "reasoning_effort", "temperature",
+                 "max_tokens_param", "extra_headers", "api", "responses_api_version", "responses_base_url", "reasoning_replay")
+
 AVAILABILITY_CODES = {"rate_limit", "deployment", "server", "timeout", "network", "permission"}
 
 CLASSIFY_PROMPT = """당신은 업무 요청의 난이도를 고르는 분류기입니다. 아래 기준으로 low / mid / high 중 하나를 고르세요.
@@ -106,8 +110,7 @@ class ModelRouter:
                 m = {"name": m, "deployment": m}
             if not isinstance(m, dict) or not (m.get("deployment") or m.get("name")):
                 continue
-            extra = {k: m[k] for k in ("endpoint", "base_url", "api_key", "api_version", "max_output_tokens", "reasoning_effort",
-                                       "temperature", "max_tokens_param", "extra_headers") if k in m}
+            extra = {k: m[k] for k in OVERRIDE_KEYS if k in m}
             specs.append(ModelSpec(
                 name=str(m.get("name") or m["deployment"]), deployment=str(m.get("deployment") or m["name"]), tier=_to_tier(m.get("tier")),
                 cost_in=_num(m.get("cost_in")), cost_out=_num(m.get("cost_out")), cost_cached=_num(m.get("cost_cached")),
@@ -284,7 +287,7 @@ class ModelPool:
         self.cfg = base_cfg  # describe_error 등에서 deployment 표시용
 
     def _client(self, name: str | None) -> tuple[str, Any]:
-        from .llm import AzureChatModel
+        from .llm import make_chat_model
 
         spec = self.router.get(name) or self.router.default
         key = spec.name if spec else "_default"
@@ -293,9 +296,8 @@ class ModelPool:
             if spec is not None:
                 ov = dict(spec.overrides)
                 cfg = dataclasses.replace(cfg, deployment=spec.deployment, vision=bool(spec.vision), **{
-                    k: ov[k] for k in ("endpoint", "base_url", "api_key", "api_version", "max_output_tokens", "reasoning_effort",
-                                       "temperature", "max_tokens_param", "extra_headers") if k in ov})
-            self._clients[key] = AzureChatModel(cfg)
+                    k: ov[k] for k in OVERRIDE_KEYS if k in ov})
+            self._clients[key] = make_chat_model(cfg)
         return key, self._clients[key]
 
     async def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None, *, model: str | None = None, **kw: Any) -> Any:

@@ -1,4 +1,4 @@
-openai>=1.54
+openai>=1.66
 mcp>=1.9
 apscheduler>=3.10,<4
 pyyaml>=6

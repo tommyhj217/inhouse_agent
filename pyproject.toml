@@ -9,7 +9,7 @@ description = "사내 사이트 MCP(웹 컨트롤) tool 을 Azure OpenAI 로 오
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "openai>=1.54",
+    "openai>=1.66",
     "mcp>=1.9",
     "apscheduler>=3.10,<4",
     "pyyaml>=6",
