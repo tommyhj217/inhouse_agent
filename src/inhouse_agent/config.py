@@ -231,6 +231,10 @@ class ScheduleConfig:
     inputs: dict[str, Any] = field(default_factory=dict)
     user: str | None = None
     """이 사용자의 작업폴더에서 실행 (생략 시 공용 workspace)"""
+    business_days_only: bool = False
+    """true 면 휴일(주말·공휴일·회사 휴무일)에는 건너뜀"""
+    business_day: str | None = None
+    """그 달의 n번째 영업일에만 실행: first | last | 3 | -2 (cron 은 매일로 두고 함께 사용)"""
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "ScheduleConfig":
@@ -254,6 +258,8 @@ class ScheduleConfig:
             skill=_none_if_blank(d.get("skill")),
             inputs=dict(d.get("inputs") or {}),
             user=_none_if_blank(d.get("user")),
+            business_days_only=_to_bool(d.get("business_days_only"), False),
+            business_day=_none_if_blank(d.get("business_day")),
         )
 
 

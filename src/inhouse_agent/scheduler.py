@@ -47,8 +47,31 @@ class AgentScheduler:
             registered.append(job)
         return registered
 
+    def skip_reason(self, job: ScheduleConfig, today: Any = None) -> str | None:
+        """영업일 조건 때문에 오늘 건너뛰어야 하면 이유."""
+        if not job.business_days_only and not job.business_day:
+            return None
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from .bizdays import calendar
+
+        cal = calendar()
+        today = today or datetime.now(ZoneInfo(job.timezone or self.runtime.cfg.agent.timezone)).date()
+        why = cal.why_not(today)
+        if why is not None:
+            return f"휴일({why})"
+        if job.business_day and not cal.nth_of_month(today, job.business_day):
+            return f"이번 달 {job.business_day} 영업일이 아님"
+        return None
+
     async def _execute(self, name: str) -> None:
         job = self.runtime.cfg.get_schedule(name)
+        why = self.skip_reason(job)
+        if why:
+            log.info("예약작업 '%s' 건너뜀: %s", name, why)
+            print(f"[예약작업] {name}: 건너뜀 - {why}", flush=True)
+            return
         try:
             result, path = await self.runtime.run_job(job)
             print(f"[예약작업] {name}: {result.stopped_reason} → {path}", flush=True)
@@ -75,6 +98,8 @@ class AgentScheduler:
                     "enabled": s.enabled,
                     "servers": s.servers,
                     "description": s.description,
+                    "business_days_only": s.business_days_only,
+                    "business_day": s.business_day,
                     "next_run": nrt.isoformat() if nrt else None,
                 }
             )

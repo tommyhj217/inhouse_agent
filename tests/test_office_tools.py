@@ -297,3 +297,49 @@ async def test_render_preview(tmp_path: Path) -> None:
         for img in out.data["images"]:
             assert Path(img).read_bytes()[:4] == b"\x89PNG"
         assert all(f["state"] == "complete" for f in out.files)
+
+
+def test_business_calendar_kr_and_company_days() -> None:
+    from datetime import date
+
+    from inhouse_agent.bizdays import BusinessCalendar
+
+    cal = BusinessCalendar({"holidays": ["2026-11-20 창립기념일"], "workdays": ["2026-10-09"]})
+    assert cal.precise  # holidays 패키지 (설날·추석·대체공휴일)
+    assert cal.why_not(date(2026, 2, 17)) == "설날" and cal.why_not(date(2026, 3, 2)).endswith("대체 휴일")
+    assert cal.why_not(date(2026, 11, 20)) == "창립기념일" and cal.is_business_day(date(2026, 10, 9))  # 회사 설정
+    assert cal.add(date(2026, 2, 13), 1) == date(2026, 2, 19)  # 설 연휴 건너뜀
+    assert cal.add(date(2026, 3, 3), -1) == date(2026, 2, 27)  # 삼일절 대체휴일·주말 건너뜀
+    assert cal.add(date(2026, 10, 3), 0) == date(2026, 10, 6)  # 휴일이면 다음 영업일
+    assert cal.count(date(2026, 9, 21), date(2026, 9, 30)) == 6  # 추석 24·25일(26일은 토요일) 빠짐
+    assert cal.nth_of_month(date(2026, 9, 30), "last") and cal.nth_of_month(date(2026, 10, 1), "first")
+    assert cal.nth_of_month(date(2026, 10, 2), 2) and not cal.nth_of_month(date(2026, 10, 2), "last")
+
+
+async def test_business_days_tool_vars_and_schedule(tmp_path: Path) -> None:
+    from datetime import date, datetime
+    from zoneinfo import ZoneInfo
+
+    from inhouse_agent.runtime_utils import render_dates
+    from inhouse_agent.scheduler import AgentScheduler
+
+    cfg = load_config(_cfg(tmp_path, "calendar:\n  holidays: ['2026-11-20 창립기념일']\n"
+                                     "schedules:\n  - name: 월말보고\n    cron: '0 9 * * *'\n    prompt: '{last_month_last_business_day} 마감 자료'\n"
+                                     "    business_day: last\n  - name: 일일\n    cron: '0 9 * * *'\n    prompt: '{prev_business_day} 자료'\n"
+                                     "    business_days_only: true\n"))
+    async with AgentRuntime(cfg) as rt:
+        out = await rt.hub.call("business_days", {"op": "check", "date": "2026-11-20"})
+        assert "영업일이 아닙니다 (창립기념일)" in out.text and out.data["business_day"] is False
+        out = await rt.hub.call("business_days", {"op": "prev", "date": "2026-10-05"})
+        assert out.data["date"] == "2026-10-02"
+        out = await rt.hub.call("business_days", {"op": "month", "month": "2026-09"})
+        assert len(out.data["days"]) == 20 and "추석" in out.text  # 평일 22일 - 추석 2일
+        assert (await rt.hub.call("business_days", {"op": "last", "month": "2026-12"})).data["date"] == "2026-12-31"
+        assert (await rt.hub.call("business_days", {"op": "nope"})).is_error
+        now = datetime(2026, 10, 5, 9, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+        assert render_dates("{prev_business_day}/{this_month_last_business_day}/{last_month_last_business_day}", "Asia/Seoul", now) == "2026-10-02/2026-10-30/2026-09-30"
+        sch = AgentScheduler(rt)
+        monthly, daily = cfg.get_schedule("월말보고"), cfg.get_schedule("일일")
+        assert sch.skip_reason(daily, date(2026, 11, 20)) == "휴일(창립기념일)" and sch.skip_reason(daily, date(2026, 11, 19)) is None
+        assert sch.skip_reason(monthly, date(2026, 10, 29)) == "이번 달 last 영업일이 아님" and sch.skip_reason(monthly, date(2026, 10, 30)) is None
+        assert sch.jobs_info()[0]["business_day"] == "last"

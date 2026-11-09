@@ -119,6 +119,10 @@ class AgentRuntime:
         self.scripts = SkillScriptRunner(self.skills, self.workspace, cfg.raw.get("skills") or {}, self.dynamic, self.links)
         builtin_tools += self.scripts.tools()
         builtin_tools += make_compare_tools(self.workspace)
+        from .bizdays import configure as configure_calendar, make_business_day_tool
+
+        configure_calendar(cfg.raw.get("calendar"))  # 회사 휴무일·대체근무일
+        builtin_tools.append(make_business_day_tool(cfg.agent.timezone))
         from .excel_tools import make_excel_tools
 
         builtin_tools += make_excel_tools(self.workspace, self.links)  # 기존 엑셀 양식 채우기

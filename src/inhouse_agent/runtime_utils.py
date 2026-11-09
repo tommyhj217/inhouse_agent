@@ -6,9 +6,12 @@ import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-DATE_VARS = ("today", "yesterday", "tomorrow", "now", "weekday", "this_month", "last_month", "week_start", "week_end", "last_week_start", "last_week_end")
+BUSINESS_VARS = ("prev_business_day", "next_business_day", "this_month_first_business_day", "this_month_last_business_day",
+                 "last_month_last_business_day")
+DATE_VARS = ("today", "yesterday", "tomorrow", "now", "weekday", "this_month", "last_month", "week_start", "week_end", "last_week_start",
+             "last_week_end", *BUSINESS_VARS)
 
-_PLACEHOLDER = re.compile(r"\{(today|yesterday|tomorrow|now|weekday|this_month|last_month|week_start|week_end|last_week_start|last_week_end)\}")
+_PLACEHOLDER = re.compile(r"\{(" + "|".join(DATE_VARS) + r")\}")
 
 
 def render_dates(template: str, timezone: str, now: datetime | None = None) -> str:
@@ -31,4 +34,8 @@ def render_dates(template: str, timezone: str, now: datetime | None = None) -> s
         "last_week_start": (week_start - timedelta(days=7)).isoformat(),
         "last_week_end": (week_start - timedelta(days=1)).isoformat(),
     }
+    if any("{" + v + "}" in template for v in BUSINESS_VARS):  # 영업일 변수 (공휴일·회사 휴무일 반영)
+        from .bizdays import date_vars
+
+        values.update(date_vars(today))
     return _PLACEHOLDER.sub(lambda m: values[m.group(1)], template)

@@ -129,6 +129,12 @@ schedules:
 ```
 
 프롬프트에 쓸 수 있는 날짜 변수: `{today} {yesterday} {tomorrow} {now} {weekday} {this_month} {last_month} {week_start} {week_end} {last_week_start} {last_week_end}`
+영업일 변수 (공휴일·회사 휴무일 반영): `{prev_business_day} {next_business_day} {this_month_first_business_day} {this_month_last_business_day} {last_month_last_business_day}`
+
+예약작업 영업일 조건:
+- `business_days_only: true`: 주말, 공휴일, 회사 휴무일에는 건너뜁니다.
+- `business_day: last`: 그 달의 마지막 영업일에만 실행합니다. `first`, `3`(세 번째), `-2`(뒤에서 두 번째)도 됩니다. cron은 `"0 9 * * *"`처럼 매일로 둡니다.
+- 건너뛴 이유는 로그와 서버 창에 나옵니다. 상태 탭의 "지금 실행" 버튼은 조건 없이 바로 실행합니다.
 
 ## 3. 사용법
 
@@ -809,6 +815,21 @@ skills/menu_builder/
   - PNG 변환에는 poppler의 `pdftoppm`이나 PyMuPDF가 필요합니다. 둘 다 없으면 PDF만 만듭니다.
   - 결과는 `files/_preview/<파일이름>/`에 저장됩니다.
   - 여러 사람이 동시에 변환해도 충돌하지 않도록 변환할 때마다 LibreOffice 설정 폴더를 따로 씁니다.
+
+#### 영업일 계산 (`business_days`)
+
+한국 공휴일과 회사 휴무일을 반영해 영업일을 계산합니다.
+
+- **공휴일**: `holidays` 패키지로 설날·추석 같은 음력 공휴일, 대체공휴일, 선거일까지 반영합니다.
+- **회사 설정**: `config.yaml`의 `calendar.holidays`(회사 휴무일), `calendar.workdays`(휴일이지만 근무하는 날)
+- **할 수 있는 계산 (`op`)**:
+  - `check`: 영업일인지와 그 이유
+  - `prev`/`next`/`add`: n 영업일 전후
+  - `count`: 기간의 영업일 수
+  - `month`: 그 달의 영업일과 휴일 목록
+  - `first`/`last`: 그 달의 첫·마지막 영업일
+  - `holidays`: 그해의 휴일 목록
+- 같은 기준을 날짜 변수(`{prev_business_day}` 등)와 예약작업 조건(`business_days_only`, `business_day`)에도 씁니다.
 
 ## 13. 결과 파일 받기 / 공유 링크
 

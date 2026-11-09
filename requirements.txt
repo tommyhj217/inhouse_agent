@@ -19,3 +19,4 @@ fastapi>=0.110
 uvicorn>=0.29
 # Entra ID(AAD) 인증을 쓰는 경우
 # azure-identity>=1.15
+holidays>=0.50

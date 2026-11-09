@@ -20,6 +20,7 @@ dependencies = [
     "python-pptx>=0.6.21",
     "pypdf>=4",
     "xlrd>=2.0",
+    "holidays>=0.50",
     "tzdata; platform_system == 'Windows'",
 ]
 

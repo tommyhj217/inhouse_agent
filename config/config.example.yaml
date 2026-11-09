@@ -71,6 +71,15 @@ rules:
   dir: rulebooks
 
 # ---------------------------------------------------------------------
+# 영업일 (business_days 도구, {prev_business_day} 같은 날짜 변수, 예약작업 영업일 조건)
+#   한국 공휴일·대체공휴일은 자동 반영 (holidays 패키지). 회사 휴무일·대체근무일만 적으세요.
+# ---------------------------------------------------------------------
+calendar:
+  holidays: []                  # 예) ["2026-11-20 창립기념일", "2026-12-31 종무일"]
+  workdays: []                  # 휴일이지만 근무하는 날 예) ["2026-10-10"]
+  # weekend: [5, 6]             # 주말 요일 (월=0 … 일=6)
+
+# ---------------------------------------------------------------------
 # 사내 문서 도구
 # ---------------------------------------------------------------------
 office:
@@ -240,14 +249,15 @@ schedules:
   - name: daily_notice
     description: "매일 아침 전날 공지사항 요약"
     cron: "30 8 * * mon-fri"
+    business_days_only: true       # 공휴일·회사 휴무일에는 건너뜀
     servers: [demo]
     enabled: true
     output_format: md            # md | txt | json
     # webhook_url: ${TEAMS_WEBHOOK_URL:-}   # 결과를 Teams/Slack 웹훅으로 전송
     prompt: |
-      {yesterday} 에 등록된 공지사항을 모두 가져와서
+      {prev_business_day} 에 등록된 공지사항을 모두 가져와서
       제목/작성부서/핵심 내용 표로 정리하고, 업무에 영향이 큰 항목을 맨 위에 요약해줘.
-      정리한 표는 save_file 로 notices/{yesterday}.md 에 저장해줘.
+      정리한 표는 save_file 로 notices/{prev_business_day}.md 에 저장해줘.
 
   - name: monthly_sales
     description: "매월 1일 지난달 매출 보고서 (스킬 사용)"
