@@ -509,7 +509,7 @@ class RunView {
     on("subagent", d => this.subagent(d));
     on("model", d => this.add(`<div class="small muted">${d.kind === "start" ? "🧠 모델" : d.kind === "escalate" ? "⬆️ 모델 승격" : "↪️ 모델 변경"}: ${d.from && d.kind !== "start" ? esc(d.from) + " → " : ""}<b>${esc(d.model)}</b> · ${esc(d.reason)}</div>`));
     on("budget", d => this.add(`<div class="small muted">⏩ 진전이 있어 반복 한도를 늘렸습니다 (${d.from} → ${d.to}회)</div>`));
-    on("compact", d => this.add(`<div class="small muted">🗜 대화가 길어져 자동으로 줄였습니다 (약 ${Number(d.before).toLocaleString()} → ${Number(d.after).toLocaleString()} 토큰${d.masked ? " · 이전 도구 결과 " + d.masked + "개 축약" : ""}${d.summarized ? " · 앞 대화 " + d.summarized + "개 요약" : ""})</div>`));
+    on("compact", d => this.add(`<div class="small muted">🗜 대화가 길어져 자동으로 줄였습니다 (약 ${Number(d.before).toLocaleString()} → ${Number(d.after).toLocaleString()} 토큰${d.masked ? " · 이전 도구 결과 " + d.masked + "개 축약" : ""}${d.summarized ? " · 앞 대화 " + d.summarized + "개 " + (d.updated ? "를 이전 요약에 반영" : "요약") : ""}${d.files ? " · 파일 " + d.files + "개 기록" : ""})</div>`));
     on("done", d => this.done(d));
     this.es.onerror = () => { if (this.es && this.es.readyState === 2) this.es = null; };
   }

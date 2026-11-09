@@ -540,7 +540,9 @@ class Agent:
                 sigs = []
                 for tc, ev in zip(resp.tool_calls, tool_results):
                     events.append(ev)
-                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": ev.result})
+                    paths = [f["path"] for f in ev.files if f.get("path")]
+                    # _files: 대화 압축 때 요약에 파일 목록을 기계적으로 남기기 위한 기록 (API 로는 안 보냄)
+                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": ev.result, **({"_files": paths} if paths else {})})
                     sig = (tc.name, json.dumps(ev.arguments, ensure_ascii=False, sort_keys=True, default=str))
                     seen[sig] = seen.get(sig, 0) + 1
                     sigs.append(sig)

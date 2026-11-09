@@ -136,3 +136,102 @@ async def test_summary_keeps_current_request_when_cut_inside_turn() -> None:
     assert info and info["summarized"] > 0
     assert msgs[1]["_summary"] and "엑셀 3개를 비교해줘 (영업부만)" in msgs[1]["content"]  # 현재 요청 원문 유지
     assert msgs[2]["role"] == "assistant" and pairs_ok(msgs[1:])
+
+
+# ---------------------------------------------------------------- 요약 형식 (pi 방식)
+from inhouse_agent.context import SUMMARY_HEAD, collect_files, summary_message  # noqa: E402
+
+
+class Summarizer:
+    """요약 요청을 기록하고 정해진 요약을 돌려주는 가짜 LLM."""
+
+    def __init__(self, *answers: str):
+        self.answers = list(answers)
+        self.calls: list[list[dict[str, Any]]] = []
+
+    async def chat(self, messages, tools=None, **kw):
+        self.calls.append(messages)
+        return LLMResponse(content=self.answers.pop(0))
+
+
+def tool_turn(i: int, args: dict[str, Any], result: str, files: list[str] | None = None) -> list[dict[str, Any]]:
+    a = {"role": "assistant", "content": "", "tool_calls": [{"id": f"t{i}", "type": "function",
+                                                             "function": {"name": "read_file_text", "arguments": json.dumps(args, ensure_ascii=False)}}]}
+    t = {"role": "tool", "tool_call_id": f"t{i}", "content": result, **({"_files": files} if files else {})}
+    return [a, t]
+
+
+def test_collect_files_from_args_results_and_previous_summary() -> None:
+    prev = summary_message("이전", ["/w/downloads/1월.xlsx"], ["/w/files/양식.xlsx"])
+    msgs = [prev, *tool_turn(1, {"path": "/w/files/양식.xlsx", "opts": {"output_path": "/w/outputs/결과.xlsx"}, "paths": ["a/b.csv", "x"]},
+                             "ok", ["/w/downloads/2월.xlsx"]),
+            *tool_turn(2, {"query": "매출 / 부서", "template": "보고서.pptx"}, "ok", ["/w/downloads/1월.xlsx"])]
+    made, used = collect_files(msgs)
+    assert made == ["/w/downloads/1월.xlsx", "/w/downloads/2월.xlsx"]  # 누적, 중복 제거
+    assert used == ["/w/files/양식.xlsx", "/w/outputs/결과.xlsx", "a/b.csv", "보고서.pptx"]  # 경로 키의 값만 ('x', query 제외)
+
+
+async def test_second_compaction_updates_previous_summary_without_cutting_it() -> None:
+    cm = ContextManager(window=6000, compact_at=0.5)
+    long_prev = "## 목표\n- 3월 매출 부서별 정리\n## 꼭 필요한 정보\n" + "\n".join(f"- 부서{i} 합계 {i * 1000:,}원" for i in range(80))
+    msgs: list[dict[str, Any]] = [{"role": "system", "content": "s"}, summary_message(long_prev, ["/w/downloads/3월.xlsx"], []),
+                                  {"role": "user", "content": "이제 4월도 같은 방식으로"}]
+    for i in range(4):
+        msgs += tool_turn(i, {"path": f"/w/files/4월_{i}.xlsx"}, "행 " * 1500, [f"/w/downloads/4월_{i}.xlsx"] if i == 0 else None)
+    llm = Summarizer("## 목표\n- 3·4월 매출 정리\n## 꼭 필요한 정보\n- 부서79 합계 79,000원")
+    info = await cm.compact(llm, msgs, force=True)
+    assert info and info["updated"] and info["files"] >= 2
+    sent = llm.calls[0][1]["content"]
+    assert sent.startswith("<이전 요약>\n" + long_prev + "\n</이전 요약>")  # 이전 요약은 통째로 (잘리지 않음)
+    assert SUMMARY_HEAD not in sent.split("</이전 요약>")[1]  # 기록 쪽에 이전 요약을 다시 넣지 않음
+    assert "[에이전트 도구 호출] read_file_text" in sent and "행 " * 1100 not in sent  # 도구 결과는 축약되거나 2000자로 줄어 있음
+    new = msgs[1]
+    assert new["_summary"] and new["_summary_body"].startswith("## 목표\n- 3·4월")
+    assert "/w/downloads/3월.xlsx" in new["_files"] and "/w/downloads/4월_0.xlsx" in new["_files"]  # 압축을 거듭해도 파일 누적
+    assert "<받거나 만든 파일>\n/w/downloads/3월.xlsx" in new["content"] and "/w/files/4월_0.xlsx" in new["content"]
+    assert pairs_ok(msgs[1:])
+
+
+async def test_user_request_is_not_cut_but_tool_results_are() -> None:
+    cm = ContextManager(window=20000, compact_at=0.5)
+    ask = "다음 조건으로 정리해줘: " + "조건 " * 900  # 약 2,700자 - 예전에는 기록 수에 따라 800자까지 잘릴 수 있었음
+    msgs: list[dict[str, Any]] = [{"role": "system", "content": "s"}, {"role": "user", "content": ask}]
+    for i in range(10):
+        msgs += tool_turn(i, {"path": f"f{i}.csv"}, "값 " * 3000)
+    msgs += [{"role": "assistant", "content": "중간 정리"}, {"role": "user", "content": "계속"}]
+    llm = Summarizer("## 목표\n- 정리")
+    await cm.compact(llm, msgs, force=True)
+    sent = llm.calls[0][1]["content"]
+    assert ask in sent  # 사용자 요청은 통째로
+    assert "값 " * 1100 not in sent  # 도구 결과(6,000자)는 1단계 축약 또는 2,000자 자르기로 줄어 있음
+    assert llm.calls[0][0]["content"] == SUMMARY_PROMPT and "## 진행" in SUMMARY_PROMPT and "### 막힘" in SUMMARY_PROMPT
+
+
+async def test_downloaded_files_survive_compaction_in_agent(tmp_path: Path) -> None:
+    """실제 다운로드(샘플 MCP) → 도구 메시지에 _files 기록 → 압축 요약에 경로가 그대로 남음."""
+    cfg = load_config(write_config(tmp_path))
+    cfg.agent.context_window, cfg.agent.max_iterations = 3000, 8
+    llm = ScriptedLLM([
+        LLMResponse(None, [ToolCall("d1", "demo__download_sales_excel", json.dumps({"month": "2026-10", "wait": True}))]),
+        *[LLMResponse(None, [ToolCall(f"n{i}", "demo__list_notices", json.dumps({"date_from": f"2026-10-{i + 1:02d}", "date_to": "2026-10-31"}))])
+          for i in range(3)],
+        LLMResponse("## 목표\n- 10월 매출 정리"),  # 압축 요약 (ScriptedLLM 은 순서대로 답함)
+        LLMResponse("정리 끝"),
+    ])
+    async with AgentRuntime(cfg, llm=llm) as rt:
+        msgs = rt.agent.new_conversation()
+        r = await rt.agent.run("10월 매출 엑셀 받아서 정리", messages=msgs)
+    assert r.success and r.output == "정리 끝"
+    summary = next(m for m in r.messages if m.get("_summary"))  # 다운로드한 도구 결과는 요약으로 들어감
+    xlsx = [p for p in summary["_files"] if p.endswith("매출현황_2026-10.xlsx")]
+    assert xlsx and f"<받거나 만든 파일>\n{xlsx[0]}" in summary["content"]
+    assert not any(m.get("role") == "tool" and "매출현황" in str(m.get("content")) for m in r.messages)
+
+
+def test_render_clips_tool_results_to_2000_chars() -> None:
+    from inhouse_agent.context import _render
+
+    out = _render({"role": "tool", "content": "가" * 5000})
+    assert "…(중략 3,000자)…" in out and len(out) < 2100
+    assert _render({"role": "user", "content": "나" * 3900}).count("나") == 3900
+    assert _render({"role": "user", "content": "x", "_auto": True}).startswith("[시스템 안내]")
