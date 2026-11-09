@@ -116,6 +116,9 @@ class AgentRuntime:
         self.scripts = SkillScriptRunner(self.skills, self.workspace, cfg.raw.get("skills") or {}, self.dynamic, self.links)
         builtin_tools += self.scripts.tools()
         builtin_tools += make_compare_tools(self.workspace)
+        from .excel_tools import make_excel_tools
+
+        builtin_tools += make_excel_tools(self.workspace, self.links)  # 기존 엑셀 양식 채우기
         builtin_tools += make_usage_tools(self)
         self.hub = MCPHub(
             cfg.mcp_servers,
