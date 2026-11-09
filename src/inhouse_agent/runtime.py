@@ -447,7 +447,9 @@ class AgentRuntime:
 
 def _post_webhook(url: str, name: str, result: AgentResult, path: Path, links: list[tuple[str, str]] | None = None) -> None:
     """Teams/Slack 호환 단순 웹훅({"text": ...}) 전송."""
-    status = "성공" if result.success else f"실패({result.stopped_reason})"
+    from .errors import status_label
+
+    status = "성공" if result.success else f"⚠ {status_label(result.stopped_reason)}" + (f" - {result.error['title']}" if result.error else "")
     text = f"[{name}] 예약작업 {status}\n저장: {path}\n\n{result.output[:3500]}"
     if links:
         text += "\n\n[파일 받기]\n" + "\n".join(f"- {n}: {u}" for n, u in links)

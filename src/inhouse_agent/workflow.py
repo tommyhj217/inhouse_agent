@@ -173,6 +173,7 @@ async def run_workflow(
                 await r
 
     stopped = "completed"
+    error: dict[str, Any] | None = None
     lines: list[str] = []
     try:
         run_ctx.meta["emit"] = emit
@@ -222,12 +223,19 @@ async def run_workflow(
             await plan()
             if is_err and step["on_error"] == "stop":
                 stopped = "error"
-                lines.append(f"\n⛔ {i + 1}단계에서 오류가 나서 멈췄습니다 (on_error: continue 로 계속 진행 가능).")
+                name = step["title"] or tool
+                single = len(steps) == 1
+                error = {"code": "step_failed", "retryable": True, "detail": out_text.removeprefix("오류: ")[:400],
+                         "title": f"'{name}' 실행 중 오류가 났습니다" if single else f"{i + 1}단계 '{name}' 에서 오류가 나서 멈췄습니다",
+                         "hint": "입력값(경로·날짜 등)과 사이트(MCP 서버) 상태를 확인하고 다시 실행하세요." if single else
+                                 "단계의 입력값과 사이트(MCP 서버) 상태를 확인하세요. 이 단계가 실패해도 계속하려면 SKILL.md 의 그 단계에 on_error: continue 를 넣으세요."}
+                head = f"❌ **{error['title']}**\n- 원인: {error['detail']}\n- 조치: {error['hint']}\n"
+                lines = [head] if single else [head, *lines]  # 단계가 하나면 같은 오류를 두 번 보여주지 않음
                 break
         if output_template and stopped == "completed":
             output = str(render(output_template, ctx))
         else:
-            output = (f"# {title}\n" if title else "") + "\n\n".join(lines)
+            output = (f"# {title}\n" if title and not error else "") + "\n\n".join(lines)
         await emit("final", {"content": output})
     finally:
         current_run.reset(token)
@@ -239,4 +247,4 @@ async def run_workflow(
         {"role": "user", "content": f"[워크플로 실행] {title} 입력값 {json.dumps(inputs, ensure_ascii=False)}"},
         {"role": "assistant", "content": output},
     ]
-    return AgentResult(output, messages, events, len(events), {}, stopped, time.monotonic() - started, list(files.values()), [])
+    return AgentResult(output, messages, events, len(events), {}, stopped, time.monotonic() - started, list(files.values()), [], error)

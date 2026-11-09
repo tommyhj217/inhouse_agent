@@ -74,7 +74,9 @@ class AgentScheduler:
             return
         try:
             result, path = await self.runtime.run_job(job)
-            print(f"[예약작업] {name}: {result.stopped_reason} → {path}", flush=True)
+            from .errors import status_label
+
+            print(f"[예약작업] {name}: {status_label(result.stopped_reason)} → {path}", flush=True)
         except Exception:  # noqa: BLE001
             log.exception("예약작업 '%s' 실행 실패", name)
 

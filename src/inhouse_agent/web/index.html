@@ -88,6 +88,9 @@ pre{background:var(--code);padding:8px 10px;border-radius:8px;overflow:auto;max-
 .log{flex:1;overflow:auto;display:flex;flex-direction:column;gap:10px;padding:4px 2px 12px}
 .msg-user{align-self:flex-end;background:var(--soft);border-radius:12px;padding:8px 12px;max-width:80%;white-space:pre-wrap}
 .answer{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 14px;overflow:auto}
+.endbox{border:1px solid currentColor;border-left-width:5px;border-radius:10px;padding:10px 14px;display:grid;gap:6px;background:var(--panel)}
+.endbox.err{color:var(--err)}.endbox.warn{color:var(--warn)}
+.endbox .t{font-weight:700}.endbox .d{color:var(--fg);font-size:13px}.endbox .row button{font-size:13px}
 .answer table{border-collapse:collapse;margin:6px 0;font-size:13px}
 .answer th,.answer td{border:1px solid var(--line);padding:4px 8px;text-align:left;vertical-align:top}
 .answer h1,.answer h2,.answer h3{font-size:15px;margin:10px 0 4px}
@@ -480,7 +483,7 @@ function showTab(name) {
 
 // ---------------- 실행 뷰 (조사/스킬 공용) ----------------
 class RunView {
-  constructor(logEl, {onDone, onStart} = {}) { this.log = logEl; this.onDone = onDone; this.onStart = onStart; this.es = null; this.runId = null; this.steps = {}; }
+  constructor(logEl, {onDone, onStart, onRetry, onContinue} = {}) { this.log = logEl; this.onDone = onDone; this.onStart = onStart; this.onRetry = onRetry; this.onContinue = onContinue; this.es = null; this.runId = null; this.steps = {}; }
   async start(body) {
     const run = await api("/api/runs", {json: body});
     this.attach(run);
@@ -564,7 +567,10 @@ class RunView {
   done(d) {
     if (this.es) { this.es.close(); this.es = null; }
     const ok = d.status === "completed";
-    this.status.innerHTML = `<span class="badge ${ok ? "b-ok" : (d.status === "cancelled" ? "b-warn" : "b-err")}">${ok ? "완료" : esc(d.status)}${d.elapsed ? " · " + d.elapsed + "s" : ""}</span>`
+    const level = d.level || (ok ? "ok" : d.status === "cancelled" ? "muted" : "error");
+    const short = {completed: "완료", max_iterations: "반복 한도", time_limit: "시간 한도", loop: "되풀이 중단", tool_errors: "도구 오류", error: "오류", cancelled: "중단"}[d.status] || d.status;
+    this.status.innerHTML = `<span class="badge ${level === "ok" ? "b-ok" : level === "warn" ? "b-warn" : level === "muted" ? "" : "b-err"}">${esc(short)}${d.elapsed ? " · " + d.elapsed + "s" : ""}</span>`
+      + (d.max_iterations && d.iterations ? ` <span class="small muted">도구 왕복 ${d.iterations}/${d.max_iterations}</span>` : "")
       + (d.usage && d.usage.total_tokens ? ` <span class="small muted">토큰 ${d.usage.total_tokens.toLocaleString()}</span>` : "")
       + (d.saved_to ? ` <span class="small muted">저장: ${esc(d.saved_to)}</span>` : "");
     const ans = this.hadView  // 화면 메뉴가 나왔으면 텍스트 결과는 접어 둠 (메뉴가 위로 밀리지 않게)
@@ -572,7 +578,20 @@ class RunView {
       : this.add(`<div class="answer">${md(d.output)}</div>`);
     linkifyPaths(ans);
     if (d.files && d.files.length) ans.insertAdjacentHTML("beforeend", `<div class="small muted" style="margin-top:6px">사용한 파일: ${this.fileChips(d.files)}</div>`);
+    if (!ok && d.status !== "cancelled") this.endBox(d, level);
     this.onDone && this.onDone(d);
+  }
+  endBox(d, level) {  // 정상 완료가 아니면 무엇이 왜 멈췄는지와 다음 행동을 분명히
+    const e = d.error || {};
+    const title = e.title || d.label || "실행을 마치지 못했습니다";
+    const lines = [];
+    if (e.hint) lines.push(`<div class="d">조치: ${esc(e.hint)}</div>`);
+    if (!e.title && d.detail) lines.push(`<div class="d">${esc(d.detail)}</div>`);
+    if (level === "warn") lines.push(`<div class="d">위 답변은 지금까지의 중간 결과입니다. 이어서 하면 대화와 받은 파일을 기억한 채로 계속합니다.</div>`);
+    const box = this.add(`<div class="endbox ${level === "warn" ? "warn" : "err"}"><div class="t">${level === "warn" ? "⚠️" : "❌"} ${esc(title)}</div>${lines.join("")}
+      <div class="row" style="gap:6px">${level === "warn" && this.onContinue ? `<button class="primary e-cont">계속 진행</button>` : ""}${this.onRetry ? `<button class="e-retry">다시 시도</button>` : ""}</div></div>`);
+    const c = box.querySelector(".e-cont"); if (c) c.onclick = () => { box.querySelectorAll("button").forEach(b => b.disabled = true); this.onContinue(); };
+    const r = box.querySelector(".e-retry"); if (r) r.onclick = () => { box.querySelectorAll("button").forEach(b => b.disabled = true); this.onRetry(); };
   }
   async cancel() { if (this.runId) await api(`/api/runs/${this.runId}/cancel`, {method: "POST"}); }
 }
@@ -652,7 +671,8 @@ async function sendChat(text) {
   const srv = $("#chat-servers").value;
   const servers = srv ? [srv] : [];
   $("#chat-send").disabled = true; $("#chat-cancel").classList.remove("hidden");
-  const view = new RunView(chatLog, {onDone: () => { chatRun = null; $("#chat-send").disabled = false; $("#chat-cancel").classList.add("hidden"); loadSessions(); }});
+  const view = new RunView(chatLog, {onDone: () => { chatRun = null; $("#chat-send").disabled = false; $("#chat-cancel").classList.add("hidden"); loadSessions(); },
+    onRetry: () => { pendingImages = []; sendChat(text); }, onContinue: () => sendChat("계속 진행해줘")});
   chatRun = view;
   try {
     const run = await view.start({prompt: text, session_id: chatSession, servers: servers.length ? servers : null, images: imgs, attachments: docs});
@@ -903,7 +923,8 @@ async function execCommand(it, args, prompt, mode = "auto", shownLabel = "") {
   chatLog.insertAdjacentHTML("beforeend", `<div class="msg-user">${esc(label)}${docsHtml(att)}</div>`);
   if (att.length) { pendingImages = []; renderPending(); }
   $("#chat-send").disabled = true; $("#chat-cancel").classList.remove("hidden");
-  const view = new RunView(chatLog, {onDone: () => { chatRun = null; $("#chat-send").disabled = false; $("#chat-cancel").classList.add("hidden"); loadSessions(); }});
+  const view = new RunView(chatLog, {onDone: () => { chatRun = null; $("#chat-send").disabled = false; $("#chat-cancel").classList.add("hidden"); loadSessions(); },
+    onRetry: () => execCommand(it, args, prompt, mode, shownLabel), onContinue: () => sendChat("계속 진행해줘")});
   chatRun = view;
   try {
     const body = it.kind === "skill" ? {skill: it.name, inputs: args, prompt, mode, new_session: true, attachments: att} : {tool: it.name, args, session_id: chatSession};
@@ -942,6 +963,7 @@ async function openSession(id) {
     const box = document.createElement("div"); box.style.display = "grid"; box.style.gap = "6px";
     box.innerHTML = (t.tools && t.tools.length ? `<div class="small muted">🔧 ${esc(t.tools.join(", "))}</div>` : "")
       + `<div class="answer">${md(t.output)}</div>`
+      + (t.status && !["completed", "running"].includes(t.status) ? `<div class="small ${t.status === "cancelled" ? "muted" : t.status === "error" || t.status === "tool_errors" ? "b-err" : "b-warn"}">${t.error ? "❌ " + esc(t.error.title) : "⚠️ " + esc({max_iterations: "반복 한도에 도달해 중간 결과로 마침", time_limit: "시간 한도에 도달해 중간 결과로 마침", loop: "같은 작업을 되풀이해 멈춤", tool_errors: "도구 오류가 이어져 멈춤", error: "오류로 마치지 못함", cancelled: "사용자가 중단"}[t.status] || t.status)}</div>` : "")
       + (t.files && t.files.length ? `<div class="small muted">파일: ${t.files.map(f => `<span class="filechip" data-path="${esc(f)}">📄 ${esc(f.split(/[\\/]/).pop())} <a href="${esc(fileUrl(f))}" download>⬇</a></span>`).join("")}</div>` : "");
     chatLog.appendChild(box); linkifyPaths(box.querySelector(".answer"));
   }
@@ -1565,7 +1587,7 @@ async function loadStatus() {
       try { const r = await api(`/api/jobs/${encodeURIComponent(b.dataset.job)}/run`, {method: "POST"}); out.innerHTML = `${stateBadge(r.status === "completed" ? "complete" : "corrupt")} 저장: ${esc(r.saved_to)}`; }
       catch (e) { out.textContent = e.message; } b.disabled = false;
     });
-    $("#st-runs").innerHTML = runs.length ? `<table class="grid"><thead><tr><th>시각</th><th>종류</th><th>내용</th><th>상태</th></tr></thead><tbody>${runs.slice(0, 30).map(r => `<tr><td class="small">${new Date(r.created * 1000).toLocaleString()}</td><td>${r.kind === "skill" ? "스킬" : "조사"}</td><td>${esc(r.title)}</td><td>${esc(r.status)}</td></tr>`).join("")}</tbody></table>` : `<span class="muted small">아직 실행 기록이 없습니다</span>`;
+    $("#st-runs").innerHTML = runs.length ? `<table class="grid"><thead><tr><th>시각</th><th>종류</th><th>내용</th><th>상태</th></tr></thead><tbody>${runs.slice(0, 30).map(r => `<tr><td class="small">${new Date(r.created * 1000).toLocaleString()}</td><td>${r.kind === "skill" ? "스킬" : "조사"}</td><td>${esc(r.title)}</td><td>${esc(r.label || r.status)}</td></tr>`).join("")}</tbody></table>` : `<span class="muted small">아직 실행 기록이 없습니다</span>`;
   } catch (e) { $("#st-info").textContent = "오류: " + e.message; }
   loadUsage();
   api("/api/models?remote=true").then(m => { $("#st-models").innerHTML = md(m.text); }).catch(e => { $("#st-models").textContent = e.message; });

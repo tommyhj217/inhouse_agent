@@ -23,6 +23,7 @@ from typing import Any
 from .config import AppConfig
 from .runtime import AgentRuntime
 from .scheduler import AgentScheduler
+from .errors import describe_error, failure_text, status_label, status_level
 from .skills import SkillError
 from .users import UserError, current_user
 
@@ -187,6 +188,7 @@ class Run:
             "kind": self.kind,
             "title": self.title,
             "status": self.status,
+            "label": status_label(self.status) if self.status not in ("running", "waiting_input") else ("실행 중" if self.status == "running" else "답변 대기"),
             "created": self.created,
             "finished": self.finished,
             "question": self.question,
@@ -314,7 +316,7 @@ class RunManager:
                 sess.touched = time.time()
                 ready, why = self.rt.llm_status()
                 if run.kind == "tool":  # 도구 직접 실행 (LLM/토큰 불필요)
-                    step = {"id": "t", "tool": run.tool, "args": run.args or {}, "on_error": "continue", "title": run.tool}
+                    step = {"id": "t", "tool": run.tool, "args": run.args or {}, "on_error": "stop", "title": run.tool}  # 실패하면 오류로 끝나게
                     result = await self.rt.run_workflow([step], {}, title=f"/{run.tool}", on_event=on_event, ask=ask)
                     sess.messages = (sess.messages or []) + result.messages
                 elif sess.skill and (run.skill_start or ready):  # LLM 이 없으면 스킬 대화의 후속 말은 워크플로를 다시 돌리지 않음
@@ -354,6 +356,12 @@ class RunManager:
                 "done",
                 {
                     "status": result.stopped_reason,
+                    "label": status_label(result.stopped_reason),  # 화면에 보일 상태 (예: 오류로 실행을 마치지 못했습니다)
+                    "level": status_level(result.stopped_reason),  # ok | warn | error | muted
+                    "error": result.error,  # {code, title, detail, hint, retryable}
+                    "detail": result.detail,
+                    "iterations": result.iterations,
+                    "max_iterations": result.max_iterations,
                     "output": result.output,
                     "elapsed": round(result.elapsed, 1),
                     "usage": result.usage,
@@ -364,13 +372,21 @@ class RunManager:
             )
         except asyncio.CancelledError:
             run.status = "cancelled"
-            await run.push("done", {"status": "cancelled", "output": "실행을 중단했습니다."})
+            await run.push("done", {"status": "cancelled", "label": status_label("cancelled"), "level": "muted", "output": "실행을 중단했습니다."})
         except SkillError as e:
             run.status = "error"
-            await run.push("done", {"status": "error", "output": f"스킬 오류: {e}"})
+            info = {"code": "skill", "title": "스킬을 실행할 수 없습니다", "detail": str(e), "retryable": False,
+                    "hint": "스킬 입력값과 SKILL.md 형식을 확인하세요 (스킬 탭에서 형식 검사)."}
+            await run.push("done", {"status": "error", "label": status_label("error"), "level": "error", "error": info,
+                                    "output": failure_text(info)})
         except Exception as e:  # noqa: BLE001
+            import logging
+
+            logging.getLogger(__name__).exception("실행 오류")
             run.status = "error"
-            await run.push("done", {"status": "error", "output": f"오류: {type(e).__name__}: {e}"})
+            info = describe_error(e, self.rt.cfg.llm.deployment)
+            await run.push("done", {"status": "error", "label": status_label("error"), "level": "error", "error": info,
+                                    "output": failure_text(info)})
         finally:
             run.finished = time.time()
             self._persist(run, sess, prompt, images, result)
@@ -391,6 +407,7 @@ class RunManager:
             "usage": done.get("usage") or {},
             "elapsed": done.get("elapsed"),
             "status": run.status,
+            "error": done.get("error"),
             "output": done.get("output", ""),
             "tools": [f"{e['server']}.{e['tool']}" + ("(오류)" if e.get("is_error") else "") for e in run.events if e["type"] == "tool_end"],
             "files": [f["path"] for f in (done.get("files") or []) if f.get("path")],

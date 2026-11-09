@@ -133,12 +133,14 @@ async def test_server_crash_reconnect(tmp_path: Path) -> None:
 
 async def test_bad_json_and_max_iterations(tmp_path: Path) -> None:
     cfg = load_config(write_config(tmp_path))
-    loop_resp = [LLMResponse(content=None, tool_calls=[ToolCall(f"x{i}", "get_current_time", "{")]) for i in range(5)]
+    loop_resp = [LLMResponse(content=None, tool_calls=[ToolCall(f"x{i}", "get_current_time", "{")]) for i in range(3)]
     llm = ScriptedLLM(loop_resp + [LLMResponse(content="한도 도달 요약")])
     async with AgentRuntime(cfg, llm=llm) as rt:
         r = await rt.agent.run("테스트")
-        assert r.stopped_reason == "max_iterations" and r.output == "한도 도달 요약"
-        assert all(e.is_error and "JSON" in e.result for e in r.tool_events)
+        # 도구 오류(잘못된 JSON 인자)가 3번 이어지면 한도를 다 쓰지 않고 멈추고, 도구 없이 정리한 답 + 안내
+        assert r.stopped_reason == "tool_errors" and r.output.startswith("한도 도달 요약") and "계속" in r.output
+        assert all(e.is_error and "JSON" in e.result for e in r.tool_events) and len(r.tool_events) == 3
+        assert "도구를 부르지 말고" in llm.calls[-1][-1]["content"] and llm.tools is None
 
 
 def test_function_name_rules() -> None:

@@ -48,11 +48,14 @@ def make_subagent_tool(rt: "AgentRuntime") -> BuiltinTool:
             return ToolOutcome("오류: task(맡길 작업 설명)가 필요합니다.", True)
         files = [str(f) for f in args.get("files") or []]
         servers = [str(s) for s in args.get("servers") or []] or None
-        max_it = max(2, min(int(args.get("max_iterations") or acfg.subagent_max_iterations), acfg.max_iterations))
+        max_it = max(2, min(int(args.get("max_iterations") or acfg.subagent_max_iterations), acfg.max_iterations_cap))
 
         from .agent import Agent
 
-        sub = Agent(rt.llm, rt.hub, dataclasses.replace(acfg, max_iterations=max_it), rt.skills)
+        # 하위 작업은 짧게: 기본 12회(진전 있으면 최대 30회), 10분
+        sub_cfg = dataclasses.replace(acfg, max_iterations=max_it, max_iterations_cap=min(acfg.max_iterations_cap, max(max_it, 30)),
+                                      max_minutes=acfg.subagent_max_minutes)
+        sub = Agent(rt.llm, rt.hub, sub_cfg, rt.skills)
         sub.rules_path = rt.rules_path
         sub.recent_sessions_in_prompt = 0
         parent = current_run.get()
@@ -81,8 +84,10 @@ def make_subagent_tool(rt: "AgentRuntime") -> BuiltinTool:
         if emit is not None:
             await emit("subagent", {"sid": sid, "task": label, "event": "done", "status": res.stopped_reason,
                                     "elapsed": round(time.monotonic() - t0, 1), "tokens": res.usage.get("total_tokens", 0)})
+        from .errors import status_label
+
         text = (f"[하위 작업 결과] {label}\n{res.output}\n\n"
-                f"(상태 {res.stopped_reason} · 도구 {len(tools)}회{': ' + ', '.join(dict.fromkeys(tools)) if tools else ''} · "
+                f"(상태: {status_label(res.stopped_reason)} · 도구 {len(tools)}회{': ' + ', '.join(dict.fromkeys(tools)) if tools else ''} · "
                 f"{res.elapsed:.1f}초 · 토큰 {res.usage.get('total_tokens', 0):,})")
         return ToolOutcome(text, not res.success, list(res.files))
 

@@ -129,6 +129,7 @@ async def cmd_run(cfg: AppConfig, args: argparse.Namespace) -> int:
         if not args.quiet:
             print()
         print(result.output)
+        _print_status(result)
         path = None
         if args.save:
             path = rt.save_result(args.save, prompt, result)
@@ -188,6 +189,15 @@ def _parse_inputs(items: list[str] | None) -> dict[str, str]:
             raise SystemExit(f"입력값 형식은 key=value 입니다: {it}")
         out[k.strip()] = v
     return out
+
+
+def _print_status(result: Any) -> None:
+    """완료가 아니면 상태를 따로 한 줄로 (스크립트·배치에서 알아보기 쉽게, stderr)."""
+    if result.stopped_reason != "completed":
+        from .errors import status_label
+
+        print(f"\n[상태] {status_label(result.stopped_reason)}" + (f" - {result.error['title']}" if result.error else "")
+              + (f" ({result.detail})" if result.detail else ""), file=sys.stderr)
 
 
 async def cmd_chat(cfg: AppConfig, args: argparse.Namespace) -> int:
@@ -381,6 +391,7 @@ async def cmd_jobs(cfg: AppConfig, args: argparse.Namespace) -> int:
         result, path = await rt.run_job(job, on_event=_print_event(args.verbose))
         print()
         print(result.output)
+        _print_status(result)
         print(f"\n[저장] {path}")
         _print_links(rt, result, path)
     return 0 if result.success else 2
@@ -471,6 +482,7 @@ async def cmd_skills(cfg: AppConfig, args: argparse.Namespace) -> int:
         )
         print()
         print(result.output)
+        _print_status(result)
         print(f"\n[저장] {path}")
         _print_links(rt, result, path)
     return 0 if result.success else 2

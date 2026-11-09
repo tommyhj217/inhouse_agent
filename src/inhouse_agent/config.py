@@ -129,13 +129,19 @@ class LLMConfig:
 @dataclass
 class AgentConfig:
     system_prompt: str = ""
-    max_iterations: int = 25
+    max_iterations: int = 30  # 기본 반복 예산 (진전이 있으면 자동으로 늘어남)
+    max_iterations_cap: int = 100  # 늘어날 수 있는 상한
+    extend_iterations: int = 10  # 한 번에 늘리는 횟수
+    max_minutes: float = 30.0  # 한 요청의 최대 실행 시간 (분)
+    loop_threshold: int = 3  # 같은 도구를 같은 인자로 이만큼 부르면 되풀이로 보고 멈춤
+    max_tool_error_streak: int = 3  # 도구가 모두 실패한 차례가 이만큼 이어지면 멈춤
     max_tool_result_chars: int = 30000
     max_history_messages: int = 200  # 넘으면 앞부분을 요약 (토큰 기준 자동 압축과 함께 동작)
     context_window: int = 128000  # 배포 모델의 입력 한도(토큰). 자동 압축 기준
     compact_at: float = 0.75  # 한도의 이 비율을 넘으면 자동 압축
     subagents: bool = True  # run_subagent (여러 파일·사이트를 나눠 별도 대화에서 처리)
     subagent_max_iterations: int = 12
+    subagent_max_minutes: float = 10.0
     parallel_tool_calls: bool = True
     output_dir: str = "outputs"
     log_dir: str = "logs"
@@ -146,13 +152,19 @@ class AgentConfig:
         d = d or {}
         return cls(
             system_prompt=str(d.get("system_prompt") or ""),
-            max_iterations=_to_int(d.get("max_iterations"), 25) or 25,
+            max_iterations=_to_int(d.get("max_iterations"), 30) or 30,
+            max_iterations_cap=_to_int(d.get("max_iterations_cap"), 100) or 100,
+            extend_iterations=_to_int(d.get("extend_iterations"), 10) or 10,
+            max_minutes=_to_float(d.get("max_minutes"), 30.0) or 30.0,
+            loop_threshold=max(2, _to_int(d.get("loop_threshold"), 3) or 3),
+            max_tool_error_streak=max(1, _to_int(d.get("max_tool_error_streak"), 3) or 3),
             max_tool_result_chars=_to_int(d.get("max_tool_result_chars"), 30000) or 30000,
             max_history_messages=_to_int(d.get("max_history_messages"), 200) or 200,
             context_window=_to_int(d.get("context_window"), 128000) or 128000,
             compact_at=min(0.95, max(0.3, _to_float(d.get("compact_at"), 0.75) or 0.75)),
             subagents=_to_bool(d.get("subagents"), True),
             subagent_max_iterations=_to_int(d.get("subagent_max_iterations"), 12) or 12,
+            subagent_max_minutes=_to_float(d.get("subagent_max_minutes"), 10.0) or 10.0,
             parallel_tool_calls=_to_bool(d.get("parallel_tool_calls"), True),
             output_dir=str(d.get("output_dir") or "outputs"),
             log_dir=str(d.get("log_dir") or "logs"),

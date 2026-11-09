@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 from .config import AgentConfig
 from .context import ContextManager, is_overflow_error
+from .errors import describe_error, failure_text, status_label, stop_note
 from .interaction import AskFn, RunContext, current_run
 from .llm import ChatModel, LLMResponse, ToolCall
 from .mcp_hub import MCPHub
@@ -21,6 +22,16 @@ if TYPE_CHECKING:
     from .skills import Skill, SkillStore
 
 log = logging.getLogger(__name__)
+
+# 같은 인자로 여러 번 불러도 정상인 도구 (기다리기·상태 확인) → 되풀이 감지에서 뺌
+LOOP_EXEMPT = {"wait_for_download", "file_status", "list_downloads", "get_current_time", "fetch_remote_file", "update_plan", "ask_user"}
+
+STOP_PROMPT = """[시스템 안내] {reason} ({detail}). 이제 도구를 부르지 말고 지금까지 확인한 내용만으로 답하세요.
+반드시 포함:
+1. 멈춘 이유 한 줄
+2. 지금까지 확인한 결과 (숫자·파일 경로는 정확히)
+3. 하지 못한 일
+4. 이어서 하려면 무엇을 하면 되는지 (사용자가 '계속' 이라고 하면 이어서 진행합니다)"""
 
 
 def _skill_scripts(skill: Any) -> list[str]:
@@ -142,10 +153,13 @@ class AgentResult:
     tool_events: list[ToolEvent] = field(default_factory=list)
     iterations: int = 0
     usage: dict[str, int] = field(default_factory=dict)
-    stopped_reason: str = "completed"  # completed | max_iterations | error | cancelled
+    stopped_reason: str = "completed"  # completed | max_iterations | time_limit | loop | tool_errors | error | cancelled (errors.py)
     elapsed: float = 0.0
     files: list[dict[str, Any]] = field(default_factory=list)
     skills_used: list[str] = field(default_factory=list)
+    error: dict[str, Any] | None = None  # 오류 원인 분류 {code, title, detail, hint, retryable}
+    detail: str = ""  # 멈춘 이유 (반복 한도·되풀이·시간)
+    max_iterations: int = 0  # 이번 실행에서 실제로 쓴 반복 한도 (자동 연장 포함)
 
     @property
     def success(self) -> bool:
@@ -238,6 +252,7 @@ class Agent:
         skill_inputs: dict[str, Any] | None = None,
         images: list[str] | None = None,
         attachments: list[str] | None = None,
+        budget: dict[str, Any] | None = None,
     ) -> AgentResult:
         """프롬프트 1건 처리. messages 를 주면 이어지는 대화로 처리하고 그 리스트를 갱신합니다.
 
@@ -245,7 +260,11 @@ class Agent:
         skill: 주면 해당 스킬 지침을 시스템 프롬프트에 넣고 실행합니다(스킬 테스트/예약작업).
         """
         started = time.monotonic()
-        if skill is not None:
+        budget = dict(budget or {})
+        if skill is not None:  # 스킬 머리말의 max_iterations / max_minutes 로 이 스킬만 다르게
+            for k in ("max_iterations", "max_iterations_cap", "max_minutes"):
+                if skill.meta.get(k) is not None:
+                    budget.setdefault(k, skill.meta[k])
             inputs = skill.resolve_inputs(skill_inputs, self.cfg.timezone)
             sk_sys = self.skill_system(skill, inputs, self.cfg.timezone)
             extra_system = f"{extra_system}\n\n{sk_sys}" if extra_system else sk_sys
@@ -291,16 +310,19 @@ class Agent:
 
         ctx.meta["emit"] = emit  # update_plan 등 내장 tool 이 화면에 진행 상황을 보낼 수 있게
 
-        def result(output: str, reason: str, it: int) -> AgentResult:
-            for u in ctx.meta.pop("sub_usage", []):  # 하위 에이전트가 쓴 토큰도 합산
-                _add_usage(usage, u)
+        def all_files() -> list[dict[str, Any]]:
             files: dict[str, dict[str, Any]] = {}
             for e in events:
                 for f in e.files:
                     files[f.get("path", "")] = f
+            return list(files.values())
+
+        def result(output: str, reason: str, it: int, error: dict[str, Any] | None = None, detail: str = "") -> AgentResult:
+            for u in ctx.meta.pop("sub_usage", []):  # 하위 에이전트가 쓴 토큰도 합산
+                _add_usage(usage, u)
             return AgentResult(
                 output, messages, events, it, usage, reason, time.monotonic() - started,
-                list(files.values()), list(dict.fromkeys(ctx.meta.get("skills_used", []))),
+                all_files(), list(dict.fromkeys(ctx.meta.get("skills_used", []))), error, detail, limit,
             )
 
         async def compact(force: bool = False, aggressive: bool = False, tls: list[dict[str, Any]] | None = None) -> bool:
@@ -326,32 +348,78 @@ class Agent:
                 return r
             raise RuntimeError("unreachable")
 
+        # 반복 한도: 기본 예산(max_iterations)에서 시작해, 진전이 있으면 extend_iterations 씩 늘려 상한(max_iterations_cap)까지.
+        # 같은 호출 되풀이 / 도구 오류 연속 / 시간 초과면 일찍 멈추고, 도구 없이 마지막 정리를 1번 시킴.
+        # (참고: Gemini CLI 는 본 대화 무제한 + 반복 감지 + 마지막 정리 1회, opencode 는 에이전트별 steps + 도구 끄고 정리)
+        cfg = self.cfg
+        limit = max(1, int(budget.get("max_iterations") or cfg.max_iterations))
+        cap = max(limit, int(budget.get("max_iterations_cap") or cfg.max_iterations_cap))
+        max_secs = float(budget.get("max_minutes") or cfg.max_minutes) * 60
+        seen: dict[tuple[str, str], int] = {}
+        progress: list[bool] = []
+        err_streak = 0
         iteration = 0
         resp: LLMResponse | None = None
+        stop: tuple[str, str] | None = None
         try:
             # 새 요청 시작: 대화가 너무 길면(메시지 수 또는 토큰) 앞부분을 요약해 둠
-            if len(messages) > self.cfg.max_history_messages:
+            if len(messages) > cfg.max_history_messages:
                 if not await compact(force=True, tls=tools):
                     self._trim_history(messages)
-            while iteration < self.cfg.max_iterations:
+            empty_retry = False
+            while True:
+                if iteration >= limit:
+                    if limit < cap and any(progress[-3:]):
+                        old, limit = limit, min(cap, limit + cfg.extend_iterations)
+                        await emit("budget", {"from": old, "to": limit, "cap": cap})
+                    else:
+                        stop = ("max_iterations", f"도구 왕복 {iteration}회" + (f" (최대 {cap}회)" if limit >= cap else " - 최근 진전이 없어 연장하지 않음"))
+                        break
+                if time.monotonic() - started > max_secs:
+                    stop = ("time_limit", f"{max_secs / 60:.0f}분")
+                    break
                 iteration += 1
-                await emit("llm_start", {"iteration": iteration})
+                await emit("llm_start", {"iteration": iteration, "limit": limit})
                 tools = self.hub.openai_tools(servers)  # 실행 중 만든 동적 도구도 바로 반영
                 resp = await call_llm(tools)
                 _add_usage(usage, resp.usage)
-                messages.append(resp.to_message())
 
                 if not resp.tool_calls:
                     output = resp.content or ""
+                    if resp.finish_reason == "content_filter" or resp.finish_reason == "empty":
+                        raise RuntimeError("content_filter: Azure 콘텐츠 필터로 답변이 막혔습니다")
+                    if not output.strip() and not empty_retry:
+                        empty_retry = True  # 빈 답변은 한 번 다시 받음
+                        iteration -= 1
+                        continue
+                    messages.append(resp.to_message())
+                    if not output.strip():
+                        info = {"code": "empty", "title": "모델이 빈 답변을 보냈습니다", "detail": "", "retryable": True,
+                                "hint": "다시 시도하거나 요청을 조금 더 구체적으로 적어 주세요."}
+                        await emit("error", {"error": info["title"], **info})
+                        return result(failure_text(info, events, all_files()), "error", iteration, info)
+                    if resp.finish_reason == "length":
+                        output += ("\n\n---\n⚠️ 답변이 최대 출력 길이(llm.max_output_tokens)에서 잘렸습니다. "
+                                   "**이어서** 라고 입력하면 나머지를 씁니다.")
                     await emit("final", {"content": output})
                     return result(output, "completed", iteration)
 
+                messages.append(resp.to_message())
                 if resp.content:
                     await emit("thought", {"content": resp.content})
                 tool_results = await self._run_tool_calls(resp.tool_calls, emit)
+                new_ok = False
+                sigs = []
                 for tc, ev in zip(resp.tool_calls, tool_results):
                     events.append(ev)
                     messages.append({"role": "tool", "tool_call_id": tc.id, "content": ev.result})
+                    sig = (tc.name, json.dumps(ev.arguments, ensure_ascii=False, sort_keys=True, default=str))
+                    seen[sig] = seen.get(sig, 0) + 1
+                    sigs.append(sig)
+                    if not ev.is_error and seen[sig] == 1:
+                        new_ok = True
+                progress.append(new_ok)
+                err_streak = err_streak + 1 if all(ev.is_error for ev in tool_results) else 0
                 pending = ctx.meta.pop("pending_images", None)
                 if pending:  # view_image: tool 결과에는 이미지를 못 넣으므로 다음 user 메시지로 첨부
                     from .images import ImageError
@@ -361,20 +429,24 @@ class Agent:
                         messages.append({"role": "user", "content": content, "_images": used, "_auto": True})
                     except ImageError as e:
                         messages.append({"role": "user", "content": f"(이미지를 첨부하지 못했습니다: {e})", "_auto": True})
+                looped = [s for s in sigs if seen[s] >= cfg.loop_threshold and s[0] not in LOOP_EXEMPT]
+                if looped:
+                    stop = ("loop", f"'{looped[0][0]}' 를 같은 인자로 {seen[looped[0]]}번 호출")
+                    break
+                if err_streak >= cfg.max_tool_error_streak:
+                    last = [ev for ev in tool_results if ev.is_error][-2:]
+                    stop = ("tool_errors", f"도구 오류 {err_streak}번 연속 - " + " / ".join(f"{ev.function}: {ev.result[:120]}" for ev in last))
+                    break
 
-            messages.append(
-                {
-                    "role": "user",
-                    "content": "tool 호출 한도에 도달했습니다. 더 이상 tool 을 호출하지 말고 지금까지 수집한 내용만으로 최종 답변을 작성하세요.",
-                    "_auto": True,
-                }
-            )
+            # 멈춤: 도구 없이 지금까지 내용으로 정리 (멈춘 이유 · 확인한 결과 · 못 한 일 · 이어서 할 일)
+            reason, detail = stop
+            messages.append({"role": "user", "_auto": True, "content": STOP_PROMPT.format(reason=status_label(reason), detail=detail)})
             resp = await call_llm(None)
             _add_usage(usage, resp.usage)
             messages.append(resp.to_message())
-            output = resp.content or ""
+            output = (resp.content or "(정리 답변을 받지 못했습니다)") + stop_note(reason, detail)
             await emit("final", {"content": output})
-            return result(output, "max_iterations", iteration)
+            return result(output, reason, iteration, detail=detail)
         except asyncio.CancelledError:
             _repair_dangling_tool_calls(messages, "사용자가 실행을 중단했습니다")
             messages.append({"role": "assistant", "content": "(사용자 요청으로 실행이 중단되었습니다)"})
@@ -382,9 +454,9 @@ class Agent:
         except Exception as e:
             log.exception("에이전트 실행 오류")
             _repair_dangling_tool_calls(messages)
-            msg = f"에이전트 실행 중 오류가 발생했습니다: {type(e).__name__}: {e}"
-            await emit("error", {"error": msg})
-            return result(msg, "error", iteration)
+            info = describe_error(e, str(getattr(getattr(self.llm, "cfg", None), "deployment", "") or ""))
+            await emit("error", {"error": info["title"], **info})
+            return result(failure_text(info, events, all_files()), "error", iteration, info)
         finally:
             current_run.reset(token)
 
