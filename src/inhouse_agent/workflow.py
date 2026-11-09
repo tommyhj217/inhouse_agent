@@ -23,6 +23,8 @@ output: |                          # (선택) 최종 결과 템플릿. 생략하
   {attachment} {attachments} (채팅에 첨부한 파일 경로 - 첫 파일 / 전체 줄바꿈 목록)
   {steps.<id>.text}  {steps.<id>.file} (첫 파일 경로)  {steps.<id>.files}  {steps.<id>.error}
   {steps.<id>.data.<키>.<0>…} (구조화 결과: dict 키 / 리스트 번호)
+  {item} {item.<키>} {index} (run_tool_batch 의 for_each 안에서: 지금 항목 / 번호)
+  {steps.<id>.raw...} (run_tool_batch: select/where/fields/limit 로 줄이기 전 원본. data 는 줄인 결과)
   필터: {paths|lines} (여러 줄/쉼표 → 목록), {x|json}, {list|first}
   값 전체가 변수 하나면 원래 타입(숫자/리스트/dict)으로 들어갑니다.
 """
@@ -44,6 +46,10 @@ _FILTERS = {
     "json": lambda v: json.dumps(v, ensure_ascii=False),
     "first": lambda v: (v[0] if isinstance(v, list) and v else v),
 }
+
+
+DEFERRED = ("steps", "item", "index", "prev")  # run_tool_batch 의 steps 인자 안에서는 묶음이 직접 채움
+RAW_TEMPLATE_TOOLS = {"run_tool_batch"}  # 인자 자체가 템플릿인 도구: 바깥 워크플로는 입력값·날짜만 채움
 
 
 class WorkflowError(ValueError):
@@ -74,6 +80,19 @@ def validate_steps(steps: Any) -> list[dict[str, Any]]:
     return out
 
 
+def walk(cur: Any, parts: list[str]) -> Any:
+    """dict 키 / 리스트 번호(음수 가능)로 따라 들어감. 없으면 None."""
+    for p in parts:
+        if isinstance(cur, list) and p.lstrip("-").isdigit():
+            idx = int(p)
+            cur = cur[idx] if -len(cur) <= idx < len(cur) else None
+        elif isinstance(cur, dict):
+            cur = cur.get(p)
+        else:
+            return None
+    return cur
+
+
 def _lookup(path: str, ctx: dict[str, Any]) -> tuple[bool, Any]:
     if "|" in path:
         base, flt = path.split("|", 1)
@@ -82,21 +101,18 @@ def _lookup(path: str, ctx: dict[str, Any]) -> tuple[bool, Any]:
             return False, None
         return True, _FILTERS[flt](v)
     parts = path.split(".")
+    if ctx.get("defer") and parts[0] in DEFERRED:
+        return False, None  # run_tool_batch 안에서 채울 변수는 그대로 남김
     if parts[0] == "steps" and len(parts) >= 3:
         st = ctx["steps"].get(parts[1])
         if st is None:
+            ctx.setdefault("missing", []).append(path)
             return True, ""  # 아직 실행 안 된(또는 실패로 건너뛴) 단계
         field = parts[2]
-        if field == "data":
-            cur: Any = st.get("data")
-            for p in parts[3:]:
-                if isinstance(cur, list) and p.lstrip("-").isdigit():
-                    idx = int(p)
-                    cur = cur[idx] if -len(cur) <= idx < len(cur) else None
-                elif isinstance(cur, dict):
-                    cur = cur.get(p)
-                else:
-                    cur = None
+        if field in ("data", "raw"):  # raw: run_tool_batch 에서 select/where/fields/limit 로 줄이기 전 원본
+            cur = walk(st.get(field, st.get("data")), parts[3:])
+            if cur is None:
+                ctx.setdefault("missing", []).append(path)  # 경로가 틀렸을 때 알려주기 위해 기록 (run_tool_batch)
             return True, cur
         if field == "file":
             return True, (st.get("files") or [""])[0]
@@ -105,6 +121,12 @@ def _lookup(path: str, ctx: dict[str, Any]) -> tuple[bool, Any]:
         return False, None
     if path == "prev":
         return True, ctx.get("prev", "")
+    local = ctx.get("locals") or {}
+    if parts[0] in local:  # run_tool_batch 의 for_each: {item} {item.id} {index}
+        cur = walk(local[parts[0]], parts[1:])
+        if cur is None:
+            ctx.setdefault("missing", []).append(path)
+        return True, cur
     if path in ctx["inputs"]:
         return True, ctx["inputs"][path]
     return False, None
@@ -192,7 +214,7 @@ async def run_workflow(
             status[i] = "in_progress"
             await plan()
             tool = str(render(step["tool"], ctx))
-            args = render(step["args"], ctx)
+            args = render(step["args"], {**ctx, "defer": True} if tool in RAW_TEMPLATE_TOOLS else ctx)
             route = hub.route_of(tool) or ("?", tool)
             ev = ToolEvent(tool, route[0], route[1], args if isinstance(args, dict) else {})
             call_id = f"wf{i + 1}"

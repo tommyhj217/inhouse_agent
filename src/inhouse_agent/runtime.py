@@ -147,6 +147,10 @@ class AgentRuntime:
             from .subagent import make_subagent_tool
 
             self.hub.builtins.append(make_subagent_tool(self))
+        if cfg.agent.tool_batch:  # 여러 도구 호출을 LLM 왕복 한 번으로 (앞 결과 → 다음 인자, 항목마다 실행, 결과 줄이기)
+            from .batch import make_batch_tool
+
+            self.hub.builtins.append(make_batch_tool(self))
         self.dynamic.hub = self.hub
         self.dynamic.can_edit = self.can_edit_skills
         if dyn_cfg.mode != "off":

@@ -802,6 +802,35 @@ skills/menu_builder/
   - 한 번에 더 많이 가져오는 MCP 도구를 만들거나 스킬 `steps`로 만들기
   - `run_subagent`로 나눠 맡기기
 
+### 도구 묶음 실행 (run_tool_batch)
+
+여러 도구 호출을 LLM 왕복 한 번으로 처리합니다. 모델이 스크립트로 여러 도구를 부르고 결과를 걸러 요약만 받는 pi의 codemode를 옮긴 것입니다.
+다만 코드를 실행하지 않는 선언형이고, 스킬 `steps`와 같은 템플릿 문법을 씁니다.
+
+- **연쇄 호출**: 검색 → 상세 조회 → 다운로드처럼 앞 결과가 다음 인자가 되는 일. 원래는 LLM 왕복 3번이 들던 일이 1번으로 줄어듭니다.
+- **항목마다 실행**: `for_each`로 목록의 항목마다 같은 도구를 동시에(4개씩, 최대 20개) 부릅니다.
+- **결과 줄이기**: `select`(경로) → `where`(포함 글자) → `fields`(남길 키) → `limit`(개수)로 필요한 부분만 남깁니다.
+  - 줄인 결과가 그 단계의 `data`이고, 다음 단계도 이 값을 받습니다. 원본은 `raw`로 참조합니다.
+  - `hide: true`면 결과를 모델에게 보여주지 않고 다음 단계 입력으로만 씁니다.
+
+```json
+{"steps": [
+  {"id": "list", "tool": "groupware__search_notices", "args": {"keyword": "인사", "date_from": "{last_month_start}"},
+   "select": "items", "where": {"dept": "인사"}, "fields": ["id", "title"], "hide": true},
+  {"id": "detail", "tool": "groupware__get_notice", "for_each": "{steps.list.data}", "args": {"id": "{item.id}"},
+   "fields": ["title", "body"], "limit": 10}
+]}
+```
+
+- **변수**: `{steps.<id>.data.<키>.<번호>}`, `{steps.<id>.raw…}`, `{steps.<id>.text|file|files|error}`, `{item}`, `{item.<키>}`, `{index}`, `{prev}`, 날짜 변수(`{today}` 등)
+- **실패 처리**: 단계마다 `on_error: stop`(기본) 또는 `continue`를 정하고, `when`으로 조건을 겁니다. 실패로 멈추면 앞 단계 결과는 남기고 오류로 표시합니다.
+- **틀렸을 때 안내**: 경로가 틀리면 "값을 찾지 못한 변수: … (data 최상위 키: id, body)"처럼 실제 키를 알려 줍니다.
+  도구 이름이 틀리면 비슷한 이름을 제안합니다.
+- **화면**: 안쪽 도구 호출도 하나씩 표시되고, 내려받은 파일은 실행 결과 파일 목록에 들어갑니다.
+- **직접 실행**: 채팅창에서 `/run_tool_batch steps='[...]'`로 실행하거나 스킬 `steps`에서 부를 수 있습니다.
+  이때 바깥은 스킬 입력값과 날짜만 채우고, `{steps…}`, `{item}`은 묶음이 채웁니다.
+- **끄기**: `agent.tool_batch: false`
+
 ### 프롬프트 캐시로 입력 비용 줄이기
 
 Azure는 요청의 앞부분(1,024 토큰 이상)이 직전 요청과 같으면 그 부분을 **캐시된 입력**으로 처리합니다.

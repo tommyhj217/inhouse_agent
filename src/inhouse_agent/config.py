@@ -143,6 +143,7 @@ class AgentConfig:
     context_window: int = 128000  # 배포 모델의 입력 한도(토큰). 자동 압축 기준
     compact_at: float = 0.75  # 한도의 이 비율을 넘으면 자동 압축
     subagents: bool = True  # run_subagent (여러 파일·사이트를 나눠 별도 대화에서 처리)
+    tool_batch: bool = True  # run_tool_batch (여러 도구 호출을 LLM 왕복 한 번으로)
     subagent_max_iterations: int = 12
     subagent_max_minutes: float = 10.0
     parallel_tool_calls: bool = True
@@ -166,6 +167,7 @@ class AgentConfig:
             context_window=_to_int(d.get("context_window"), 128000) or 128000,
             compact_at=min(0.95, max(0.3, _to_float(d.get("compact_at"), 0.75) or 0.75)),
             subagents=_to_bool(d.get("subagents"), True),
+            tool_batch=_to_bool(d.get("tool_batch"), True),
             subagent_max_iterations=_to_int(d.get("subagent_max_iterations"), 12) or 12,
             subagent_max_minutes=_to_float(d.get("subagent_max_minutes"), 10.0) or 10.0,
             parallel_tool_calls=_to_bool(d.get("parallel_tool_calls"), True),
