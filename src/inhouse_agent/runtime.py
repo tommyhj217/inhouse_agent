@@ -122,6 +122,9 @@ class AgentRuntime:
         from .excel_tools import make_excel_tools
 
         builtin_tools += make_excel_tools(self.workspace, self.links)  # 기존 엑셀 양식 채우기
+        from .pptx_tools import make_pptx_tools
+
+        builtin_tools += make_pptx_tools(self.workspace, self.links)  # 기존 PPT 수정
         builtin_tools += make_usage_tools(self)
         self.hub = MCPHub(
             cfg.mcp_servers,

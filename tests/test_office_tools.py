@@ -173,3 +173,64 @@ async def test_excel_data_rules_learn_validate_update(tmp_path: Path) -> None:
         good = _sales(Path(rt.workspace.files) / "정상.xlsx", [["S-2026-0200", datetime(2026, 11, 3), "기술팀", 30000, "00003", ""]])
         ok = (await rt.hub.call("excel_rules_validate", {"name": "월매출", "path": str(good)})).data
         assert ok["passed"] and ok["score"] == 100
+
+
+def monthly_deck(p: Path) -> Path:
+    from deck_factory import make_deck
+    from pptx import Presentation
+    from pptx.dml.color import RGBColor
+    from pptx.util import Pt
+
+    make_deck(p, [
+        {"title": "10월 실적 보고", "cover": True},
+        {"title": "매출 요약", "bullets": ["10월 총매출 12.3억 원", "전월 대비 5% 증가"], "notes": "10월 발표 메모"},
+        {"title": "부서별 현황", "table": {"columns": ["부서", "금액"], "rows": [["영업", "800"], ["기술", "430"]]}},
+        {"title": "월별 추이", "chart": {"categories": ["8월", "9월", "10월"], "values": [10, 11, 12.3], "name": "매출"}},
+        {"title": "부록", "bullets": ["삭제할 장"]},
+    ])
+    prs = Presentation(str(p))  # 서식이 다른 run 에 걸친 글: '10월'(굵게·빨강) + ' 핵심 지표'
+    tb = prs.slides[1].shapes.add_textbox(Pt(40), Pt(380), Pt(400), Pt(40)).text_frame
+    para = tb.paragraphs[0]
+    r1, r2 = para.add_run(), para.add_run()
+    r1.text, r2.text = "10", "월 핵심 지표"
+    r1.font.bold, r1.font.size, r1.font.color.rgb = True, Pt(20), RGBColor(0xC0, 0, 0)
+    prs.save(str(p))
+    return p
+
+
+async def test_edit_pptx_monthly_update(tmp_path: Path) -> None:
+    from pptx import Presentation
+
+    cfg = load_config(_cfg(tmp_path))
+    async with AgentRuntime(cfg) as rt:
+        src = monthly_deck(Path(rt.workspace.files) / "10월_보고.pptx")
+        before = src.read_bytes()
+        res = await rt.hub.call("edit_pptx", {
+            "path": str(src), "output": "11월_보고.pptx",
+            "replace": {"10월": "11월", "12.3억": "13.1억", "없는글": "x"},
+            "slides": [
+                {"no": 2, "replace": {"5%": "7%"}, "notes": "11월 발표 메모"},
+                {"no": 3, "title": "부서별 현황 (11월)", "table": {"rows": [["영업", "850"], ["기술", "460"]]}},
+                {"no": 4, "chart": {"categories": ["9월", "10월", "11월"], "series": {"매출": [11, 12.3, 13.1]}}},
+                {"no": 9, "title": "x"},
+            ],
+            "delete_slides": [5],
+        })
+        assert not res.is_error, res.text
+        assert "찾지 못한 글: 없는글" in res.text and "9장이 없습니다" in res.text
+        assert src.read_bytes() == before  # 원본 그대로
+        prs = Presentation(res.files[0]["path"])
+        assert len(prs.slides) == 4
+        s1, s2, s3, s4 = prs.slides
+        assert s1.shapes.title.text_frame.text == "11월 실적 보고"
+        texts = [sh.text_frame.text for sh in s2.shapes if sh.has_text_frame]
+        assert any("11월 총매출 13.1억 원" in t and "7% 증가" in t for t in texts)
+        run = next(sh for sh in s2.shapes if sh.has_text_frame and sh.text_frame.text == "11월 핵심 지표").text_frame.paragraphs[0].runs
+        assert len(run) == 1 and run[0].font.bold and run[0].font.color.rgb == (0xC0, 0, 0)  # run 에 걸친 글도 첫 서식 유지
+        assert s2.notes_slide.notes_text_frame.text == "11월 발표 메모"
+        assert s3.shapes.title.text_frame.text == "부서별 현황 (11월)"
+        tbl = next(sh for sh in s3.shapes if sh.has_table).table
+        assert [[tbl.cell(r, c).text for c in range(2)] for r in range(3)] == [["부서", "금액"], ["영업", "850"], ["기술", "460"]]
+        chart = next(sh for sh in s4.shapes if sh.has_chart).chart
+        assert list(chart.plots[0].categories) == ["9월", "10월", "11월"] and list(chart.series[0].values) == [11, 12.3, 13.1]
+        assert (await rt.hub.call("edit_pptx", {"path": str(src), "output": "10월_보고.pptx"})).is_error  # 원본 덮어쓰기 금지
