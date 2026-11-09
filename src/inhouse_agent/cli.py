@@ -62,6 +62,9 @@ def _print_event(verbose: bool):
             print(line, flush=True)
         elif kind == "thought" and verbose:
             print(f"  · {data['content']}", flush=True)
+        elif kind == "model":
+            head = {"start": "모델", "escalate": "모델 승격", "fallback": "모델 변경"}.get(data.get("kind"), "모델")
+            print(f"  [{head}] {data['from'] + ' → ' if data.get('from') and data.get('kind') != 'start' else ''}{data['model']} · {data['reason']}", flush=True)
 
     return cb
 
@@ -206,7 +209,7 @@ async def cmd_chat(cfg: AppConfig, args: argparse.Namespace) -> int:
         _warn_failed(rt)
         print("사내 자료수집 에이전트 - 대화형 모드")
         print("/ 만 입력하면 사용할 수 있는 스킬 목록, /<스킬이름> key=value 로 바로 실행, /<도구이름> key=value 로 기능 직접 실행")
-        print("명령: /tools  /servers  /files  /skills  /skill <이름> [k=v ...]  /noskill  /attach <경로> (이미지·PPT·엑셀)  /sessions  /reset  /save <이름>  /reconnect <서버>  /exit")
+        print("명령: /tools  /servers  /files  /skills  /skill <이름> [k=v ...]  /noskill  /attach <경로> (이미지·PPT·엑셀)  /model [이름|auto]  /sessions  /reset  /save <이름>  /reconnect <서버>  /exit")
         ready, why = rt.llm_status()
         if not ready:
             print(f"[LLM 없음] {why} → 워크플로가 있는 스킬과 도구는 / 로 실행할 수 있습니다.")
@@ -219,6 +222,7 @@ async def cmd_chat(cfg: AppConfig, args: argparse.Namespace) -> int:
         sid = store.new_id()
         images: list[str] = []
         attachments: list[str] = []
+        chat_model: str | None = None  # /model 로 고정 (기본: 자동 선택)
         if rt.workspace.user:
             print(f"[사용자] {rt.workspace.user} · 작업폴더 {rt.workspace.root}")
         if getattr(args, "resume", None):
@@ -262,6 +266,16 @@ async def cmd_chat(cfg: AppConfig, args: argparse.Namespace) -> int:
                         continue
                     messages = rt.agent.new_conversation(servers)
                     print(f"[스킬 모드] {skill.name}: {skill.description}\n  입력: {[i.name for i in skill.inputs]} · 빈 줄 대신 '실행' 이라고 입력하면 바로 실행합니다.")
+                elif cmd == "/model":
+                    name = rest.strip()
+                    if not name:
+                        print("\n".join(f"- {m['name']} ({m['tier']}){' ← 기본' if m['default'] else ''}" for m in rt.router.catalog())
+                              + f"\n지금: {chat_model or 'auto (비용 기준 자동 선택)'} · 바꾸기: /model <이름> 또는 /model auto")
+                    elif name == "auto" or rt.router.get(name):
+                        chat_model = None if name == "auto" else name
+                        print(f"모델: {name}")
+                    else:
+                        print(f"없는 모델입니다: {name} (있는 모델: {', '.join(s.name for s in rt.router.specs)})")
                 elif cmd in ("/image", "/attach"):
                     from .images import is_image
 
@@ -347,7 +361,7 @@ async def cmd_chat(cfg: AppConfig, args: argparse.Namespace) -> int:
                 result = await rt.agent.run(
                     "" if (skill and line == "실행") else line,
                     messages=messages, servers=servers, on_event=_print_event(args.verbose), ask=_cli_ask,
-                    skill=skill, skill_inputs=skill_inputs, images=images or None, attachments=attachments or None,
+                    skill=skill, skill_inputs=skill_inputs, images=images or None, attachments=attachments or None, model=chat_model,
                 )
             except Exception as e:  # noqa: BLE001 - 스킬 입력 오류 등
                 print(f"오류: {e}")

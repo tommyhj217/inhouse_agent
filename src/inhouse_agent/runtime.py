@@ -89,6 +89,9 @@ class AgentRuntime:
         self.users = UserWorkspaces(self.base_workspace, self.users_cfg)
         self.workspace: Any = WorkspaceProxy(self.users)
         self.skills = SkillStore(cfg.skills_path)
+        from .routing import ModelRouter
+
+        self.router = ModelRouter(cfg.raw.get("llm") or {}, cfg.llm.deployment, cfg.llm.vision)  # 모델 목록·비용 기준 선택
         self.downloader = Downloader(DownloadConfig.from_dict(cfg.downloads), self.workspace)
         from .skill_install import SkillInstaller
 
@@ -207,7 +210,12 @@ class AgentRuntime:
             ready, why = self.llm_status()
             if not ready:
                 return OfflineChatModel(why)  # LLM 없이(토큰 없이) 쓰는 상태: 워크플로/도구는 계속 동작
-            self._llm = AzureChatModel(self.cfg.llm)
+            if len(self.router.specs) > 1:  # 모델이 여러 개면 배포마다 연결 (비용 기준 선택)
+                from .routing import ModelPool
+
+                self._llm = ModelPool(self.cfg.llm, self.router)
+            else:
+                self._llm = AzureChatModel(self.cfg.llm)
         return self._llm
 
     @property
@@ -216,6 +224,7 @@ class AgentRuntime:
             self._agent = Agent(self.llm, self.hub, self.cfg.agent, self.skills)
             self._agent.recent_sessions_in_prompt = self.users_cfg.recent_sessions_in_prompt
             self._agent.rules_path = self.rules_path
+            self._agent.router = self.router
         return self._agent
 
     def llm_status(self) -> tuple[bool, str]:
@@ -320,6 +329,7 @@ class AgentRuntime:
         images: list[str] | None = None,
         mode: str = "auto",
         attachments: list[str] | None = None,
+        model: str | None = None,
     ) -> tuple[AgentResult, Path | None]:
         """스킬 1회 실행 (테스트용). 결과는 outputs/skill_<이름>/ (사용자면 그 사용자의 results/) 에 저장."""
         skill = self.skills.get(name)
@@ -350,7 +360,8 @@ class AgentRuntime:
             result.skills_used = [name]
         else:
             result = await self.agent.run(
-                prompt, messages=messages, on_event=on_event, ask=ask, skill=skill, skill_inputs=inputs, images=images, attachments=attachments
+                prompt, messages=messages, on_event=on_event, ask=ask, skill=skill, skill_inputs=inputs, images=images, attachments=attachments,
+                model=model,
             )
         path = None
         if save:

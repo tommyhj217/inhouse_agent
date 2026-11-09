@@ -27,9 +27,22 @@ llm:
   vision: true                                    # 배포 모델이 이미지 입력을 지원하는지 (채팅 이미지 첨부). 미지원이면 false
   extra_headers:
     # Ocp-Apim-Subscription-Key: ${APIM_SUBSCRIPTION_KEY:-}
-  # models:                                       # (선택) 참고용 모델 목록 - list_models / 상태 탭에 표시
-  #   - {name: 기본, deployment: gpt-main, description: 일반 업무}
-  #   - {name: 경량, deployment: gpt-mini, description: 빠른 요약}
+
+  # --- 여러 모델을 비용 기준으로 골라 쓰기 (배포가 2개 이상일 때) ---
+  #   요청마다 난이도에 맞는 가장 싼 모델로 시작 → 막히면 한 단계 위 모델로 → 모델이 응답하지 못하면 다른 모델로
+  #   cost_in / cost_out: 100만 토큰당 가격 (계약 단가 그대로, 단위는 routing.currency). 사용 이력에 비용·절약액이 나옵니다.
+  # models:
+  #   - {name: sol,   deployment: sol,   tier: high, cost_in: 5.0, cost_out: 15.0, context_window: 272000, description: 어려운 분석·보고서}
+  #   - {name: terra, deployment: terra, tier: mid,  cost_in: 1.0, cost_out: 4.0,  description: 일반 업무}
+  #   - {name: luna,  deployment: luna,  tier: low,  cost_in: 0.2, cost_out: 0.8, vision: false, description: 조회·요약}
+  #   # 모델마다 endpoint / api_key / api_version / max_output_tokens / reasoning_effort 를 따로 줄 수도 있습니다.
+  # routing:
+  #   mode: auto                  # auto(비용 기준 자동) | fixed(항상 위의 deployment)
+  #   classifier: rules           # rules(규칙, 비용 0) | llm(가장 싼 모델에게 난이도를 물어봄)
+  #   escalate: true              # 도구 오류 연속·같은 호출 되풀이·진전 없음·빈 답변이면 한 단계 위 모델로
+  #   summary_model: luna         # 대화 압축 요약에 쓸 모델 (기본: 가장 싼 모델)
+  #   subagent_max_tier: mid      # 하위 에이전트는 이 등급 이하에서 시작
+  #   currency: "$"               # 비용 표시 단위
 
 agent:
   timezone: Asia/Seoul

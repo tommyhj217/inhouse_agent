@@ -24,6 +24,7 @@ class LLMResponse:
     tool_calls: list[ToolCall] = field(default_factory=list)
     finish_reason: str | None = None
     usage: dict[str, int] = field(default_factory=dict)
+    model: str | None = None  # 답한 모델 이름 (여러 모델을 쓸 때)
 
     def to_message(self) -> dict[str, Any]:
         """대화 이력에 넣을 assistant 메시지(dict)."""
@@ -44,6 +45,7 @@ class ChatModel(Protocol):
         *,
         tool_choice: str | None = None,
         parallel_tool_calls: bool | None = None,
+        model: str | None = None,
     ) -> LLMResponse: ...
 
 
@@ -100,6 +102,7 @@ class AzureChatModel:
         *,
         tool_choice: str | None = None,
         parallel_tool_calls: bool | None = None,
+        model: str | None = None,  # 하나의 배포만 쓰므로 무시 (여러 모델은 routing.ModelPool)
     ) -> LLMResponse:
         cfg = self.cfg
         params: dict[str, Any] = {"model": cfg.deployment, "messages": _api_messages(messages, cfg.vision)}

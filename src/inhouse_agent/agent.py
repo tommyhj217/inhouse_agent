@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from .config import AgentConfig
 from .context import ContextManager, is_overflow_error
 from .errors import describe_error, failure_text, status_label, stop_note
+from .routing import AVAILABILITY_CODES
 from .interaction import AskFn, RunContext, current_run
 from .llm import ChatModel, LLMResponse, ToolCall
 from .mcp_hub import MCPHub
@@ -122,6 +123,13 @@ DEFAULT_SYSTEM_PROMPT = """당신은 사내 업무 자료 수집·분석 에이�
 - 웹 페이지는 web_fetch 로 빠르게 읽고, 사내 API 는 http_request 로 호출하세요.
 - 다음에도 쓸 요령(사이트별 조회 방법, 사용자 선호 형식 등)은 remember 로 저장하고, 작업 전에 recall 로 확인하세요.
 
+도구 사용 효율 (반복 한도와 비용을 아끼려면):
+- 서로 관련 없는 조회·다운로드는 한 번의 응답에서 여러 도구를 동시에(병렬로) 부르세요.
+- 이미 받은 결과와 파일을 같은 인자로 다시 조회하지 마세요. 필요한 값은 이전 결과나 파일에서 계산하세요.
+- 엑셀·CSV 는 analyze_file 한 번으로 구조를 본 뒤 query_table / sql_query 로 필요한 값만 계산하세요 (행을 여러 번 읽지 말 것).
+- 날짜·부서·사이트별로 같은 일을 여러 번 해야 하면 run_subagent 로 나눠 맡기거나, run_python 으로 한 번에 처리하세요.
+- 3단계 이상 작업은 update_plan 으로 계획을 세우고, 끝난 항목은 다시 하지 마세요.
+
 스킬/대화 규칙:
 10. 요청이 아래 '등록된 스킬' 설명과 맞으면 먼저 use_skill 로 지침을 불러와 그 절차를 따르세요.
 11. 조건이 애매하거나 여러 선택지 중 골라야 하면 ask_user 로 확인하세요. 단, 꼭 필요할 때만 쓰세요.
@@ -160,6 +168,7 @@ class AgentResult:
     error: dict[str, Any] | None = None  # 오류 원인 분류 {code, title, detail, hint, retryable}
     detail: str = ""  # 멈춘 이유 (반복 한도·되풀이·시간)
     max_iterations: int = 0  # 이번 실행에서 실제로 쓴 반복 한도 (자동 연장 포함)
+    models: list[dict[str, Any]] = field(default_factory=list)  # 쓴 모델과 고른/바꾼 이유 [{model, reason}]
 
     @property
     def success(self) -> bool:
@@ -178,6 +187,7 @@ class Agent:
         self.recent_sessions_in_prompt = 5
         self.rules_path: Any = None
         self.image_max_side = 2048
+        self.router: Any = None  # routing.ModelRouter (모델이 여러 개일 때 비용 기준 선택)
 
     # ------------------------------------------------------------------
     def build_system_prompt(self, servers: list[str] | None = None, extra: str | None = None) -> str:
@@ -253,6 +263,8 @@ class Agent:
         images: list[str] | None = None,
         attachments: list[str] | None = None,
         budget: dict[str, Any] | None = None,
+        model: str | None = None,
+        role: str = "main",
     ) -> AgentResult:
         """프롬프트 1건 처리. messages 를 주면 이어지는 대화로 처리하고 그 리스트를 갱신합니다.
 
@@ -260,6 +272,7 @@ class Agent:
         skill: 주면 해당 스킬 지침을 시스템 프롬프트에 넣고 실행합니다(스킬 테스트/예약작업).
         """
         started = time.monotonic()
+        user_prompt = prompt  # 모델 판별용 (첨부 안내문을 붙이기 전)
         budget = dict(budget or {})
         if skill is not None:  # 스킬 머리말의 max_iterations / max_minutes 로 이 스킬만 다르게
             for k in ("max_iterations", "max_iterations_cap", "max_minutes"):
@@ -318,15 +331,64 @@ class Agent:
             return list(files.values())
 
         def result(output: str, reason: str, it: int, error: dict[str, Any] | None = None, detail: str = "") -> AgentResult:
-            for u in ctx.meta.pop("sub_usage", []):  # 하위 에이전트가 쓴 토큰도 합산
-                _add_usage(usage, u)
+            for u in ctx.meta.pop("sub_usage", []):  # 하위 에이전트가 쓴 토큰도 합산 (모델별로)
+                _add_usage(usage, {k: v for k, v in u.items() if k != "models"})
+                for name, mu in (u.get("models") or {}).items():
+                    _add_usage(by_model.setdefault(name, {}), mu)
+            if by_model:
+                usage["models"] = by_model
+                if router is not None:
+                    cost, baseline = router.cost_of(by_model)
+                    if cost is not None:
+                        usage["cost"], usage["baseline_cost"] = cost, baseline
             return AgentResult(
                 output, messages, events, it, usage, reason, time.monotonic() - started,
-                all_files(), list(dict.fromkeys(ctx.meta.get("skills_used", []))), error, detail, limit,
+                all_files(), list(dict.fromkeys(ctx.meta.get("skills_used", []))), error, detail, limit, models_log,
             )
 
+        # ---------------- 모델 선택 (비용 기준) ----------------
+        router = self.router if self.router is not None and getattr(self.router, "specs", None) else None
+        by_model: dict[str, dict[str, int]] = {}
+        models_log: list[dict[str, Any]] = []
+        cur: str | None = None
+        need_vision = bool(images)
+
+        def record(name: str | None, u: dict[str, Any] | None) -> None:
+            mu = by_model.setdefault(name or "default", {})
+            _add_usage(mu, {**(u or {}), "calls": 1})
+
+        async def switch(name: str, reason: str, kind: str = "switch") -> None:
+            nonlocal cur
+            prev, cur = cur, name
+            spec = router.get(name) if router else None
+            if spec is not None and spec.context_window:
+                cm.window = min(self.cfg.context_window, spec.context_window) if kind == "start" else spec.context_window
+            models_log.append({"model": name, "reason": reason, "from": prev})
+            await emit("model", {"model": name, "from": prev, "reason": reason, "kind": kind,
+                                 "tier": getattr(spec, "tier", None)})
+
+        async def escalate(reason: str) -> bool:
+            if router is None or cur is None:
+                return False
+            up = router.escalate(cur, need_vision)
+            if up is None or (role == "subagent" and up.tier > router.subagent_max_tier + 1):
+                return False
+            await switch(up.name, f"{reason} → 한 단계 위 모델", "escalate")
+            return True
+
+        class _Pinned:  # 대화 압축 요약은 가장 싼 모델로
+            def __init__(self, llm: Any, name: str) -> None:
+                self.llm, self.name = llm, name
+
+            async def chat(self, msgs: Any, tls: Any = None, **kw: Any) -> Any:
+                r = await self.llm.chat(msgs, tls, model=self.name, **kw)
+                record(self.name, r.usage)
+                return r
+
+
         async def compact(force: bool = False, aggressive: bool = False, tls: list[dict[str, Any]] | None = None) -> bool:
-            info = await cm.compact(self.llm, messages, tls, force=force, aggressive=aggressive)
+            summarizer = _Pinned(self.llm, router.summary_model) if router is not None and router.get(router.summary_model) else self.llm
+            info = await cm.compact(summarizer, messages, tls, force=force, aggressive=aggressive)
             if not info:
                 return False
             _add_usage(usage, info.pop("usage") or {})
@@ -335,18 +397,37 @@ class Agent:
             return True
 
         async def call_llm(tls: list[dict[str, Any]] | None) -> LLMResponse:
-            """토큰 기준 자동 압축 후 LLM 호출. 모델이 '컨텍스트 초과' 로 거절하면 더 줄여서 1번 다시 시도."""
+            """토큰 기준 자동 압축 후 LLM 호출.
+            - 모델이 '컨텍스트 초과' 로 거절하면 더 줄여서(또는 입력 한도가 큰 모델로) 다시 시도
+            - 모델이 응답하지 못하면(요청 한도·배포 없음·서버 오류 등) 다른 모델로 넘어가 다시 시도"""
             await compact(tls=tls)
-            for attempt in range(2):
+            overflow_retry = False
+            tried: set[str] = set()
+            while True:
                 try:
-                    r = await self.llm.chat(messages, tls or None, parallel_tool_calls=self.cfg.parallel_tool_calls if tls else None)
+                    r = await self.llm.chat(messages, tls or None, parallel_tool_calls=self.cfg.parallel_tool_calls if tls else None,
+                                            **({"model": cur} if cur else {}))
                 except Exception as e:
-                    if attempt or not is_overflow_error(e) or not await compact(force=True, aggressive=True, tls=tls):
+                    if is_overflow_error(e) and not overflow_retry:
+                        overflow_retry = True
+                        if await compact(force=True, aggressive=True, tls=tls):
+                            continue
+                        big = router.bigger_context(cur, cm.tokens(messages, tls)) if router and cur else None
+                        if big is not None:
+                            await switch(big.name, "대화가 길어 입력 한도가 더 큰 모델로", "fallback")
+                            continue
                         raise
-                    continue
+                    if router is not None and cur is not None and describe_error(e)["code"] in AVAILABILITY_CODES:
+                        tried.add(cur)
+                        fb = router.fallback(cur, tried, need_vision)
+                        if fb is not None:
+                            log.warning("모델 %s 응답 실패(%s) → %s 로 다시 시도", cur, type(e).__name__, fb.name)
+                            await switch(fb.name, f"{cur} 이(가) 응답하지 못함({describe_error(e)['title']}) - 다른 모델로", "fallback")
+                            continue
+                    raise
+                record(getattr(r, "model", None) or cur, r.usage)
                 cm.calibrate(messages, tls, (r.usage or {}).get("prompt_tokens"))
                 return r
-            raise RuntimeError("unreachable")
 
         # 반복 한도: 기본 예산(max_iterations)에서 시작해, 진전이 있으면 extend_iterations 씩 늘려 상한(max_iterations_cap)까지.
         # 같은 호출 되풀이 / 도구 오류 연속 / 시간 초과면 일찍 멈추고, 도구 없이 마지막 정리를 1번 시킴.
@@ -366,12 +447,22 @@ class Agent:
             if len(messages) > cfg.max_history_messages:
                 if not await compact(force=True, tls=tools):
                     self._trim_history(messages)
+            if router is not None:
+                last = next((m.get("_model") for m in reversed(messages) if m.get("role") == "assistant" and m.get("_model")), None)
+                dec = await router.choose(self.llm, user_prompt, attachments=len(attachments or []), images=len(images or []),
+                                          override=model, skill_meta=skill.meta if skill is not None else None, last_model=last,
+                                          max_tier=router.subagent_max_tier if role == "subagent" else 3)
+                if dec is not None:
+                    await switch(dec.model, dec.reason, "start")
             empty_retry = False
             while True:
                 if iteration >= limit:
                     if limit < cap and any(progress[-3:]):
                         old, limit = limit, min(cap, limit + cfg.extend_iterations)
                         await emit("budget", {"from": old, "to": limit, "cap": cap})
+                    elif await escalate("진전 없이 반복 한도에 닿음" if limit < cap else "반복 상한에 닿음"):
+                        old, limit = limit, limit + cfg.extend_iterations  # 더 강한 모델에게 한 번 더 기회
+                        await emit("budget", {"from": old, "to": limit, "cap": max(cap, limit)})
                     else:
                         stop = ("max_iterations", f"도구 왕복 {iteration}회" + (f" (최대 {cap}회)" if limit >= cap else " - 최근 진전이 없어 연장하지 않음"))
                         break
@@ -389,10 +480,11 @@ class Agent:
                     if resp.finish_reason == "content_filter" or resp.finish_reason == "empty":
                         raise RuntimeError("content_filter: Azure 콘텐츠 필터로 답변이 막혔습니다")
                     if not output.strip() and not empty_retry:
-                        empty_retry = True  # 빈 답변은 한 번 다시 받음
+                        empty_retry = True  # 빈 답변은 한 번 다시 받음 (더 강한 모델이 있으면 그 모델로)
+                        await escalate("빈 답변")
                         iteration -= 1
                         continue
-                    messages.append(resp.to_message())
+                    messages.append({**resp.to_message(), **({"_model": cur} if cur else {})})
                     if not output.strip():
                         info = {"code": "empty", "title": "모델이 빈 답변을 보냈습니다", "detail": "", "retryable": True,
                                 "hint": "다시 시도하거나 요청을 조금 더 구체적으로 적어 주세요."}
@@ -404,7 +496,7 @@ class Agent:
                     await emit("final", {"content": output})
                     return result(output, "completed", iteration)
 
-                messages.append(resp.to_message())
+                messages.append({**resp.to_message(), **({"_model": cur} if cur else {})})
                 if resp.content:
                     await emit("thought", {"content": resp.content})
                 tool_results = await self._run_tool_calls(resp.tool_calls, emit)
@@ -431,8 +523,18 @@ class Agent:
                         messages.append({"role": "user", "content": f"(이미지를 첨부하지 못했습니다: {e})", "_auto": True})
                 looped = [s for s in sigs if seen[s] >= cfg.loop_threshold and s[0] not in LOOP_EXEMPT]
                 if looped:
-                    stop = ("loop", f"'{looped[0][0]}' 를 같은 인자로 {seen[looped[0]]}번 호출")
-                    break
+                    what = f"'{looped[0][0]}' 를 같은 인자로 {seen[looped[0]]}번 호출"
+                    if await escalate("같은 호출을 되풀이함"):
+                        for sg in looped:
+                            seen[sg] = 1
+                        messages.append({"role": "user", "_auto": True, "content":
+                                         f"[시스템 안내] {what}했지만 결과가 바뀌지 않았습니다. 같은 호출을 반복하지 말고 다른 방법을 쓰거나, "
+                                         "지금까지 결과로 답하세요."})
+                    else:
+                        stop = ("loop", what)
+                        break
+                if err_streak == cfg.max_tool_error_streak - 1 and err_streak >= 1 and await escalate("도구 오류가 이어짐"):
+                    err_streak = 0
                 if err_streak >= cfg.max_tool_error_streak:
                     last = [ev for ev in tool_results if ev.is_error][-2:]
                     stop = ("tool_errors", f"도구 오류 {err_streak}번 연속 - " + " / ".join(f"{ev.function}: {ev.result[:120]}" for ev in last))
@@ -454,7 +556,7 @@ class Agent:
         except Exception as e:
             log.exception("에이전트 실행 오류")
             _repair_dangling_tool_calls(messages)
-            info = describe_error(e, str(getattr(getattr(self.llm, "cfg", None), "deployment", "") or ""))
+            info = describe_error(e, cur or str(getattr(getattr(self.llm, "cfg", None), "deployment", "") or ""))
             await emit("error", {"error": info["title"], **info})
             return result(failure_text(info, events, all_files()), "error", iteration, info)
         finally:
@@ -504,8 +606,12 @@ class Agent:
         messages[:] = ([system] if system else []) + body
 
 
-def _add_usage(total: dict[str, int], u: dict[str, int]) -> None:
+def _add_usage(total: dict[str, Any], u: dict[str, Any]) -> None:
     for k, v in (u or {}).items():
+        if isinstance(v, bool) or not isinstance(v, (int, float)) and v is not None:
+            continue  # 모델별 사용량(dict) 등은 따로 합산
+        if k in ("cost", "baseline_cost"):
+            continue  # 비용은 모델별 토큰으로 다시 계산
         total[k] = total.get(k, 0) + int(v or 0)
 
 

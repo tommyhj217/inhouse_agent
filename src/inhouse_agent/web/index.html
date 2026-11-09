@@ -215,6 +215,7 @@ table.grid select{padding:2px 4px;font-size:12px}
     <div class="row small muted" style="margin-bottom:6px">
       <span id="chat-session">새 대화</span>
       <span class="grow"></span>
+      <label class="row small hidden" id="chat-model-wrap" title="자동: 요청 난이도에 맞는 가장 싼 모델로 시작하고, 막히면 한 단계 위 모델로 바꿉니다">모델 <select id="chat-model"><option value="auto">자동 (비용 절약)</option></select></label>
       <label class="row small">사용할 서버 <select id="chat-servers"><option value="">전체</option></select></label>
     </div>
     <div id="chat-log" class="log"></div>
@@ -506,6 +507,8 @@ class RunView {
     on("error", d => this.add(`<div class="b-err small">${esc(d.error)}</div>`));
     on("plan", d => this.plan(d));
     on("subagent", d => this.subagent(d));
+    on("model", d => this.add(`<div class="small muted">${d.kind === "start" ? "🧠 모델" : d.kind === "escalate" ? "⬆️ 모델 승격" : "↪️ 모델 변경"}: ${d.from && d.kind !== "start" ? esc(d.from) + " → " : ""}<b>${esc(d.model)}</b> · ${esc(d.reason)}</div>`));
+    on("budget", d => this.add(`<div class="small muted">⏩ 진전이 있어 반복 한도를 늘렸습니다 (${d.from} → ${d.to}회)</div>`));
     on("compact", d => this.add(`<div class="small muted">🗜 대화가 길어져 자동으로 줄였습니다 (약 ${Number(d.before).toLocaleString()} → ${Number(d.after).toLocaleString()} 토큰${d.masked ? " · 이전 도구 결과 " + d.masked + "개 축약" : ""}${d.summarized ? " · 앞 대화 " + d.summarized + "개 요약" : ""})</div>`));
     on("done", d => this.done(d));
     this.es.onerror = () => { if (this.es && this.es.readyState === 2) this.es = null; };
@@ -571,6 +574,8 @@ class RunView {
     const short = {completed: "완료", max_iterations: "반복 한도", time_limit: "시간 한도", loop: "되풀이 중단", tool_errors: "도구 오류", error: "오류", cancelled: "중단"}[d.status] || d.status;
     this.status.innerHTML = `<span class="badge ${level === "ok" ? "b-ok" : level === "warn" ? "b-warn" : level === "muted" ? "" : "b-err"}">${esc(short)}${d.elapsed ? " · " + d.elapsed + "s" : ""}</span>`
       + (d.max_iterations && d.iterations ? ` <span class="small muted">도구 왕복 ${d.iterations}/${d.max_iterations}</span>` : "")
+      + (d.models && d.models.length ? ` <span class="small muted">모델 ${esc([...new Set(d.models.map(m => m.model))].join("→"))}</span>` : "")
+      + (d.usage && d.usage.cost != null ? ` <span class="small muted" title="가장 비싼 모델만 썼을 때: ${esc(money(d.usage.baseline_cost))}">비용 ${esc(money(d.usage.cost))}${d.usage.baseline_cost > d.usage.cost ? ` (${Math.round((1 - d.usage.cost / d.usage.baseline_cost) * 100)}% 절약)` : ""}</span>` : "")
       + (d.usage && d.usage.total_tokens ? ` <span class="small muted">토큰 ${d.usage.total_tokens.toLocaleString()}</span>` : "")
       + (d.saved_to ? ` <span class="small muted">저장: ${esc(d.saved_to)}</span>` : "");
     const ans = this.hadView  // 화면 메뉴가 나왔으면 텍스트 결과는 접어 둠 (메뉴가 위로 밀리지 않게)
@@ -675,7 +680,7 @@ async function sendChat(text) {
     onRetry: () => { pendingImages = []; sendChat(text); }, onContinue: () => sendChat("계속 진행해줘")});
   chatRun = view;
   try {
-    const run = await view.start({prompt: text, session_id: chatSession, servers: servers.length ? servers : null, images: imgs, attachments: docs});
+    const run = await view.start({prompt: text, session_id: chatSession, servers: servers.length ? servers : null, images: imgs, attachments: docs, model: chosenModel()});
     chatSession = run.session_id; $("#chat-session").textContent = "대화 " + chatSession.slice(0, 8);
   } catch (e) { chatLog.insertAdjacentHTML("beforeend", `<div class="b-err">오류: ${esc(e.message)}</div>`); chatRun = null; $("#chat-send").disabled = false; $("#chat-cancel").classList.add("hidden"); }
 }
@@ -704,6 +709,22 @@ async function renderWelcome() {
   box.querySelectorAll(".skcard").forEach(el => el.onclick = () => { const it = items.find(x => x.name === el.dataset.n); if (it) pickSlash(it); });
 }
 $("#sess-new").onclick = newChat;
+
+// ---- 모델 선택 (여러 모델이 등록되어 있을 때): 자동이면 서버가 비용 기준으로 고름
+let modelCurrency = "";
+function setupModels(llm) {
+  const ms = llm.models || [];
+  modelCurrency = llm.currency || "";
+  if (ms.length < 2) return;
+  const tierKo = {low: "싼", mid: "보통", high: "강한"};
+  $("#chat-model").innerHTML = `<option value="auto">자동 (비용 절약)</option>` + ms.slice().reverse().map(m => `<option value="${esc(m.name)}">${esc(m.name)} · ${tierKo[m.tier] || m.tier}${m.cost_in != null ? ` (${esc(modelCurrency)}${m.cost_in}/${esc(modelCurrency)}${m.cost_out})` : ""}</option>`).join("");
+  $("#chat-model").value = store.get("agent_model", "auto");
+  if (![...$("#chat-model").options].some(o => o.value === $("#chat-model").value)) $("#chat-model").value = "auto";
+  $("#chat-model-wrap").classList.remove("hidden");
+  $("#chat-model").onchange = () => store.set("agent_model", $("#chat-model").value);
+}
+const chosenModel = () => { const el = $("#chat-model"); return el && !$("#chat-model-wrap").classList.contains("hidden") ? el.value : null; };
+const money = v => v == null ? "" : modelCurrency + (v < 0.01 ? v.toFixed(4) : v.toFixed(3));
 
 // ---- 파일 첨부: 이미지 + PPT/엑셀/Word/PDF/CSV (선택 / 붙여넣기 / 끌어놓기)
 let pendingImages = [];  // {kind: image|document, url(미리보기), path(업로드 후), name, summary}
@@ -927,7 +948,7 @@ async function execCommand(it, args, prompt, mode = "auto", shownLabel = "") {
     onRetry: () => execCommand(it, args, prompt, mode, shownLabel), onContinue: () => sendChat("계속 진행해줘")});
   chatRun = view;
   try {
-    const body = it.kind === "skill" ? {skill: it.name, inputs: args, prompt, mode, new_session: true, attachments: att} : {tool: it.name, args, session_id: chatSession};
+    const body = it.kind === "skill" ? {skill: it.name, inputs: args, prompt, mode, new_session: true, attachments: att, model: chosenModel()} : {tool: it.name, args, session_id: chatSession};
     const run = await view.start(body);
     chatSession = run.session_id; $("#chat-session").textContent = (it.kind === "skill" ? "스킬 " : "기능 ") + "/" + it.name;
   } catch (e) { chatLog.insertAdjacentHTML("beforeend", `<div class="b-err">오류: ${esc(e.message)}</div>`); chatRun = null; $("#chat-send").disabled = false; $("#chat-cancel").classList.add("hidden"); }
@@ -1608,7 +1629,7 @@ $("#st-refresh").onclick = loadStatus;
   try {
     const info = await api("/api/info");
     staleBanner(info.api);
-    cmdLLM = info.llm || cmdLLM; updateLLMBadge();
+    cmdLLM = info.llm || cmdLLM; updateLLMBadge(); setupModels(info.llm || {});
     applyEditPermission(info.can_edit_skills !== false);
     if (!info.users.enabled) $("#userchip").classList.add("hidden");
     else if (!currentUser) askUser(true);  // 처음 접속하면 사용자 ID 를 물어봄 → 사용자별 작업폴더

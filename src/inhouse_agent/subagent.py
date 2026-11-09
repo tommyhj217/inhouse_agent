@@ -56,6 +56,7 @@ def make_subagent_tool(rt: "AgentRuntime") -> BuiltinTool:
         sub_cfg = dataclasses.replace(acfg, max_iterations=max_it, max_iterations_cap=min(acfg.max_iterations_cap, max(max_it, 30)),
                                       max_minutes=acfg.subagent_max_minutes)
         sub = Agent(rt.llm, rt.hub, sub_cfg, rt.skills)
+        sub.router = rt.router  # 하위 작업은 routing.subagent_max_tier 이하의 싼 모델부터
         sub.rules_path = rt.rules_path
         sub.recent_sessions_in_prompt = 0
         parent = current_run.get()
@@ -74,7 +75,7 @@ def make_subagent_tool(rt: "AgentRuntime") -> BuiltinTool:
         t0 = time.monotonic()
         try:
             res = await sub.run(task, servers=servers, extra_system=SUB_SYSTEM, on_event=on_event, ask=None,
-                                attachments=files or None)
+                                attachments=files or None, role="subagent", model=args.get("model"))
         finally:
             _DEPTH.reset(token)
         if parent is not None:  # 하위 작업 토큰을 상위 실행 사용량에 합산
@@ -103,6 +104,7 @@ def make_subagent_tool(rt: "AgentRuntime") -> BuiltinTool:
                 "files": {"type": "array", "items": {"type": "string"}, "description": "분석할 파일 경로 (선택)"},
                 "servers": {"type": "array", "items": {"type": "string"}, "description": "쓸 MCP 서버 이름 (선택, 생략 시 전체)"},
                 "max_iterations": {"type": "integer", "description": f"최대 도구 왕복 횟수 (기본 {acfg.subagent_max_iterations})"},
+                "model": {"type": "string", "description": "쓸 모델 이름 (생략하면 작업 난이도에 맞는 싼 모델 자동 선택)"},
             },
             "required": ["task"],
         },

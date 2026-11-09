@@ -58,6 +58,7 @@ class RunRequest(BaseModel):
     mode: str = "auto"  # auto(LLM 있으면 에이전트, 없으면 워크플로) | agent | workflow
     tool: str | None = None  # 도구(기능) 직접 실행 - LLM 불필요
     args: dict[str, Any] | None = None
+    model: str | None = None  # auto(비용 기준 자동 선택) | 모델 이름 (llm.models 의 name)
 
 
 class StageInstall(BaseModel):
@@ -173,6 +174,7 @@ class Run:
     tool: str | None = None
     args: dict[str, Any] | None = None
     skill_start: bool = False  # 이번 요청이 스킬 실행 자체인지 (아니면 스킬 대화에 이어서 하는 말)
+    model: str | None = None
     attachments: list[str] = field(default_factory=list)  # 첨부 문서 (PPT/엑셀 등)
     cond: asyncio.Condition = field(default_factory=asyncio.Condition)
 
@@ -282,7 +284,7 @@ class RunManager:
             kind = "skill" if sess.skill else "chat"
             title = (req.prompt or f"[스킬] {sess.skill}")[:80]
         run = Run(uuid.uuid4().hex[:12], sess.id, kind, title, user=sess.user, mode=req.mode, tool=req.tool, args=req.args, skill_start=bool(req.skill),
-                  attachments=attachments)
+                  attachments=attachments, model=req.model)
         self.runs[run.id] = run
         run.task = asyncio.create_task(self._execute(run, sess, req.prompt, images))
         return run
@@ -323,7 +325,7 @@ class RunManager:
                     result, path = await self.rt.run_skill(
                         sess.skill, sess.inputs, prompt, on_event=on_event, ask=ask,
                         messages=sess.messages if sess.messages else None, save=True, images=images, mode=run.mode,
-                        attachments=run.attachments,
+                        attachments=run.attachments, model=run.model,
                     )
                     if not sess.messages:
                         sess.messages = result.messages
@@ -349,7 +351,8 @@ class RunManager:
                     if not sess.messages:
                         sess.messages = self.rt.agent.new_conversation(sess.servers)
                     result = await self.rt.agent.run(
-                        prompt, messages=sess.messages, servers=sess.servers, on_event=on_event, ask=ask, images=images, attachments=run.attachments
+                        prompt, messages=sess.messages, servers=sess.servers, on_event=on_event, ask=ask, images=images, attachments=run.attachments,
+                        model=run.model,
                     )
             run.status = result.stopped_reason
             await run.push(
@@ -362,6 +365,8 @@ class RunManager:
                     "detail": result.detail,
                     "iterations": result.iterations,
                     "max_iterations": result.max_iterations,
+                    "models": result.models,  # [{model, reason, from}] 고른 모델과 바꾼 이유
+                    "currency": self.rt.router.currency,
                     "output": result.output,
                     "elapsed": round(result.elapsed, 1),
                     "usage": result.usage,
@@ -408,6 +413,10 @@ class RunManager:
             "elapsed": done.get("elapsed"),
             "status": run.status,
             "error": done.get("error"),
+            "detail": done.get("detail") or "",
+            "iterations": done.get("iterations"),
+            "max_iterations": done.get("max_iterations"),
+            "models": [m.get("model") for m in done.get("models") or []],
             "output": done.get("output", ""),
             "tools": [f"{e['server']}.{e['tool']}" + ("(오류)" if e.get("is_error") else "") for e in run.events if e["type"] == "tool_end"],
             "files": [f["path"] for f in (done.get("files") or []) if f.get("path")],
@@ -551,7 +560,8 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
             "skills_dir": str(rt.skills.root),
             "public_url": rt.links.public_url,
             "users": {"enabled": rt.users_cfg.enabled, "require": rt.users_cfg.require},
-            "llm": {"ready": rt.llm_status()[0], "reason": rt.llm_status()[1]},
+            "llm": {"ready": rt.llm_status()[0], "reason": rt.llm_status()[1], "models": rt.router.catalog(),
+                    "routing": rt.router.mode if len(rt.router.specs) > 1 else "fixed", "currency": rt.router.currency},
             "can_edit_skills": rt.can_edit_skills(),
             "editors_set": bool((cfg.raw.get("skills") or {}).get("editors")),
             "api": API_VERSION,  # 화면(index.html)과 서버 코드 버전 확인용 - 다르면 서버 재시작 필요

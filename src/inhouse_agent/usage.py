@@ -86,7 +86,26 @@ def collect_usage(rt: "AgentRuntime", users: list[str | None], days: float = 30)
     files = [f for t in all_turns for f in t.get("files") or []]
     recent = sorted(all_turns, key=lambda t: t.get("time") or 0, reverse=True)
     jobs = Counter(r["name"] for r in all_results if not r["name"].startswith("skill_"))
+    # 모델별 토큰·비용 (가장 비싼 모델만 썼을 때와 비교)
+    by_model: dict[str, dict[str, int]] = {}
+    for t in all_turns:
+        for name, mu in ((t.get("usage") or {}).get("models") or {}).items():
+            d = by_model.setdefault(name, {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0})
+            for k in d:
+                d[k] += int(mu.get(k) or 0)
+    cost, baseline = rt.router.cost_of(by_model) if by_model else (None, None)
+    model_cost = {n: (rt.router.get(n).cost(d["prompt_tokens"], d["completion_tokens"]) if rt.router.get(n) else None) for n, d in by_model.items()}
+    # 한도·되풀이로 끝난 실행: 무엇을 많이 부르다 멈췄는지 (반복 한도에 자주 닿는 원인 찾기)
+    stopped = [t for t in all_turns if t.get("status") in ("max_iterations", "loop", "tool_errors", "time_limit")]
+    stop_tools = Counter(tname(x) for t in stopped for x in t.get("tools") or [])
+    its = [int(t["iterations"]) for t in all_turns if isinstance(t.get("iterations"), int)]
     return {
+        "models": by_model, "model_cost": model_cost, "cost": cost, "baseline_cost": baseline, "currency": rt.router.currency,
+        "stopped": {"count": len(stopped), "by_status": dict(Counter(t.get("status") for t in stopped)), "tools": dict(stop_tools.most_common(8)),
+                    "avg_iterations": round(sum(its) / len(its), 1) if its else None,
+                    "samples": [{"prompt": (t.get("prompt") or "")[:60], "status": t.get("status"), "detail": t.get("detail") or "",
+                                 "iterations": t.get("iterations"), "models": t.get("models") or []}
+                                for t in sorted(stopped, key=lambda t: t.get("time") or 0, reverse=True)[:5]]},
         "days": days, "since": since, "users": per_user,
         "runs": len(all_turns), "sessions": len({(t["user"], t["session_id"]) for t in all_turns}),
         "status": dict(status), "kinds": dict(kinds), "skills": dict(skills.most_common()), "tools": dict(tools.most_common(15)),
@@ -117,6 +136,23 @@ def format_usage(u: dict[str, Any], recent: int = 10) -> str:
         lines.append("\n### 스킬별 실행\n" + ", ".join(f"{k} {v}회" for k, v in u["skills"].items()))
     if u["tools"]:
         lines.append("\n### 많이 쓴 도구\n" + ", ".join(f"{k} {v}" + (f"(오류 {u['tool_errors'][k]})" if u["tool_errors"].get(k) else "") for k, v in u["tools"].items()))
+    if u.get("models"):
+        cur = u.get("currency") or ""
+        lines.append("\n### 모델별 사용 (비용 단위: 설정의 cost_in/cost_out, 100만 토큰당)\n| 모델 | 호출 | 입력 토큰 | 출력 토큰 | 비용 |\n|---|---:|---:|---:|---:|")
+        for n, d in sorted(u["models"].items(), key=lambda x: -x[1]["calls"]):
+            c = u["model_cost"].get(n)
+            lines.append(f"| {n} | {d['calls']} | {d['prompt_tokens']:,} | {d['completion_tokens']:,} | {'-' if c is None else f'{cur}{c:,.4f}'} |")
+        if u.get("cost") is not None and u.get("baseline_cost"):
+            saved = u["baseline_cost"] - u["cost"]
+            lines.append(f"- 합계 {cur}{u['cost']:,.4f} · 가장 비싼 모델만 썼다면 {cur}{u['baseline_cost']:,.4f} → **{cur}{saved:,.4f} 절약 ({saved / u['baseline_cost'] * 100:.0f}%)**")
+    st = u.get("stopped") or {}
+    if st.get("count"):
+        lines.append(f"\n### 한도·되풀이로 끝난 실행 {st['count']}건 (평균 도구 왕복 {st.get('avg_iterations') or '-'}회)")
+        lines.append("- 상태: " + ", ".join(f"{k} {v}" for k, v in st["by_status"].items()))
+        if st["tools"]:
+            lines.append("- 이때 많이 부른 도구: " + ", ".join(f"{k} {v}회" for k, v in st["tools"].items())
+                         + "  ← 한 번에 더 많이 가져오는 도구(MCP)나 스킬 steps 로 바꾸면 반복이 줄어듭니다")
+        lines += [f"- '{x['prompt']}' → {x['status']} {x['detail']}" + (f" (모델 {'→'.join(x['models'])})" if x["models"] else "") for x in st["samples"]]
     if u["jobs"]:
         lines.append("\n### 예약작업 결과\n" + ", ".join(f"{k} {v}회" for k, v in u["jobs"].items()))
     if u["by_day"]:
@@ -137,15 +173,14 @@ async def list_models(rt: "AgentRuntime", remote: bool = True) -> dict[str, Any]
         "api_version": c.api_version, "auth": c.auth, "vision": c.vision, "max_output_tokens": c.max_output_tokens,
         "reasoning_effort": c.reasoning_effort, "models": [], "configured": [],
     }
-    extra = (rt.cfg.raw.get("llm") or {}).get("models") or []
-    for m in extra:  # 설정에 적어 둔 다른 배포(참고용)
-        if isinstance(m, dict):
-            info["configured"].append({k: m.get(k) for k in ("name", "deployment", "description", "vision")})
-        else:
-            info["configured"].append({"name": str(m), "deployment": str(m)})
+    info["configured"] = rt.router.catalog() if len(rt.router.specs) > 1 else []
+    info["routing"] = {"mode": rt.router.mode, "classifier": rt.router.classifier, "escalate": rt.router.escalation,
+                       "summary_model": rt.router.summary_model, "currency": rt.router.currency}
     if remote and ready:
         try:
-            client = getattr(rt.llm, "_client", None)
+            llm = rt.llm
+            # ModelPool 이면 기본 모델의 연결, AzureChatModel 이면 그 연결
+            client = getattr(llm._client(None)[1], "_client", None) if callable(getattr(llm, "_client", None)) else getattr(llm, "_client", None)
             if client is not None:
                 page = await asyncio.wait_for(client.models.list(), 20)
                 items = getattr(page, "data", None) or [x async for x in page]
@@ -165,8 +200,15 @@ def format_models(i: dict[str, Any]) -> str:
              f"- 엔드포인트: {i['endpoint'] or '-'} · api_version {i['api_version']} · 인증 {i['auth']} · 이미지 입력 {'지원' if i['vision'] else '미지원'}"
              + (f" · 최대 출력 {i['max_output_tokens']}" if i["max_output_tokens"] else "") + (f" · reasoning {i['reasoning_effort']}" if i["reasoning_effort"] else "")]
     if i["configured"]:
-        lines.append("\n### 설정에 등록한 모델 (llm.models)")
-        lines += [f"- {m.get('name')}: 배포 {m.get('deployment')}" + (f" - {m['description']}" if m.get("description") else "") for m in i["configured"]]
+        r = i.get("routing") or {}
+        cur = r.get("currency") or ""
+        mode = ("자동 (요청마다 비용 기준 선택" + (", 막히면 한 단계 위 모델로" if r.get("escalate") else "") + ")") if r.get("mode") == "auto" else "고정"
+        lines.append(f"\n### 등록한 모델 (llm.models) - 선택 방식: {mode}, 난이도 판별: {'규칙(무료)' if r.get('classifier') != 'llm' else 'LLM'}, 대화 요약: {r.get('summary_model')}")
+        lines.append("| 모델 | 배포 | 등급 | 입력/출력 (100만 토큰당) | 입력 한도 | 이미지 |\n|---|---|---|---|---:|---|")
+        for m in i["configured"]:
+            price = f"{cur}{m['cost_in']} / {cur}{m['cost_out']}" if m.get("cost_in") is not None else "-"
+            lines.append(f"| {m['name']}{' (기본)' if m.get('default') else ''} | {m['deployment']} | {m['tier']} | {price} | "
+                         f"{m['context_window'] or '-'} | {'지원' if m.get('vision') else '미지원'} |")
     if i["models"]:
         chat = [m for m in i["models"] if m.get("chat") is not False]
         lines.append(f"\n### Azure 리소스에서 쓸 수 있는 모델 ({len(i['models'])}개, 채팅 가능 {len(chat)}개)")

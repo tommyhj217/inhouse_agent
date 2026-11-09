@@ -256,3 +256,21 @@ async def test_azure_sdk_roundtrip(tmp_path: Path, fake_azure, monkeypatch) -> N
     second = seen[1]["body"]["messages"]
     assert second[-2]["tool_calls"][0]["id"] == "call_1" and second[-1]["role"] == "tool"
     assert r.usage["total_tokens"] == 30
+
+
+async def test_model_pool_routes_to_azure_deployments(tmp_path: Path, fake_azure, monkeypatch) -> None:
+    """여러 배포(sol/luna)를 등록하면 실제 Azure 호출이 고른 배포로 가는지 (ModelPool)."""
+    url, seen = fake_azure
+    for k in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    cfg = load_config(write_config(tmp_path, "  models:\n    - {name: sol, deployment: test-deploy, tier: high, cost_in: 5, cost_out: 15}\n"
+                                             "    - {name: luna, deployment: luna-dep, tier: low, cost_in: 0.2, cost_out: 0.8, max_output_tokens: 1000}\n"))
+    cfg.llm.endpoint = url
+    cfg.llm.max_retries = 0
+    async with AgentRuntime(cfg) as rt:
+        r = await rt.agent.run("공지 N7 목록 알려줘")  # 단순 조회 → luna
+        assert r.success, r.output
+        assert [s["dep"] for s in seen] == ["luna-dep", "luna-dep"] and seen[0]["body"]["max_completion_tokens"] == 1000
+        r2 = await rt.agent.run("다시", model="sol")
+        assert seen[-1]["dep"] == "test-deploy" and r2.usage["models"]["sol"]["calls"] == 2 and r.usage["cost"] > 0
