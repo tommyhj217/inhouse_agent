@@ -172,7 +172,10 @@ def test_web_users_sessions_images_resume(tmp_path: Path) -> None:
         texts = json.dumps(sent, ensure_ascii=False)
         assert "이 이미지 뭐야?" in texts and "빨간 사각형 이미지입니다" in texts  # 이전 대화가 그대로 이어짐
         assert "[첨부 이미지:" in texts  # 이전 이미지는 경로 참조로 (view_image 로 다시 볼 수 있음)
-        assert "현재 사용자: kim" in sent[0]["content"] and sid in sent[0]["content"]  # 최근 작업 목록
+        assert "현재 사용자: kim" in sent[0]["content"]
+        # 이어지는 대화: 시스템 프롬프트가 첫 턴과 글자 하나 다르지 않음 (서버를 다시 켜도) → 앞부분 전체가 프롬프트 캐시로
+        assert sent[0]["content"] == llm.calls[0][0]["content"] and sent[0]["_cache_key"] == llm.calls[0][0]["_cache_key"]
+        assert sent[-1]["_sent"] and "보낸 시각" not in sent[-1]["content"]  # 시각은 API 로 보낼 때만 붙임
         d = c.get(f"/api/sessions/{sid}", headers=KIM).json()
         assert len(d["turns"]) == 2
         assert c.patch(f"/api/sessions/{sid}", json={"title": "이미지 분석"}, headers=KIM).json()["ok"]

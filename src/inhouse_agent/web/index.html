@@ -576,7 +576,7 @@ class RunView {
       + (d.max_iterations && d.iterations ? ` <span class="small muted">도구 왕복 ${d.iterations}/${d.max_iterations}</span>` : "")
       + (d.models && d.models.length ? ` <span class="small muted">모델 ${esc([...new Set(d.models.map(m => m.model))].join("→"))}</span>` : "")
       + (d.usage && d.usage.cost != null ? ` <span class="small muted" title="가장 비싼 모델만 썼을 때: ${esc(money(d.usage.baseline_cost))}">비용 ${esc(money(d.usage.cost))}${d.usage.baseline_cost > d.usage.cost ? ` (${Math.round((1 - d.usage.cost / d.usage.baseline_cost) * 100)}% 절약)` : ""}</span>` : "")
-      + (d.usage && d.usage.total_tokens ? ` <span class="small muted">토큰 ${d.usage.total_tokens.toLocaleString()}</span>` : "")
+      + (d.usage && d.usage.total_tokens ? ` <span class="small muted" title="입력 ${(d.usage.prompt_tokens || 0).toLocaleString()} 중 프롬프트 캐시 ${(d.usage.cached_tokens || 0).toLocaleString()} (캐시 입력은 훨씬 쌈)">토큰 ${d.usage.total_tokens.toLocaleString()}${d.usage.cached_tokens && d.usage.prompt_tokens ? ` · 캐시 ${Math.round(d.usage.cached_tokens / d.usage.prompt_tokens * 100)}%` : ""}</span>` : "")
       + (d.saved_to ? ` <span class="small muted">저장: ${esc(d.saved_to)}</span>` : "");
     const ans = this.hadView  // 화면 메뉴가 나왔으면 텍스트 결과는 접어 둠 (메뉴가 위로 밀리지 않게)
       ? this.add(`<details class="small"><summary class="muted">텍스트 결과 보기</summary><div class="answer">${md(d.output)}</div></details>`)

@@ -89,6 +89,8 @@ class LLMConfig:
     extra_body: dict[str, Any] = field(default_factory=dict)
     vision: bool = True
     """배포 모델이 이미지 입력을 지원하는지 (미지원이면 이미지를 텍스트 안내로 바꿔 보냄)"""
+    prompt_cache_key: bool = True
+    """대화마다 prompt_cache_key 를 보내 프롬프트 캐시 적중률을 높임 (배포가 모르는 인자라고 거절하면 자동으로 끔)"""
     provider: str = "azure"
     """azure | none (none: LLM 없이 사용 - 스킬 워크플로/도구 직접 실행만)"""
 
@@ -113,6 +115,7 @@ class LLMConfig:
             extra_body=dict(d.get("extra_body") or {}),
             vision=_to_bool(d.get("vision"), True),
             provider=str(d.get("provider") or "azure").lower(),
+            prompt_cache_key=_to_bool(d.get("prompt_cache_key"), True),
         )
 
     def validate(self) -> None:

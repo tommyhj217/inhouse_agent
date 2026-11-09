@@ -7,15 +7,15 @@
 2) 막히면 한 단계 위 모델로 승격 (Goose lead/worker 방식: 도구 오류 연속, 같은 호출 되풀이, 진전 없음, 빈 답변)
 3) 모델이 응답하지 못하면(요청 한도·배포 없음·서버 오류) 다른 모델로 넘어감
 4) 잡일은 싼 모델: 대화 압축 요약(summary_model), 하위 에이전트(subagent_max_tier 이하)
-5) 모델별 토큰·비용을 기록하고, 가장 비싼 모델만 썼을 때와 비교해 아낀 비용을 보여줌
+5) 모델별 토큰(캐시된 입력 포함)·비용을 기록하고, 가장 비싼 모델만 썼을 때와 비교해 아낀 비용을 보여줌
 
 config.yaml
 llm:
   deployment: sol                 # 기본 모델 (routing.mode: fixed 일 때 항상 이 모델)
   models:
-    - {name: sol,   deployment: sol,   tier: high, cost_in: 5.0, cost_out: 15.0, context_window: 272000}
-    - {name: terra, deployment: terra, tier: mid,  cost_in: 1.0, cost_out: 4.0}
-    - {name: luna,  deployment: luna,  tier: low,  cost_in: 0.2, cost_out: 0.8, vision: false}
+    - {name: sol,   deployment: sol,   tier: high, cost_in: 2.0, cost_out: 10.0, cost_cached: 0.1,  context_window: 272000}
+    - {name: terra, deployment: terra, tier: mid,  cost_in: 1.0, cost_out: 5.0,  cost_cached: 0.05, context_window: 272000}
+    - {name: luna,  deployment: luna,  tier: low,  cost_in: 0.1, cost_out: 0.5,  cost_cached: 0.01, context_window: 272000}
   routing: {mode: auto, classifier: rules, escalate: true, summary_model: luna, subagent_max_tier: mid, currency: "$"}
 각 모델에 endpoint / api_key / api_version / max_output_tokens / reasoning_effort / temperature 를 따로 줄 수도 있습니다.
 """
@@ -57,6 +57,7 @@ class ModelSpec:
     tier: int = 2
     cost_in: float | None = None  # 입력 100만 토큰당 비용
     cost_out: float | None = None
+    cost_cached: float | None = None  # 캐시된 입력 100만 토큰당 비용 (없으면 cost_in 과 같다고 봄 - 할인 없이 보수적으로)
     context_window: int | None = None
     vision: bool | None = None
     description: str = ""
@@ -69,10 +70,13 @@ class ModelSpec:
             return float(self.tier) * 1000
         return 0.75 * (self.cost_in or 0) + 0.25 * (self.cost_out or 0)
 
-    def cost(self, prompt_tokens: int, completion_tokens: int) -> float | None:
+    def cost(self, prompt_tokens: int, completion_tokens: int, cached_tokens: int = 0) -> float | None:
+        """prompt_tokens 는 캐시된 입력을 포함한 전체 입력 (API usage 그대로), cached_tokens 는 그중 캐시에서 읽은 양."""
         if self.cost_in is None and self.cost_out is None:
             return None
-        return (prompt_tokens * (self.cost_in or 0) + completion_tokens * (self.cost_out or 0)) / 1_000_000
+        cached = max(0, min(int(cached_tokens or 0), int(prompt_tokens or 0)))
+        rate_cached = self.cost_cached if self.cost_cached is not None else (self.cost_in or 0)
+        return ((prompt_tokens - cached) * (self.cost_in or 0) + cached * rate_cached + completion_tokens * (self.cost_out or 0)) / 1_000_000
 
 
 @dataclass
@@ -106,7 +110,7 @@ class ModelRouter:
                                        "temperature", "max_tokens_param", "extra_headers") if k in m}
             specs.append(ModelSpec(
                 name=str(m.get("name") or m["deployment"]), deployment=str(m.get("deployment") or m["name"]), tier=_to_tier(m.get("tier")),
-                cost_in=_num(m.get("cost_in")), cost_out=_num(m.get("cost_out")),
+                cost_in=_num(m.get("cost_in")), cost_out=_num(m.get("cost_out")), cost_cached=_num(m.get("cost_cached")),
                 context_window=int(m["context_window"]) if m.get("context_window") else None,
                 vision=None if m.get("vision") is None else bool(m.get("vision")), description=str(m.get("description") or ""), overrides=extra))
         if not any(s.deployment == default_deployment or s.name == default_deployment for s in specs) and default_deployment:
@@ -247,9 +251,9 @@ class ModelRouter:
         known = False
         for name, u in by_model.items():
             s = self.get(name)
-            p, c = int(u.get("prompt_tokens") or 0), int(u.get("completion_tokens") or 0)
-            v = s.cost(p, c) if s else None
-            b = top.cost(p, c)
+            p, c, k = int(u.get("prompt_tokens") or 0), int(u.get("completion_tokens") or 0), int(u.get("cached_tokens") or 0)
+            v = s.cost(p, c, k) if s else None
+            b = top.cost(p, c, k)  # 비교 기준도 같은 캐시 적중을 가정 (모델 선택으로 아낀 몫만 보이게)
             if v is not None:
                 known = True
                 total += v
@@ -259,7 +263,7 @@ class ModelRouter:
 
     def catalog(self) -> list[dict[str, Any]]:
         return [{"name": s.name, "deployment": s.deployment, "tier": TIER_NAME[s.tier], "cost_in": s.cost_in, "cost_out": s.cost_out,
-                 "context_window": s.context_window, "vision": s.vision, "description": s.description, "default": s is self.default}
+                 "cost_cached": s.cost_cached, "context_window": s.context_window, "vision": s.vision, "description": s.description, "default": s is self.default}
                 for s in self.specs]
 
 

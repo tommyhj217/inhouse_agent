@@ -46,14 +46,27 @@ class ChatModel(Protocol):
         tool_choice: str | None = None,
         parallel_tool_calls: bool | None = None,
         model: str | None = None,
+        cache_key: str | None = None,
     ) -> LLMResponse: ...
 
 
+CACHE_KEY_MAX = 64  # prompt_cache_key 최대 길이 (OpenAI)
+
+
 def _api_messages(messages: list[dict[str, Any]], vision: bool) -> list[dict[str, Any]]:
-    """API 로 보낼 형태: 내부용 키(_로 시작) 제거, 비전 미지원 배포면 이미지를 텍스트 안내로."""
+    """API 로 보낼 형태: 내부용 키(_로 시작) 제거, 비전 미지원 배포면 이미지를 텍스트 안내로.
+    사용자 메시지에 _sent(보낸 시각)가 있으면 끝에 붙임 - 시스템 프롬프트에 분 단위 시각을 넣지 않아
+    대화 앞부분이 그대로 유지되므로 프롬프트 캐시가 깨지지 않음."""
     out = []
     for m in messages:
+        sent = m.get("_sent") if m.get("role") == "user" else None
         m = {k: v for k, v in m.items() if not k.startswith("_")}
+        if sent:
+            note = f"\n\n(보낸 시각: {sent})"
+            if isinstance(m.get("content"), list):
+                m["content"] = [*m["content"], {"type": "text", "text": note.strip()}]
+            else:
+                m["content"] = f"{m.get('content') or ''}{note}"
         if isinstance(m.get("content"), list) and not vision:
             m["content"] = "\n".join(
                 p.get("text", "") if p.get("type") == "text" else "(이미지가 첨부되었지만 현재 모델 배포는 이미지를 볼 수 없습니다: llm.vision=false)"
@@ -61,6 +74,21 @@ def _api_messages(messages: list[dict[str, Any]], vision: bool) -> list[dict[str
             )
         out.append(m)
     return out
+
+
+def cached_tokens(usage: Any) -> int:
+    """usage.prompt_tokens_details.cached_tokens (SDK 객체 또는 dict). 없으면 0."""
+    details = usage.get("prompt_tokens_details") if isinstance(usage, dict) else getattr(usage, "prompt_tokens_details", None)
+    if details is None:
+        return 0
+    v = details.get("cached_tokens") if isinstance(details, dict) else getattr(details, "cached_tokens", None)
+    return int(v or 0)
+
+
+def _rejects_cache_key(e: BaseException) -> bool:
+    """400 이면서 오류 내용에 prompt_cache_key 가 나오면 '모르는 인자' 로 거절한 것."""
+    status = getattr(e, "status_code", None)
+    return status == 400 and "prompt_cache_key" in str(e)
 
 
 class AzureChatModel:
@@ -94,6 +122,7 @@ class AzureChatModel:
             kwargs["api_key"] = cfg.api_key
 
         self._client = AsyncAzureOpenAI(**kwargs)
+        self._cache_key_ok = True
 
     async def chat(
         self,
@@ -103,7 +132,10 @@ class AzureChatModel:
         tool_choice: str | None = None,
         parallel_tool_calls: bool | None = None,
         model: str | None = None,  # 하나의 배포만 쓰므로 무시 (여러 모델은 routing.ModelPool)
+        cache_key: str | None = None,
     ) -> LLMResponse:
+        """cache_key: 대화마다 같은 값 → Azure/OpenAI 가 같은 캐시 서버로 보내 앞부분(시스템 프롬프트·도구·이전 대화)을
+        캐시 입력(일반 입력의 약 10% 가격)으로 처리할 가능성이 커짐. 배포·api_version 이 모르는 인자라고 거절하면 끄고 다시 보냄."""
         cfg = self.cfg
         params: dict[str, Any] = {"model": cfg.deployment, "messages": _api_messages(messages, cfg.vision)}
         if tools:
@@ -118,10 +150,25 @@ class AzureChatModel:
             params["temperature"] = cfg.temperature
         if cfg.reasoning_effort:
             params["reasoning_effort"] = cfg.reasoning_effort
-        if cfg.extra_body:
-            params["extra_body"] = cfg.extra_body
+        body = dict(cfg.extra_body or {})
+        if cache_key and cfg.prompt_cache_key and self._cache_key_ok:
+            # extra_body 로 보냄: 오래된 openai SDK(1.54 등)는 prompt_cache_key 인자를 모르기 때문
+            body.setdefault("prompt_cache_key", cache_key[:CACHE_KEY_MAX])
+        if body:
+            params["extra_body"] = body
 
-        resp = await self._client.chat.completions.create(**params)
+        try:
+            resp = await self._client.chat.completions.create(**params)
+        except Exception as e:
+            if "prompt_cache_key" in body and _rejects_cache_key(e):
+                self._cache_key_ok = False  # 이 배포는 prompt_cache_key 를 모름 → 이후로는 보내지 않음 (자동 캐시는 그대로 동작)
+                log.warning("배포 %s 가 prompt_cache_key 를 지원하지 않아 빼고 보냅니다: %s", cfg.deployment, str(e)[:200])
+                body.pop("prompt_cache_key")
+                if not body:
+                    params.pop("extra_body")
+                resp = await self._client.chat.completions.create(**params)
+            else:
+                raise
         if not resp.choices:
             # Azure 콘텐츠 필터 등으로 choices 가 비는 경우
             return LLMResponse(content="(모델 응답이 비어 있습니다. 콘텐츠 필터 여부를 확인하세요.)", finish_reason="empty")
@@ -138,6 +185,8 @@ class AzureChatModel:
                 "prompt_tokens": resp.usage.prompt_tokens or 0,
                 "completion_tokens": resp.usage.completion_tokens or 0,
                 "total_tokens": resp.usage.total_tokens or 0,
+                # 입력 중 캐시에서 읽은 토큰 (prompt_tokens 에 포함됨, 더 싼 단가) - 1,024 토큰 이상 같은 앞부분일 때 생김
+                "cached_tokens": cached_tokens(resp.usage),
             }
         return LLMResponse(content=msg.content, tool_calls=tool_calls, finish_reason=choice.finish_reason, usage=usage)
 

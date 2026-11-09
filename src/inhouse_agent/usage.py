@@ -79,7 +79,7 @@ def collect_usage(rt: "AgentRuntime", users: list[str | None], days: float = 30)
 
     tools = Counter(tname(x) for t in all_turns for x in t.get("tools") or [])
     tool_err = Counter(tname(x) for t in all_turns for x in t.get("tools") or [] if "(오류)" in x)
-    tok = {k: sum(int((t.get("usage") or {}).get(k) or 0) for t in all_turns) for k in ("prompt_tokens", "completion_tokens", "total_tokens")}
+    tok = {k: sum(int((t.get("usage") or {}).get(k) or 0) for t in all_turns) for k in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens")}
     res_tok = sum(int((r.get("usage") or {}).get("total_tokens") or 0) for r in all_results if not r["name"].startswith("skill_"))  # 스킬 실행은 turns 에 이미 있음
     elapsed = [float(t["elapsed"]) for t in all_turns if isinstance(t.get("elapsed"), (int, float))]
     by_day = Counter(datetime.fromtimestamp(t.get("time") or 0).strftime("%Y-%m-%d") for t in all_turns)
@@ -90,11 +90,11 @@ def collect_usage(rt: "AgentRuntime", users: list[str | None], days: float = 30)
     by_model: dict[str, dict[str, int]] = {}
     for t in all_turns:
         for name, mu in ((t.get("usage") or {}).get("models") or {}).items():
-            d = by_model.setdefault(name, {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0})
+            d = by_model.setdefault(name, {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0, "calls": 0})
             for k in d:
                 d[k] += int(mu.get(k) or 0)
     cost, baseline = rt.router.cost_of(by_model) if by_model else (None, None)
-    model_cost = {n: (rt.router.get(n).cost(d["prompt_tokens"], d["completion_tokens"]) if rt.router.get(n) else None) for n, d in by_model.items()}
+    model_cost = {n: (rt.router.get(n).cost(d["prompt_tokens"], d["completion_tokens"], d["cached_tokens"]) if rt.router.get(n) else None) for n, d in by_model.items()}
     # 한도·되풀이로 끝난 실행: 무엇을 많이 부르다 멈췄는지 (반복 한도에 자주 닿는 원인 찾기)
     stopped = [t for t in all_turns if t.get("status") in ("max_iterations", "loop", "tool_errors", "time_limit")]
     stop_tools = Counter(tname(x) for t in stopped for x in t.get("tools") or [])
@@ -120,6 +120,12 @@ def collect_usage(rt: "AgentRuntime", users: list[str | None], days: float = 30)
     }
 
 
+def cache_line(tok: dict[str, Any]) -> str:
+    """입력 중 프롬프트 캐시에서 읽은 비율 (캐시 입력은 일반 입력보다 훨씬 쌈)."""
+    p, k = int(tok.get("prompt_tokens") or 0), int(tok.get("cached_tokens") or 0)
+    return f"\n- 프롬프트 캐시: 입력의 {k / p * 100:.0f}% ({k:,} 토큰)를 캐시로 처리" if p and k else ""
+
+
 def format_usage(u: dict[str, Any], recent: int = 10) -> str:
     when = lambda ts: datetime.fromtimestamp(ts or 0).strftime("%m-%d %H:%M")  # noqa: E731
     who = ", ".join(u["users"]) or "-"
@@ -128,7 +134,8 @@ def format_usage(u: dict[str, Any], recent: int = 10) -> str:
              "- 결과: " + (", ".join(f"{k} {v}" for k, v in u["status"].items()) or "-"),
              "- 종류: " + (", ".join(f"{ {'chat': '대화', 'skill': '스킬', 'tool': '기능'}.get(k, k)} {v}" for k, v in u["kinds"].items()) or "-"),
              f"- 토큰: 합계 {u['tokens']['total_tokens']:,} (입력 {u['tokens']['prompt_tokens']:,} / 출력 {u['tokens']['completion_tokens']:,})"
-             + (f" + 예약작업 {u['job_tokens']:,}" if u["job_tokens"] else "")]
+             + (f" + 예약작업 {u['job_tokens']:,}" if u["job_tokens"] else "")
+             + cache_line(u["tokens"])]
     if len(u["users"]) > 1:
         lines.append("\n### 사용자별\n| 사용자 | 실행 | 대화 | 토큰 | 저장 결과 |\n|---|---:|---:|---:|---:|")
         lines += [f"| {k} | {v['runs']} | {v['sessions']} | {v['tokens']:,} | {v['results']} |" for k, v in sorted(u["users"].items(), key=lambda x: -x[1]["runs"])]
@@ -138,10 +145,13 @@ def format_usage(u: dict[str, Any], recent: int = 10) -> str:
         lines.append("\n### 많이 쓴 도구\n" + ", ".join(f"{k} {v}" + (f"(오류 {u['tool_errors'][k]})" if u["tool_errors"].get(k) else "") for k, v in u["tools"].items()))
     if u.get("models"):
         cur = u.get("currency") or ""
-        lines.append("\n### 모델별 사용 (비용 단위: 설정의 cost_in/cost_out, 100만 토큰당)\n| 모델 | 호출 | 입력 토큰 | 출력 토큰 | 비용 |\n|---|---:|---:|---:|---:|")
+        lines.append("\n### 모델별 사용 (비용 단위: 설정의 cost_in/cost_out/cost_cached, 100만 토큰당)\n"
+                     "| 모델 | 호출 | 입력 토큰 | 그중 캐시 | 출력 토큰 | 비용 |\n|---|---:|---:|---:|---:|---:|")
         for n, d in sorted(u["models"].items(), key=lambda x: -x[1]["calls"]):
             c = u["model_cost"].get(n)
-            lines.append(f"| {n} | {d['calls']} | {d['prompt_tokens']:,} | {d['completion_tokens']:,} | {'-' if c is None else f'{cur}{c:,.4f}'} |")
+            p, k = int(d["prompt_tokens"] or 0), int(d.get("cached_tokens") or 0)
+            hit = f" ({k / p * 100:.0f}%)" if p and k else ""
+            lines.append(f"| {n} | {d['calls']} | {p:,} | {k:,}{hit} | {d['completion_tokens']:,} | {'-' if c is None else f'{cur}{c:,.4f}'} |")
         if u.get("cost") is not None and u.get("baseline_cost"):
             saved = u["baseline_cost"] - u["cost"]
             lines.append(f"- 합계 {cur}{u['cost']:,.4f} · 가장 비싼 모델만 썼다면 {cur}{u['baseline_cost']:,.4f} → **{cur}{saved:,.4f} 절약 ({saved / u['baseline_cost'] * 100:.0f}%)**")
@@ -206,7 +216,8 @@ def format_models(i: dict[str, Any]) -> str:
         lines.append(f"\n### 등록한 모델 (llm.models) - 선택 방식: {mode}, 난이도 판별: {'규칙(무료)' if r.get('classifier') != 'llm' else 'LLM'}, 대화 요약: {r.get('summary_model')}")
         lines.append("| 모델 | 배포 | 등급 | 입력/출력 (100만 토큰당) | 입력 한도 | 이미지 |\n|---|---|---|---|---:|---|")
         for m in i["configured"]:
-            price = f"{cur}{m['cost_in']} / {cur}{m['cost_out']}" if m.get("cost_in") is not None else "-"
+            price = (f"{cur}{m['cost_in']} / {cur}{m['cost_out']}" + (f" (캐시 {cur}{m['cost_cached']})" if m.get("cost_cached") is not None else "")
+                     if m.get("cost_in") is not None else "-")
             lines.append(f"| {m['name']}{' (기본)' if m.get('default') else ''} | {m['deployment']} | {m['tier']} | {price} | "
                          f"{m['context_window'] or '-'} | {'지원' if m.get('vision') else '미지원'} |")
     if i["models"]:

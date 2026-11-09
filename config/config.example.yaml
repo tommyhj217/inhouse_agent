@@ -25,16 +25,21 @@ llm:
   timeout: 180
   max_retries: 3
   vision: true                                    # 배포 모델이 이미지 입력을 지원하는지 (채팅 이미지 첨부). 미지원이면 false
+  prompt_cache_key: true                          # 대화마다 캐시 키를 보내 프롬프트 캐시 적중률을 높임 (배포가 모르면 자동으로 끔)
   extra_headers:
     # Ocp-Apim-Subscription-Key: ${APIM_SUBSCRIPTION_KEY:-}
 
   # --- 여러 모델을 비용 기준으로 골라 쓰기 (배포가 2개 이상일 때) ---
   #   요청마다 난이도에 맞는 가장 싼 모델로 시작 → 막히면 한 단계 위 모델로 → 모델이 응답하지 못하면 다른 모델로
-  #   cost_in / cost_out: 100만 토큰당 가격 (계약 단가 그대로, 단위는 routing.currency). 사용 이력에 비용·절약액이 나옵니다.
+  #   cost_in / cost_out / cost_cached: 100만 토큰당 입력 / 출력 / 캐시된 입력 가격 (단위는 routing.currency).
+  #     사용 이력에 비용·절약액·캐시 비율이 나옵니다. cost_cached 를 비우면 할인 없이 cost_in 으로 계산합니다.
+  #     아래 값은 Azure 공개 단가 (pi 모델 목록, 2026-11 기준: gpt-6.1-sol / gpt-6.1-terra / gpt-6-luna). 계약 단가가 다르면 바꾸세요.
+  #   context_window: Azure 배포는 105만 토큰까지 받지만 입력이 27.2만 토큰을 넘으면 장문 단가가 붙으므로 272000 권장
   # models:
-  #   - {name: sol,   deployment: sol,   tier: high, cost_in: 5.0, cost_out: 15.0, context_window: 272000, description: 어려운 분석·보고서}
-  #   - {name: terra, deployment: terra, tier: mid,  cost_in: 1.0, cost_out: 4.0,  description: 일반 업무}
-  #   - {name: luna,  deployment: luna,  tier: low,  cost_in: 0.2, cost_out: 0.8, vision: false, description: 조회·요약}
+  #   - {name: sol,   deployment: sol,   tier: high, cost_in: 2.0, cost_out: 10.0, cost_cached: 0.1,  context_window: 272000, description: 어려운 분석·보고서}
+  #   - {name: terra, deployment: terra, tier: mid,  cost_in: 1.0, cost_out: 5.0,  cost_cached: 0.05, context_window: 272000, description: 일반 업무}
+  #   - {name: luna,  deployment: luna,  tier: low,  cost_in: 0.1, cost_out: 0.5,  cost_cached: 0.01, context_window: 272000, description: 조회·요약}
+  #   # 이미지 입력을 못 받는 배포면 vision: false 를 붙이세요.
   #   # 모델마다 endpoint / api_key / api_version / max_output_tokens / reasoning_effort 를 따로 줄 수도 있습니다.
   # routing:
   #   mode: auto                  # auto(비용 기준 자동) | fixed(항상 위의 deployment)

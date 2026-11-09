@@ -72,6 +72,7 @@ class ScriptedLLM:
     async def chat(self, messages, tools=None, **kw):
         self.calls.append([dict(m) for m in messages])
         self.tools = tools
+        self.kw = kw
         return self.responses.pop(0)
 
 
@@ -140,7 +141,9 @@ async def test_bad_json_and_max_iterations(tmp_path: Path) -> None:
         # 도구 오류(잘못된 JSON 인자)가 3번 이어지면 한도를 다 쓰지 않고 멈추고, 도구 없이 정리한 답 + 안내
         assert r.stopped_reason == "tool_errors" and r.output.startswith("한도 도달 요약") and "계속" in r.output
         assert all(e.is_error and "JSON" in e.result for e in r.tool_events) and len(r.tool_events) == 3
-        assert "도구를 부르지 말고" in llm.calls[-1][-1]["content"] and llm.tools is None
+        assert "도구를 부르지 말고" in llm.calls[-1][-1]["content"]
+        # 마지막 정리: 도구 목록은 그대로 두고(프롬프트 캐시 유지) tool_choice=none 으로만 막음
+        assert llm.tools and llm.kw.get("tool_choice") == "none" and llm.kw.get("parallel_tool_calls") is None
 
 
 def test_function_name_rules() -> None:
