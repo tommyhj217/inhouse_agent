@@ -234,3 +234,66 @@ async def test_edit_pptx_monthly_update(tmp_path: Path) -> None:
         chart = next(sh for sh in s4.shapes if sh.has_chart).chart
         assert list(chart.plots[0].categories) == ["9월", "10월", "11월"] and list(chart.series[0].values) == [11, 12.3, 13.1]
         assert (await rt.hub.call("edit_pptx", {"path": str(src), "output": "10월_보고.pptx"})).is_error  # 원본 덮어쓰기 금지
+
+
+def messy_deck(p: Path) -> Path:
+    from pptx import Presentation
+    from pptx.util import Emu, Inches, Pt
+
+    prs = Presentation()
+    s1 = prs.slides.add_slide(prs.slide_layouts[5])  # 제목만
+    s1.shapes.title.text = "문제 많은 장"
+    box = s1.shapes.add_textbox(Inches(0.5), Inches(1.5), Inches(3), Inches(0.6)).text_frame
+    box.word_wrap = True
+    box.text = "이번 분기 매출은 전년 대비 크게 증가했으며 주요 원인은 신규 거래처 확보와 해외 수출 확대입니다. " * 6
+    box.paragraphs[0].runs[0].font.size = Pt(18)
+    s1.shapes.add_textbox(prs.slide_width - Inches(1), Inches(3), Inches(3), Inches(1)).text_frame.text = "밖으로 나간 글"
+    a = s1.shapes.add_textbox(Inches(5), Inches(4), Inches(3), Inches(1)).text_frame
+    a.text = "겹친 상자 A"
+    s1.shapes.add_textbox(Inches(5.2), Inches(4.1), Inches(3), Inches(1)).text_frame.text = "겹친 상자 B"
+    tiny = s1.shapes.add_textbox(Inches(0.5), Inches(6.5), Inches(4), Inches(0.5)).text_frame
+    tiny.text = "출처: 사내 ERP"
+    tiny.paragraphs[0].runs[0].font.size = Pt(7)
+    s2 = prs.slides.add_slide(prs.slide_layouts[1])  # 제목+내용, 내용 칸을 비워 둠
+    s2.shapes.title.text = "빈 칸 있는 장"
+    s3 = prs.slides.add_slide(prs.slide_layouts[1])
+    s3.shapes.title.text = "정상 장"
+    s3.placeholders[1].text_frame.text = "핵심 요약 한 줄"
+    assert Emu(1)  # (단위 확인용)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    prs.save(str(p))
+    return p
+
+
+async def test_check_pptx_layout_finds_common_problems(tmp_path: Path) -> None:
+    cfg = load_config(_cfg(tmp_path))
+    async with AgentRuntime(cfg) as rt:
+        deck = messy_deck(Path(rt.workspace.files) / "messy.pptx")
+        out = await rt.hub.call("check_pptx_layout", {"path": str(deck)})
+        assert not out.is_error, out.text
+        s1, s2, s3 = out.data["slides"]
+        kinds = {x["kind"] for x in s1["issues"]}
+        assert {"overflow", "off_slide", "overlap", "small_font"} <= kinds, s1["issues"]
+        assert [x["kind"] for x in s2["issues"]] == ["empty_placeholder"]
+        assert s3["issues"] == [] and not out.data["passed"]
+        assert "#1 문제 많은 장" in out.text and "7pt" in out.text
+        ok = await rt.hub.call("check_pptx_layout", {"path": str(deck), "slides": [3]})
+        assert ok.data["passed"] and len(ok.data["slides"]) == 1
+
+
+async def test_render_preview(tmp_path: Path) -> None:
+    from inhouse_agent.pptx_tools import find_soffice
+
+    cfg = load_config(_cfg(tmp_path))
+    async with AgentRuntime(cfg) as rt:
+        deck = messy_deck(Path(rt.workspace.files) / "messy.pptx")
+        if find_soffice() is None:
+            out = await rt.hub.call("render_preview", {"path": str(deck)})
+            assert out.is_error and "LibreOffice" in out.text
+            pytest.skip("LibreOffice 없음")
+        out = await rt.hub.call("render_preview", {"path": str(deck), "pages": [1, 3], "dpi": 40})
+        assert not out.is_error, out.text
+        assert out.data["pdf"].endswith("messy.pdf") and len(out.data["images"]) == (2 if shutil.which("pdftoppm") else 0)
+        for img in out.data["images"]:
+            assert Path(img).read_bytes()[:4] == b"\x89PNG"
+        assert all(f["state"] == "complete" for f in out.files)

@@ -71,6 +71,12 @@ rules:
   dir: rulebooks
 
 # ---------------------------------------------------------------------
+# 사내 문서 도구
+# ---------------------------------------------------------------------
+office:
+  # soffice: "C:/Program Files/LibreOffice/program/soffice.exe"   # render_preview (PPT·엑셀 → 장 이미지). 비우면 자동으로 찾음
+
+# ---------------------------------------------------------------------
 # 사용자별 작업폴더 (workspace/users/<ID>/ : downloads, uploads, files, results, sessions, memory.json)
 #   웹 화면 오른쪽 위에서 ID 입력, CLI 는 -u <ID>. 대화는 sessions/ 에 저장되어 '내 작업' 에서 이어서 진행.
 #   ※ 별도 인증(API 토큰·비밀번호) 없이 접속하면 바로 쓰고, 웹 화면은 처음 접속할 때 ID 를 물어봅니다(사내 식별용).

@@ -796,6 +796,20 @@ skills/menu_builder/
 - **경고**: 찾지 못한 글, 없는 장·표·차트, 표의 행이 부족한 경우를 알려줍니다.
 - 장 번호는 `doc_structure`로 확인하고, 고친 뒤에는 `check_pptx_layout`으로 글 넘침을 검사하세요.
 
+#### PPT 레이아웃 검사와 미리보기 (`check_pptx_layout`, `render_preview`)
+
+- **`check_pptx_layout`**: 설치할 것 없이 파일만 읽어 검사합니다.
+  - 글 넘침: 글꼴 크기와 칸 크기로 줄 수를 어림합니다. 자동 줄임·늘림 설정도 반영합니다.
+  - 슬라이드 밖으로 나간 개체, 겹친 글상자
+  - 10pt 미만 글씨, 비어 있는 입력칸, 글이 너무 많은 장(160단어 초과), 표 칸 넘침
+  - 결과는 장 번호와 개체 이름으로 알려줍니다. 보고서를 만들거나(`write_pptx`) 고친(`edit_pptx`) 뒤 확인용으로 씁니다.
+- **`render_preview`**: PPT·엑셀·Word를 PDF와 장별 PNG로 만듭니다.
+  - 에이전트가 `view_image`로 이미지를 보고 디자인, 넘침, 겹침을 직접 확인할 수 있습니다.
+  - **준비물**: 서버 PC에 [LibreOffice](https://www.libreoffice.org/)를 설치해야 합니다. 설치 경로를 자동으로 찾지 못하면 `config.yaml`의 `office.soffice`에 적으세요.
+  - PNG 변환에는 poppler의 `pdftoppm`이나 PyMuPDF가 필요합니다. 둘 다 없으면 PDF만 만듭니다.
+  - 결과는 `files/_preview/<파일이름>/`에 저장됩니다.
+  - 여러 사람이 동시에 변환해도 충돌하지 않도록 변환할 때마다 LibreOffice 설정 폴더를 따로 씁니다.
+
 ## 13. 결과 파일 받기 / 공유 링크
 
 - **웹 화면**: 답변이나 tool 결과에 실제로 있는 파일/폴더 경로가 나오면 📎 링크로 바뀝니다. 파일명에 공백이나 한글이 있어도 됩니다.
