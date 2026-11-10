@@ -36,7 +36,7 @@ except ImportError as e:  # pragma: no cover
 
 
 SESSION_TTL = 60 * 60 * 6
-API_VERSION = 5  # web/index.html 의 UI_API 와 같아야 함 (화면은 바로 바뀌지만 API 는 서버를 다시 켜야 바뀜)
+API_VERSION = 6  # web/index.html 의 UI_API 와 같아야 함 (화면은 바로 바뀌지만 API 는 서버를 다시 켜야 바뀜)
 ASK_TIMEOUT = 60 * 15
 
 
@@ -422,6 +422,7 @@ class RunManager:
             "files": [f["path"] for f in (done.get("files") or []) if f.get("path")],
             "saved_to": run.saved_to,
             "run_id": run.id,
+            "knowledge_hint": getattr(result, "hint", None),  # 지식 그래프 참고를 붙인 실행 (agent_usage 의 효과 비교)
         }
         try:
             token = current_user.set(sess.user)
@@ -721,6 +722,12 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
     async def knowledge_rebuild() -> dict[str, Any]:
         d = await asyncio.to_thread(rt.knowledge.build)
         return {"text": await asyncio.to_thread(rt.knowledge.overview), "source": d["source"]}
+
+    @app.post("/api/knowledge/suggest-skills", dependencies=A)
+    async def knowledge_skill_drafts(min_success: int = 3) -> dict[str, Any]:
+        names = {sk.name for sk in rt.skills.list()[0]}
+        drafts = await asyncio.to_thread(rt.knowledge.suggest_skills, max(2, min_success), names)
+        return {"drafts": drafts}
 
     @app.get("/api/knowledge/search", dependencies=A)
     async def knowledge_find(q: str, top: int = 3) -> dict[str, Any]:

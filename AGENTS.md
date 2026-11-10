@@ -32,7 +32,8 @@ Python 패키지(`src/inhouse_agent`), FastAPI 웹 UI(SSE), CLI, 예약작업으
 | `context.py` | 토큰 기준 자동 압축(도구 결과 축약 → 구조화 요약), 요약 양식 `SUMMARY_PROMPT`, 파일 목록 수집 |
 | `errors.py` | 예외 → 원인·조치(`describe_error`), 실행 상태 라벨 |
 | `batch.py` | `run_tool_batch` (여러 도구 호출을 LLM 왕복 한 번으로) |
-| `knowledge.py` | 업무 지식 그래프(온톨로지): 실행 기록 → 업무 유형·검증된 순서·DFG·자주 난 오류, 검색·자동 참고·RDF/GraphML 내보내기 |
+| `knowledge.py` | 업무 지식 그래프(온톨로지): 실행 기록 → 업무 유형·검증된 순서·DFG·자주 난 오류, 검색·자동 참고·스킬 초안·RDF/GraphML 내보내기 |
+| `file_versions.py` / `verify.py` | 덮어쓴 파일의 이전 버전 보기·되돌리기 / 결과 PPT·엑셀 자동 검증 |
 | `workflow.py` | LLM 없이 steps 실행, 템플릿 `{steps.x.data...}` (스킬 steps와 batch가 공유) |
 | `subagent.py` | `run_subagent` (깊이 1) |
 | `mcp_hub.py` | MCP 서버 연결, 도구 라우팅, 다운로드 감지, 사용자 간 순번(`UserBaton`) |
@@ -153,6 +154,19 @@ Azure는 요청 앞부분이 직전 요청과 같으면(1,024 토큰 이상) 그
   - 보조 도구(`UTILITY_TOOLS`, 예: 현재 시각, 계획, `run_tool_batch` 상자)는 순서에서 뺍니다.
 - 개념 추출은 의존성 없는 규칙 기반(조사·어미 제거, 기간 일반화)입니다. 형태소 분석기를 붙인다면 선택 의존성으로 하세요.
 - 스키마(클래스·관계)를 바꾸면 `SCHEMA`/`TYPE_KO`, Turtle·GraphML 내보내기, README 표를 함께 고치세요.
+- **스킬 초안**(`suggest_skills`)은 파일만 만들고 설치하지 않습니다. 설치는 편집자가 스킬 가져오기로 합니다(5-9).
+  - 스킬 이름은 영문·숫자·`_`만 됩니다(`skill_slug`).
+- 참고를 붙인 실행은 `AgentResult.hint` → 기록의 `knowledge_hint`로 남기고, `usage.knowledge_effect`가 같은 유형끼리 비교합니다. 이 연결을 끊지 마세요.
+
+### 5-9b. 파일 안전장치 (`files.py`, `file_versions.py`, `verify.py`)
+
+- **쓰기 도구는 반드시 `ws.resolve(경로, write=True)`로 경로를 얻으세요.** 여기서 두 가지가 일어납니다. 직접 `open()`으로 쓰면 둘 다 빠집니다.
+  1. 덮어쓰기 전 원본을 `.versions/`에 보관합니다(파일마다 10개).
+  2. 이번 실행에서 읽은 뒤 바뀐 파일이면 쓰기를 멈춥니다(`file_reads`/`file_writes`는 실행 메타에 기록).
+- 읽기는 `ws.resolve(경로)`(write 없이)로 해야 "읽은 시점"이 기록됩니다.
+- 자동 검증은 결과 폴더(`files/`) 안의 PPT·엑셀만 합니다. 내려받은 원본은 검사하지 않습니다.
+  - 검사 도구 자체(`verify.SKIP_TOOLS`)에는 붙이지 않습니다.
+  - 문제가 없으면 한 줄만 붙여 토큰을 아낍니다.
 
 ### 5-9. 보안·사용자 분리
 

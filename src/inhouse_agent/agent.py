@@ -174,6 +174,7 @@ class AgentResult:
     detail: str = ""  # 멈춘 이유 (반복 한도·되풀이·시간)
     max_iterations: int = 0  # 이번 실행에서 실제로 쓴 반복 한도 (자동 연장 포함)
     models: list[dict[str, Any]] = field(default_factory=list)  # 쓴 모델과 고른/바꾼 이유 [{model, reason}]
+    hint: str | None = None  # 지식 그래프 참고를 붙였으면 그 업무 유형 (효과 측정용으로 실행 기록에 남김)
 
     @property
     def success(self) -> bool:
@@ -332,10 +333,12 @@ class Agent:
 
             note = await asyncio.to_thread(attachment_note, attachments)
             prompt = f"{prompt}\n\n{note}" if prompt.strip() else f"첨부한 파일을 분석해줘.\n\n{note}"
-        hint = ""
+        hint, hint_type = "", None
         if self.knowledge is not None and role == "main" and skill is None and user_prompt.strip() and not user_prompt.startswith("/"):
             try:  # 사람들이 실제로 성공한 순서 (실행 기록에서 만든 지식, 토큰 비용 없음). 요청 끝에 붙여 프롬프트 캐시를 깨지 않음
-                hint = await asyncio.to_thread(self.knowledge.hint, user_prompt, self.knowledge_min_score)
+                info = await asyncio.to_thread(self.knowledge.hint_info, user_prompt, self.knowledge_min_score)
+                if info:
+                    hint, hint_type = info["text"], info["task_type"]
             except Exception:  # noqa: BLE001 - 지식이 없어도 실행은 계속
                 log.exception("지식 그래프 참고 실패")
             if hint:
@@ -386,10 +389,12 @@ class Agent:
                     cost, baseline = router.cost_of(by_model)
                     if cost is not None:
                         usage["cost"], usage["baseline_cost"] = cost, baseline
-            return AgentResult(
+            res = AgentResult(
                 output, messages, events, it, usage, reason, time.monotonic() - started,
                 all_files(), list(dict.fromkeys(ctx.meta.get("skills_used", []))), error, detail, limit, models_log,
             )
+            res.hint = hint_type
+            return res
 
         # ---------------- 모델 선택 (비용 기준) ----------------
         router = self.router if self.router is not None and getattr(self.router, "specs", None) else None
@@ -640,6 +645,14 @@ class Agent:
             out = await self.hub.call(tc.name, args)
             ev.elapsed = time.monotonic() - t0
             ev.result = await asyncio.to_thread(self._fit_result, out.text, tc.name)
+            if self.cfg.auto_verify and not out.is_error and out.files:
+                from .verify import SKIP_TOOLS, verify_outputs
+
+                if tc.name not in SKIP_TOOLS:  # 만든 PPT·엑셀을 바로 검사해 같은 차례에 고칠 수 있게 (토큰 0)
+                    ws = getattr(self.hub, "workspace", None)
+                    note = await asyncio.to_thread(verify_outputs, out.files, getattr(ws, "files", None) if ws is not None else None)
+                    if note:
+                        ev.result = f"{ev.result}\n\n{note}"
             ev.is_error = out.is_error
             ev.files = out.files
             ev.view = view_of(out.data)

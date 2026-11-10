@@ -72,6 +72,7 @@ agent:
   context_window: 128000        # 배포 모델의 입력 한도(토큰). 모델에 맞게 (예: 272000, 400000)
   compact_at: 0.75              # 대화가 한도의 75% 를 넘으면 자동 압축: 오래된 도구 결과 줄이기 → 앞 대화 요약
   subagents: true               # run_subagent: 여러 파일·사이트를 하위 에이전트에게 나눠 맡김 (LLM 있을 때)
+  auto_verify: true             # 결과 PPT·엑셀을 만들면 바로 검사(레이아웃 넘침·겹침, 엑셀 오류값·빈 시트)해 도구 결과에 붙임 (토큰 0)
   tool_batch: true              # run_tool_batch: 검색→상세 조회 같은 연쇄·항목마다 실행을 LLM 왕복 한 번으로 (결과 줄이기 포함)
   subagent_max_iterations: 12   # 하위 에이전트 1개의 최대 도구 왕복 횟수
   parallel_tool_calls: true     # 서로 다른 서버는 병렬, 같은 서버는 자동으로 순차 실행

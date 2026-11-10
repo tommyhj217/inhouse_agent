@@ -678,6 +678,13 @@ async def cmd_knowledge(cfg: AppConfig, args: argparse.Namespace) -> int:
     elif sub == "export":
         p = await asyncio.to_thread(kg.export, args.format, Path(args.out) if args.out else None)
         print(f"내보냄: {p}")
+    elif sub == "suggest":
+        drafts = await asyncio.to_thread(kg.suggest_skills, args.min_success, {sk.name for sk in rt.skills.list()[0]})
+        if not drafts:
+            print("스킬로 만들 만한 업무가 아직 없습니다 (같은 순서로 여러 번 성공한, 스킬이 없는 업무가 없음).")
+        for x in drafts:
+            print(f"- 「{x['task_type']}」 성공 {x['success']}/{x['runs']}회 · {x['workflow']}\n  초안: {x['path']}\n"
+                  f"  설치: inhouse-agent skills import {Path(x['path']).parent}")
     else:
         print(await asyncio.to_thread(kg.overview))
     return 0
@@ -903,6 +910,8 @@ def build_parser() -> argparse.ArgumentParser:
     x = kns.add_parser("search", help="비슷한 과거 업무 찾기")
     x.add_argument("query", nargs="+")
     x.add_argument("--top", type=int, default=3)
+    x = kns.add_parser("suggest", help="스킬로 만들 만한 업무의 SKILL.md 초안 만들기 (같은 순서로 여러 번 성공한 업무)")
+    x.add_argument("--min-success", type=int, default=3)
     x = kns.add_parser("export", help="파일로 내보내기 (ttl: RDF/OWL, graphml, json)")
     x.add_argument("format", choices=["ttl", "graphml", "json"])
     x.add_argument("--out", help="저장할 폴더 (기본: knowledge.dir)")

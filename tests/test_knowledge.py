@@ -180,3 +180,73 @@ def test_built_from_real_web_runs(tmp_path: Path) -> None:
         ov = c.get("/api/knowledge", headers=H).json()
         assert "실행 3건" in ov["text"] and "| 공지 · 목록 · 정리 | 3 | 3 | 1 |" in ov["text"]
         assert "kg-search" in c.get("/").text
+
+
+async def test_suggests_runnable_skill_draft_from_proven_order(tmp_path: Path) -> None:
+    """같은 순서로 3번 성공한 업무 → SKILL.md 초안 → 실제 샘플 MCP 서버로 그대로 실행."""
+    from inhouse_agent.skills import parse_skill
+    from inhouse_agent.workflow import run_workflow, validate_steps
+
+    agg = [{"column": "금액", "func": "sum"}]
+    now = time.time()
+    turns = [{"prompt": f"{m}월 매출 엑셀 받아서 부서별 금액 합계 내줘", "time": now - (10 - m) * DAY,
+              "calls": [("demo", "download_sales_excel", {"month": f"2026-0{m}", "wait": True}, None),
+                        ("builtin", "query_table", {"path": f"downloads/매출현황_2026-0{m}.xlsx", "group_by": ["부서"], "aggregates": agg}, None),
+                        ("builtin", "write_excel", {"path": f"reports/부서별_{m}.xlsx", "sheets": [{"name": "요약", "columns": ["부서"], "rows": [[m]]}]}, None)]}
+             for m in (6, 7, 8)]
+    cfg = load_config(write_config(tmp_path))
+    async with AgentRuntime(cfg, llm=ScriptedLLM([])) as rt:
+        session(rt.users.root / "kim" / "sessions", "s", turns)
+        rt.knowledge.build()
+        out = await rt.hub.call("knowledge_suggest_skills", {})
+        assert not out.is_error and "초안을 만들었습니다" in out.text
+        draft = out.data["drafts"][0]
+        text = Path(draft["path"]).read_text(encoding="utf-8")
+        skill = parse_skill(text, Path(draft["path"]).parent)
+        steps = validate_steps(skill.steps)
+        assert [s["tool"] for s in steps] == ["demo__download_sales_excel", "query_table", "write_excel"]
+        assert steps[0]["args"] == {"month": "{month}", "wait": True}
+        assert steps[1]["args"] == {"path": "{steps.s1.file}", "group_by": ["부서"], "aggregates": agg}  # 매번 같은 값은 그대로
+        assert steps[2]["args"]["path"] == "{path}"  # 저장할 파일 이름은 입력값 (앞 단계 파일이 아님)
+        names = {i.name: i for i in skill.inputs}
+        assert names["month"].default == "{last_month}" and names["path"].default.startswith("reports/auto_")
+        assert "## 절차" in skill.body and "2단계 path: 앞 단계 파일을 쓰도록 했습니다" in skill.body  # 확인할 점을 초안에 남김
+        assert draft["name"].isascii() and draft["name"].startswith("auto_download_sales_excel_write_excel_")
+        # 초안 그대로 실행 (sheets 는 매번 달라 입력값 → 실행할 때 줌)
+        inputs = skill.resolve_inputs({"month": "2026-10", "sheets": json.dumps([{"name": "요약", "columns": ["부서"], "rows": [["영업"]]}])},
+                                      rt.cfg.agent.timezone)
+        r1 = await run_workflow(rt.hub, steps[:2], inputs, timezone=rt.cfg.agent.timezone)
+        assert r1.success, r1.output
+        assert "부서" in r1.tool_events[1].result and r1.tool_events[0].files  # 1단계에서 받은 엑셀을 2단계가 집계
+        # 이미 같은 이름의 스킬이 있으면 다시 제안하지 않음
+        again = rt.knowledge.suggest_skills(existing={draft["name"]})
+        assert again == []
+
+
+def test_usage_compares_runs_with_and_without_hint(tmp_path: Path) -> None:
+    """참고를 붙인 실행이 기록되고, 사용 이력에서 같은 업무 유형의 참고 없는 실행과 비교됨 (웹 경로 그대로)."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from inhouse_agent.server import create_app
+
+    cfg = load_config(write_config(tmp_path))
+    llm = ScriptedLLM([LLMResponse("6월 정리 끝"), LLMResponse("7월 정리 끝")])
+    rt = AgentRuntime(cfg, llm=llm)
+    corpus(rt.users.root)  # kim·lee 의 예전 기록 (참고 없이 한 매출 업무 포함)
+    app = create_app(cfg, runtime=rt, enable_scheduler=False)
+    H = {"X-Agent-User": "kim"}
+    with TestClient(app) as c:
+        for m in ("6월", "7월"):
+            run = c.post("/api/runs", json={"prompt": f"{m} 매출 엑셀 부서별로 정리해줘", "new_session": True}, headers=H).json()
+            with c.stream("GET", f"/api/runs/{run['id']}/events", headers=H) as s:
+                "".join(s.iter_text())
+            turn = c.get(f"/api/sessions/{run['session_id']}", headers=H).json()["turns"][-1]
+            assert "매출" in (turn["knowledge_hint"] or "")
+        u = c.get("/api/usage?days=60", headers=H).json()
+        ke = u["knowledge_effect"]
+        assert ke["hinted"]["runs"] == 2 and ke["hinted"]["success_rate"] == 1.0
+        assert ke["baseline"]["runs"] == 3 and ke["baseline"]["success_rate"] == pytest.approx(2 / 3, abs=0.01)  # kim 의 예전 매출 업무 3건
+        assert "업무 지식 참고 효과" in u["text"] and "| 참고 붙음 | 2 | 100% |" in u["text"]
+        drafts = c.post("/api/knowledge/suggest-skills", headers=H).json()["drafts"]
+        assert drafts and drafts[0]["name"].startswith("auto_download_sales_excel")

@@ -129,6 +129,9 @@ class AgentRuntime:
         from .excel_tools import make_excel_tools
 
         builtin_tools += make_excel_tools(self.workspace, self.links)  # 기존 엑셀 양식 채우기
+        from .file_versions import make_version_tools
+
+        builtin_tools += make_version_tools(self.workspace)  # 덮어쓴 파일의 이전 버전 보기·되돌리기
         from .pptx_tools import make_pptx_tools
 
         builtin_tools += make_pptx_tools(self.workspace, self.links, (cfg.raw.get("office") or {}).get("soffice"))  # PPT 수정·레이아웃 검사·미리보기
@@ -142,7 +145,7 @@ class AgentRuntime:
                                         rebuild_minutes=float(kcfg.get("rebuild_minutes") or 60), min_runs=int(kcfg.get("min_runs") or 2))
         self.knowledge.sources = self._knowledge_sources
         if kcfg.get("enabled", True) is not False:
-            builtin_tools += make_knowledge_tools(self.knowledge)
+            builtin_tools += make_knowledge_tools(self.knowledge, lambda: [sk.name for sk in self.skills.list()[0]])
         self.hub = MCPHub(
             cfg.mcp_servers,
             log_dir=cfg.log_path,

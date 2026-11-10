@@ -32,6 +32,29 @@ class FileAccessError(PermissionError):
     pass
 
 
+VERSIONS_DIR = ".versions"  # 덮어쓰기 전 원본 보관 (opencode 의 파일 버전 기록과 같은 목적)
+KEEP_VERSIONS = 10  # 파일마다 최근 몇 개까지 보관
+
+
+def _run_meta() -> dict[str, Any] | None:
+    """지금 실행 중인 에이전트 실행의 메타 (없으면 None - CLI 직접 호출 등)."""
+    try:
+        from .interaction import current_run
+
+        ctx = current_run.get()
+    except Exception:  # noqa: BLE001
+        return None
+    return ctx.meta if ctx is not None else None
+
+
+def _md5(p: Path) -> str:
+    h = hashlib.md5()
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 @dataclass
 class FileWorkspace:
     root: Path
@@ -92,7 +115,67 @@ class FileWorkspace:
         if not any(p == r or r in p.parents for r in roots):
             allowed = ", ".join(str(r) for r in roots)
             raise FileAccessError(f"허용되지 않은 경로입니다: {p} (허용 폴더: {allowed})")
+        if write:
+            self._before_write(p)
+        elif p.is_file():
+            meta = _run_meta()
+            if meta is not None:  # 이번 실행에서 처음 읽은 시점의 수정 시각 (덮어쓰기 전 변경 감지용)
+                meta.setdefault("file_reads", {}).setdefault(str(p), p.stat().st_mtime)
         return p
+
+    # ------------------------------------------------------------------ 덮어쓰기 보호
+    def _before_write(self, p: Path) -> None:
+        """기존 파일을 덮어쓰기 직전: (1) 이번 실행에서 읽은 뒤 다른 곳에서 바뀌었으면 멈춤 (2) 원본을 .versions 에 보관."""
+        if not p.is_file() or VERSIONS_DIR in p.parts:
+            return
+        meta = _run_meta()
+        if meta is not None:
+            key = str(p)
+            read_at = (meta.get("file_reads") or {}).get(key)
+            writes = meta.setdefault("file_writes", set())
+            now = p.stat().st_mtime
+            if read_at is not None and key not in writes and now > read_at + 1:
+                raise FileAccessError(
+                    f"'{self.display(p)}' 파일이 이번 작업에서 읽은 뒤 다른 곳에서 바뀌었습니다 "
+                    f"(읽을 때 {datetime.fromtimestamp(read_at):%H:%M:%S}, 지금 {datetime.fromtimestamp(now):%H:%M:%S}). "
+                    "덮어쓰면 그 변경이 사라집니다. 파일을 다시 읽어 반영하거나 다른 이름으로 저장하세요.")
+            writes.add(key)
+        self.keep_version(p)
+
+    def versions_dir(self, p: Path) -> Path | None:
+        try:
+            rel = p.resolve().relative_to(self.root)
+        except ValueError:
+            return None
+        return self.root / VERSIONS_DIR / rel
+
+    def keep_version(self, p: Path) -> Path | None:
+        """p 의 지금 내용을 .versions/<상대경로>/<시각><확장자> 로 복사 (같은 내용이 이미 있으면 건너뜀, 최근 KEEP_VERSIONS 개만)."""
+        import shutil
+
+        vdir = self.versions_dir(p)
+        if vdir is None or not p.is_file():
+            return None
+        vdir.mkdir(parents=True, exist_ok=True)
+        olds = sorted(vdir.iterdir())
+        if olds and olds[-1].stat().st_size == p.stat().st_size and _md5(olds[-1]) == _md5(p):
+            return olds[-1]
+        dst = vdir / f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}{p.suffix}"
+        shutil.copy2(p, dst)
+        for old in sorted(vdir.iterdir())[:-KEEP_VERSIONS]:
+            old.unlink(missing_ok=True)
+        return dst
+
+    def list_versions(self, p: Path) -> list[dict[str, Any]]:
+        vdir = self.versions_dir(p)
+        if vdir is None or not vdir.is_dir():
+            return []
+        out = []
+        for i, v in enumerate(sorted(vdir.iterdir(), reverse=True), 1):
+            st = v.stat()
+            out.append({"no": i, "id": v.name, "saved": datetime.strptime(v.stem[:15], "%Y%m%d_%H%M%S").strftime("%Y-%m-%d %H:%M:%S"),
+                        "size": st.st_size, "path": str(v)})
+        return out
 
     def display(self, p: Path) -> str:
         try:

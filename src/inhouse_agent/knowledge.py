@@ -36,6 +36,7 @@ VERSION = 1
 # 업무 흐름에서 의미가 적은 보조 도구 (순서에서 뺌)
 UTILITY_TOOLS = {"get_current_time", "update_plan", "ask_user", "list_downloads", "file_status", "wait_for_download",
                  "recall", "remember", "use_skill", "read_skill_file", "knowledge_search", "knowledge_build", "knowledge_export",
+                 "knowledge_suggest_skills", "file_versions",
                  "list_past_work", "read_past_work", "agent_usage", "list_models", "business_days", "view_image",
                  "run_tool_batch"}  # 묶음은 상자일 뿐 - 안쪽 호출이 따로 기록됨
 
@@ -46,7 +47,7 @@ _JOSA = sorted(["에서는", "으로는", "에서도", "에게서", "이라도",
 _ENDINGS = sorted(["해주세요", "해줘요", "해줘", "해주고", "해서", "하고", "하는", "했던", "했어", "합니다", "하세요", "하기", "한", "할",
                    "주세요", "줘", "해", "하자", "아서", "어서", "아줘", "어줘", "고서"], key=len, reverse=True)
 _STOP = {"좀", "그리고", "그거", "이거", "저거", "그", "이", "저", "것", "거", "수", "등", "및", "또", "다시", "같이", "모두", "전부", "각",
-         "알려", "알려줘", "보여", "보여줘", "주세요", "해줘", "해주세요", "있는", "없는", "있어", "없어", "어떻게", "뭐야", "뭐",
+         "알려", "알려줘", "보여", "보여줘", "주세요", "해줘", "해주세요", "내줘", "내주세요", "봐줘", "줘요", "해봐", "있는", "없는", "있어", "없어", "어떻게", "뭐야", "뭐",
          "please", "the", "and", "for", "with", "to", "of", "in", "a", "an"}
 _PERIOD = [(re.compile(r"^(오늘|어제|그제|내일|금일|전일|당일)$"), "기간:일"), (re.compile(r"^(이번주|지난주|다음주|주간|금주|전주)$"), "기간:주"),
            (re.compile(r"^(\d{1,2}월|이번달|지난달|다음달|월간|월별|전월|당월|\d{4}-\d{2})$"), "기간:월"),
@@ -164,7 +165,11 @@ def read_runs(session_dirs: list[tuple[str, Path]]) -> tuple[list[Run], dict[str
                         args = {}
                     if isinstance(args, dict):
                         for k, v in list(args.items())[:12]:
-                            arg_kinds[fn][k][_value_kind(v) if _value_kind(v) != "<글>" else json.dumps(v, ensure_ascii=False)[:40]] += 1
+                            kind = _value_kind(v)
+                            if kind in ("<글>", "<목록>", "<객체>"):  # 매번 같은 값이면 그 값 그대로 남기려고 원문 기록
+                                lit = json.dumps(v, ensure_ascii=False)
+                                kind = lit if len(lit) <= 300 else kind
+                            arg_kinds[fn][k][kind] += 1
                 if m.get("role") == "tool" and str(m.get("content") or "").startswith("오류"):
                     fn = calls.get(m.get("tool_call_id", ""), "")
                     if fn and fn not in UTILITY_TOOLS:
@@ -238,16 +243,29 @@ def cluster_runs(runs: list[Run], threshold: float = 0.34) -> list[Cluster]:
     return clusters
 
 
+def _step_args(fn: str, arg_kinds: dict[str, dict[str, dict[str, int]]], limit: int | None = 4) -> dict[str, str]:
+    """도구의 대표 인자 형태 {키: 형태}. 자주 쓴 키만 (가장 많이 쓴 키의 절반 이상)."""
+    ks = arg_kinds.get(fn) or {}
+    if not ks:
+        return {}
+    top = max(sum(v.values()) for v in ks.values())
+    out: dict[str, str] = {}
+    for k, kinds in sorted(ks.items(), key=lambda kv: -sum(kv[1].values())):
+        total = sum(kinds.values())
+        if total < 0.5 * top:
+            continue
+        v, n = max(kinds.items(), key=lambda kv: kv[1])
+        if v[:1] in ('"', "[", "{") and (n < 2 or n < 0.5 * total):
+            v = {"[": "<목록>", "{": "<객체>"}.get(v[:1], "<글>")  # 그때그때 다른 값 → 형태만
+        out[k] = v
+        if limit and len(out) >= limit:
+            break
+    return out
+
+
 def _step_text(fn: str, arg_kinds: dict[str, dict[str, dict[str, int]]]) -> str:
     """도구 + 자주 쓴 인자 형태: download_sales_excel(month=<월>, wait=true)"""
-    ks = arg_kinds.get(fn) or {}
-    parts = []
-    for k, kinds in sorted(ks.items(), key=lambda kv: -sum(kv[1].values()))[:4]:
-        v, n = max(kinds.items(), key=lambda kv: kv[1])
-        if v.startswith('"') and (n < 2 or n < 0.5 * sum(kinds.values())):
-            v = "<글>"  # 그때그때 다른 글자 값 → 형태만
-        parts.append(f"{k}={v}")
-    return f"{fn}({', '.join(parts)})"
+    return f"{fn}({', '.join(f'{k}={v}' for k, v in _step_args(fn, arg_kinds).items())})"
 
 
 class KnowledgeGraph:
@@ -336,6 +354,7 @@ class KnowledgeGraph:
                 when = [r.time for r in ok if tuple(r.tools) == seq]
                 nodes[wid] = {"type": "Workflow", "label": " → ".join(s.split("__")[-1] for s in seq), "count": cnt,
                               "first": min(when), "last": max(when), "steps": [_step_text(s, extra["arg_kinds"]) for s in seq],
+                              "step_args": [_step_args(s, extra["arg_kinds"], None) for s in seq],
                               "tools": list(seq)}
                 edge(tt, "solvedBy", wid, max(when), cnt)
                 for s in seq:
@@ -429,9 +448,14 @@ class KnowledgeGraph:
 
     def hint(self, prompt: str, min_score: float = 0.45, min_success: int = 2) -> str:
         """새 요청에 붙일 짧은 참고 (검증된 순서가 있을 때만). 요청 끝에 붙으므로 프롬프트 캐시를 깨지 않음."""
+        info = self.hint_info(prompt, min_score, min_success)
+        return info["text"] if info else ""
+
+    def hint_info(self, prompt: str, min_score: float = 0.45, min_success: int = 2) -> dict[str, Any] | None:
+        """참고 글 + 어느 업무 유형인지 (효과 측정용으로 실행 기록에 남김)."""
         res = [r for r in self.search(prompt, 1) if r["score"] >= min_score and r["success"] >= min_success and r["workflows"]]
         if not res:
-            return ""
+            return None
         r = res[0]
         w = r["workflows"][0]
         lines = [f"[참고: 지식 그래프 - 비슷한 과거 업무 「{r['task_type']}」 성공 {r['success']}/{r['runs']}회]",
@@ -440,7 +464,46 @@ class KnowledgeGraph:
             p = r["pitfalls"][0]
             lines.append(f"주의: {p['tool']} 에서 '{p['text']}' 오류가 {p['count']}번 있었음")
         lines.append("요청과 맞으면 이 순서를 따르고(여러 단계면 run_tool_batch 로 묶기), 맞지 않으면 무시하세요.")
-        return "\n".join(lines)
+        return {"text": "\n".join(lines), "task_type": r["task_type"], "score": r["score"]}
+
+    def classify(self, prompt: str, min_score: float = 0.45) -> str | None:
+        """요청이 어느 업무 유형인지 (없으면 None) - 효과 측정에서 '같은 유형인데 참고 없이 한 실행'을 찾을 때."""
+        res = self.search(prompt, 1)
+        return res[0]["task_type"] if res and res[0]["score"] >= min_score else None
+
+    def suggest_skills(self, min_success: int = 3, existing: set[str] | None = None, out_dir: Path | None = None) -> list[dict[str, Any]]:
+        """스킬로 만들 만한 업무: 스킬이 아직 없고, 같은 순서로 min_success 번 이상 성공(성공의 절반 이상이 그 순서)했고 2단계 이상.
+        초안(SKILL.md)을 knowledge/skill_drafts/<이름>/ 에 쓰고 목록을 돌려줌 (설치는 편집자가 스킬 가져오기로)."""
+        d = self.fresh()
+        if not d:
+            return []
+        nodes, edges = d["nodes"], d["edges"]
+        out_e: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for e in edges:
+            out_e[e["s"]].append(e)
+        base = Path(out_dir or self.path.parent / "skill_drafts")
+        existing = {x.lower() for x in (existing or set())}
+        drafts = []
+        for nid, n in sorted(nodes.items(), key=lambda kv: -kv[1].get("success", 0)):
+            if n["type"] != "TaskType" or any(e["p"] == "implementedBy" for e in out_e[nid]):
+                continue
+            wfs = sorted((nodes[e["o"]] for e in out_e[nid] if e["p"] == "solvedBy"), key=lambda w: -w["count"])
+            if not wfs:
+                continue
+            wf = wfs[0]
+            if wf["count"] < min_success or wf["count"] < 0.5 * n.get("success", 0) or len(wf.get("tools") or []) < 2:
+                continue
+            slug = skill_slug(n["label"], wf.get("tools"))
+            if slug.lower() in existing:
+                continue
+            pits = [f"{nodes[e['o']].get('tool', '')}: {nodes[e['o']]['label']} ({e['count']}회)"
+                    for t in wf.get("tools") or [] for e in out_e.get(f"tool:{t}", []) if e["p"] == "hasPitfall"][:5]
+            path = base / slug / "SKILL.md"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(skill_draft(n, wf, pits, slug), encoding="utf-8")
+            drafts.append({"name": slug, "task_type": n["label"], "runs": n["count"], "success": n.get("success", 0),
+                           "workflow": wf["label"], "path": str(path)})
+        return drafts
 
     # ------------------------------------------------------------------ 보여주기·내보내기
     def overview(self) -> str:
@@ -483,6 +546,89 @@ class KnowledgeGraph:
         else:
             raise ValueError("형식은 ttl / graphml / json 중 하나입니다.")
         return p
+
+
+# ---------------------------------------------------------------------- 스킬 초안 (AWM·SkillWeaver: 검증된 순서 → 재사용 절차)
+_INPUT_FOR_KIND = {"<월>": ("month", "월 (YYYY-MM)", "{last_month}"), "<날짜>": ("date", "날짜 (YYYY-MM-DD)", "{yesterday}"),
+                   "<URL>": ("url", "주소", None)}
+
+
+def _is_output(fn: str, key: str) -> bool:
+    name = fn.split("__")[-1]
+    return key in ("output", "out", "dest", "save_to", "output_path") or (
+        key == "path" and name.startswith(("write_", "save_", "export_", "make_", "create_")))
+
+
+def skill_slug(label: str, tools: list[str] | None = None) -> str:
+    """스킬 이름은 영문·숫자·_ 만 됨 → 처음·마지막 도구 이름 + 업무 이름 해시 (한글 업무 이름은 설명·제목에)."""
+    parts = []
+    for t in (tools or [])[:1] + (tools or [])[-1:]:
+        short = re.sub(r"[^0-9A-Za-z_]+", "_", t.split("__")[-1]).strip("_")
+        if short and short not in parts:
+            parts.append(short)
+    ascii_label = re.sub(r"[^0-9A-Za-z]+", "_", label).strip("_")
+    base = "_".join(parts) or ascii_label or "task"
+    return f"auto_{base[:40]}_{hashlib.md5(label.encode()).hexdigest()[:4]}"
+
+
+def skill_draft(task: dict[str, Any], wf: dict[str, Any], pitfalls: list[str], slug: str) -> str:
+    """업무 유형 + 검증된 작업 순서 → SKILL.md 초안 (steps 로 LLM 없이도 실행 가능, 본문은 LLM 이 따를 지침)."""
+    import yaml
+
+    inputs: dict[str, dict[str, Any]] = {}
+    steps: list[dict[str, Any]] = []
+    todo: list[str] = []
+    for i, (fn, args) in enumerate(zip(wf.get("tools") or [], wf.get("step_args") or []), 1):
+        a: dict[str, Any] = {}
+        for k, kind in args.items():
+            if kind in _INPUT_FOR_KIND:
+                name, label, default = _INPUT_FOR_KIND[kind]
+                inputs.setdefault(name, {"name": name, "label": label, **({"default": default} if default else {"required": True})})
+                a[k] = "{" + name + "}"
+            elif kind == "<파일>" and _is_output(fn, k):  # 새로 저장할 파일 이름
+                ext = ".xlsx" if "excel" in fn else ".pptx" if "pptx" in fn else ".csv" if "csv" in fn else ""
+                inputs.setdefault(k, {"name": k, "label": "저장할 파일 이름", "default": f"reports/{slug}_{{today}}{ext}"})
+                a[k] = "{" + k + "}"
+            elif kind == "<파일>" and i > 1:
+                a[k] = "{steps.s%d.file}" % (i - 1)  # 앞 단계가 만든(받은) 파일
+                todo.append(f"{i}단계 {k}: 앞 단계 파일을 쓰도록 했습니다. 다른 파일이면 고치세요.")
+            elif kind in ("<파일>", "<글>", "<숫자>", "<목록>", "<객체>"):
+                spec: dict[str, Any] = {"name": k, "label": k, "required": True}
+                if kind == "<숫자>":
+                    spec["type"] = "number"
+                if kind == "<목록>":
+                    spec.update(type="text", description="여러 개는 줄바꿈으로")
+                if kind == "<객체>":
+                    spec.update(type="text", description="JSON 객체")
+                    todo.append(f"{i}단계 {k}: JSON 객체 값이라 입력 형식을 확인하세요.")
+                inputs.setdefault(k, spec)
+                a[k] = "{" + k + ("|lines}" if kind == "<목록>" else "}")
+            elif kind in ("true", "false"):
+                a[k] = kind == "true"
+            else:
+                try:
+                    a[k] = json.loads(kind)  # 매번 같은 값으로 쓴 인자는 그대로
+                except ValueError:
+                    a[k] = kind
+        steps.append({"id": f"s{i}", "title": fn.split("__")[-1], "tool": fn, "args": a})
+    examples = task.get("examples") or []
+    front = {
+        "name": slug,
+        "description": f"{task['label']} 업무. 업무 지식 그래프가 실행 기록에서 만든 초안 (성공 {task.get('success', 0)}/{task['count']}회, "
+                       f"사용자 {task.get('users', 0)}명)" + (f". 예: {examples[0]}" if examples else ""),
+        "inputs": list(inputs.values()),
+        "steps": steps,
+    }
+    body = [f"# {task['label']} (자동 제안 초안)", "",
+            f"> 사람들이 실제로 성공한 순서({wf['count']}회)로 만든 초안입니다. 편집자가 확인·수정한 뒤 설치하세요.", "",
+            "## 절차", *[f"{i}. {t}" for i, t in enumerate(wf.get("steps") or [], 1)], ""]
+    if pitfalls:
+        body += ["## 주의 (자주 난 오류)", *[f"- {p}" for p in pitfalls], ""]
+    if todo:
+        body += ["## 설치 전에 확인할 것", *[f"- {t}" for t in todo], ""]
+    if examples:
+        body += ["## 이 업무의 실제 요청 예", *[f"- {e}" for e in examples], ""]
+    return "---\n" + yaml.safe_dump(front, allow_unicode=True, sort_keys=False, width=1000) + "---\n" + "\n".join(body)
 
 
 TYPE_KO = {"TaskType": "업무 유형", "Workflow": "작업 순서", "Tool": "도구", "Site": "사이트", "Concept": "개념",
@@ -596,7 +742,7 @@ def format_results(results: list[dict[str, Any]], source: dict[str, Any] | None 
     return "\n".join(lines)
 
 
-def make_knowledge_tools(kg: KnowledgeGraph) -> list[Any]:
+def make_knowledge_tools(kg: KnowledgeGraph, skill_names: Any = None) -> list[Any]:
     import asyncio
 
     from .mcp_hub import BuiltinTool, ToolOutcome
@@ -623,7 +769,23 @@ def make_knowledge_tools(kg: KnowledgeGraph) -> list[Any]:
                            + {"ttl": "Protégé·GraphDB·rdflib 로 열 수 있는 RDF/OWL", "graphml": "Gephi·yEd·networkx·Neo4j(APOC) 로 열 수 있는 그래프",
                               "json": "원본 데이터"}[fmt], False, [{"path": str(p), "state": "complete"}])
 
+    async def knowledge_suggest_skills(args: dict[str, Any]) -> ToolOutcome:
+        existing = set(skill_names()) if skill_names else set()
+        drafts = await asyncio.to_thread(kg.suggest_skills, int(args.get("min_success") or 3), existing)
+        if not drafts:
+            return ToolOutcome("스킬로 만들 만한 업무가 아직 없습니다 (같은 순서로 3번 이상 성공한, 스킬이 없는 업무가 없음).", False, [], {"drafts": []})
+        lines = [f"## 스킬로 만들 만한 업무 {len(drafts)}개 (초안을 만들었습니다 - 편집자가 확인 후 설치)"]
+        for x in drafts:
+            lines.append(f"- 「{x['task_type']}」 성공 {x['success']}/{x['runs']}회 · 순서: {x['workflow']}\n  초안: {x['path']}")
+        lines.append("설치: 스킬 탭 → 가져오기 → 폴더 경로에 초안 폴더, 또는 `inhouse-agent skills import <초안 폴더>`")
+        return ToolOutcome("\n".join(lines), False, [{"path": x["path"], "state": "complete"} for x in drafts], {"drafts": drafts})
+
     return [
+        BuiltinTool("knowledge_suggest_skills",
+                    "업무 지식 그래프에서 스킬로 만들 만한 업무(같은 순서로 여러 번 성공했지만 스킬이 없는 업무)를 찾아 SKILL.md 초안을 만듭니다. "
+                    "초안은 바로 설치되지 않고, 편집자가 확인한 뒤 스킬 가져오기로 설치합니다.",
+                    {"type": "object", "properties": {"min_success": {"type": "integer", "description": "같은 순서로 최소 몇 번 성공 (기본 3)"}}},
+                    knowledge_suggest_skills),
         BuiltinTool("knowledge_search",
                     "업무 지식 그래프에서 비슷한 과거 업무를 찾습니다: 성공한 도구 순서(인자 형태 포함), 만든 파일 종류, 관련 스킬, 자주 난 오류. "
                     "처음 하는 복잡한 업무를 시작하기 전에 쓰면 시행착오를 줄일 수 있습니다. (실행 기록에서 자동으로 만든 지식, 토큰 비용 없음)",

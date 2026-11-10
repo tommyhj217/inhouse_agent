@@ -54,6 +54,37 @@ def _results(res_dir: Path, since: float) -> list[dict[str, Any]]:
     return out
 
 
+def _run_stats(ts: list[dict[str, Any]]) -> dict[str, Any]:
+    n = len(ts)
+    its = [int(t["iterations"]) for t in ts if isinstance(t.get("iterations"), int)]
+    tok = [int((t.get("usage") or {}).get("total_tokens") or 0) for t in ts]
+    cost = [float((t.get("usage") or {}).get("cost")) for t in ts if isinstance((t.get("usage") or {}).get("cost"), (int, float))]
+    return {"runs": n, "success_rate": round(sum(t.get("status") == "completed" for t in ts) / n, 3) if n else None,
+            "avg_iterations": round(sum(its) / len(its), 1) if its else None, "avg_tokens": round(sum(tok) / n) if n else None,
+            "avg_cost": round(sum(cost) / len(cost), 5) if cost else None}
+
+
+def knowledge_effect(rt: Any, turns: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """지식 그래프 참고의 효과: 참고를 붙인 실행 vs 같은 업무 유형인데 참고 없이 한 실행 (성공률·도구 왕복·토큰·비용).
+    참고 없이 한 쪽은 지식이 쌓이기 전 실행이 많아 대략적인 비교입니다."""
+    kg = getattr(rt, "knowledge", None)
+    hinted = [t for t in turns if t.get("knowledge_hint")]
+    if kg is None or not hinted:
+        return None
+    labels = {t["knowledge_hint"] for t in hinted}
+    base = []
+    for t in turns:
+        if t.get("knowledge_hint") or (t.get("kind") or "chat") != "chat" or str(t.get("prompt") or "").startswith("/"):
+            continue
+        try:
+            label = kg.classify(str(t.get("prompt") or ""))
+        except Exception:  # noqa: BLE001 - 지식 그래프가 없어도 사용 이력은 보여줌
+            label = None
+        if label in labels:
+            base.append(t)
+    return {"hinted": _run_stats(hinted), "baseline": _run_stats(base), "task_types": sorted(labels)}
+
+
 def collect_usage(rt: "AgentRuntime", users: list[str | None], days: float = 30) -> dict[str, Any]:
     """users: 사용자 ID 목록 (None = 공용 작업폴더)."""
     since = time.time() - days * 86400
@@ -106,6 +137,7 @@ def collect_usage(rt: "AgentRuntime", users: list[str | None], days: float = 30)
                     "samples": [{"prompt": (t.get("prompt") or "")[:60], "status": t.get("status"), "detail": t.get("detail") or "",
                                  "iterations": t.get("iterations"), "models": t.get("models") or []}
                                 for t in sorted(stopped, key=lambda t: t.get("time") or 0, reverse=True)[:5]]},
+        "knowledge_effect": knowledge_effect(rt, all_turns),
         "days": days, "since": since, "users": per_user,
         "runs": len(all_turns), "sessions": len({(t["user"], t["session_id"]) for t in all_turns}),
         "status": dict(status), "kinds": dict(kinds), "skills": dict(skills.most_common()), "tools": dict(tools.most_common(15)),
@@ -163,6 +195,16 @@ def format_usage(u: dict[str, Any], recent: int = 10) -> str:
             lines.append("- 이때 많이 부른 도구: " + ", ".join(f"{k} {v}회" for k, v in st["tools"].items())
                          + "  ← 한 번에 더 많이 가져오는 도구(MCP)나 스킬 steps 로 바꾸면 반복이 줄어듭니다")
         lines += [f"- '{x['prompt']}' → {x['status']} {x['detail']}" + (f" (모델 {'→'.join(x['models'])})" if x["models"] else "") for x in st["samples"]]
+    ke = u.get("knowledge_effect")
+    if ke:
+        def row(name: str, x: dict[str, Any]) -> str:
+            rate = f"{x['success_rate'] * 100:.0f}%" if x["success_rate"] is not None else "-"
+            cost = f"{u.get('currency') or ''}{x['avg_cost']:,.4f}" if x.get("avg_cost") is not None else "-"
+            return f"| {name} | {x['runs']} | {rate} | {x['avg_iterations'] if x['avg_iterations'] is not None else '-'} | {x['avg_tokens'] or 0:,} | {cost} |"
+        lines.append(f"\n### 업무 지식 참고 효과 (같은 업무 유형 {len(ke['task_types'])}개끼리 비교)\n"
+                     "| 실행 | 횟수 | 성공률 | 평균 도구 왕복 | 평균 토큰 | 평균 비용 |\n|---|---:|---:|---:|---:|---:|")
+        lines += [row("참고 붙음", ke["hinted"]), row("참고 없음 (같은 유형)", ke["baseline"])]
+        lines.append("- 참고 없음 쪽은 지식이 쌓이기 전 실행이 많아 대략적인 비교입니다. 차이가 없거나 나빠지면 knowledge.hint_min_score 를 올리세요.")
     if u["jobs"]:
         lines.append("\n### 예약작업 결과\n" + ", ".join(f"{k} {v}회" for k, v in u["jobs"].items()))
     if u["by_day"]:
