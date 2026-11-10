@@ -52,7 +52,7 @@ async def test_azure_sends_cache_key_and_reads_cached_tokens() -> None:
     p = fake.sent[0]
     assert p["extra_body"] == {"foo": 1, "prompt_cache_key": ("c-" + "x" * 100)[:64]}  # 설정의 extra_body 와 합침, 64자 제한
     assert p["messages"][1]["content"] == "안녕\n\n(보낸 시각: 2026-11-09 14:03 (Mon))"  # 시각은 사용자 메시지 끝에
-    assert r.usage == {"prompt_tokens": 2000, "completion_tokens": 50, "total_tokens": 2050, "cached_tokens": 1536}
+    assert r.usage == {"prompt_tokens": 2000, "completion_tokens": 50, "total_tokens": 2050, "cached_tokens": 1536, "reasoning_tokens": 0}
     await m.chat([{"role": "user", "content": "x"}])  # 캐시 키가 없으면 보내지 않음
     assert fake.sent[1]["extra_body"] == {"foo": 1}
     off = FakeCompletions()

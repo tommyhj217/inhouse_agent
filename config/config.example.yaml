@@ -18,7 +18,11 @@ llm:
 
   # 최신(추론형) 모델은 max_completion_tokens 를 사용하고 temperature 를 지원하지 않습니다.
   # 구형 모델/구형 api_version 이면 max_tokens_param: max_tokens 로 바꾸세요.
-  max_output_tokens: 8192
+  # 출력 한도: 추론 모델(sol·terra·luna)은 보이지 않는 '추론 토큰'도 이 한도를 씁니다. 작으면 추론만 하다 답 없이 끝납니다
+  # (Responses API 의 incomplete: max_output_tokens). OpenAI 권장은 추론 모델 25,000 이상. 쓴 만큼만 과금되므로 넉넉히 두세요.
+  # 그래도 답 없이 잘리면 max_output_tokens_cap 까지 자동으로 올려 다시 요청하고, 상한에서도 잘리면 추론 강도를 한 단계 낮춰 다시 요청합니다.
+  max_output_tokens: 25000
+  max_output_tokens_cap: 64000
   max_tokens_param: max_completion_tokens
   temperature:                                    # 비우면 전송 안 함
   reasoning_effort:                               # low | medium | high (추론 모델만, 비우면 전송 안 함)
@@ -63,7 +67,7 @@ agent:
   max_minutes: 30               # 한 요청의 최대 실행 시간(분). 넘으면 중간 결과로 정리
   loop_threshold: 3             # 같은 도구를 같은 인자로 이만큼 부르면 '되풀이' 로 보고 멈춤 (기다리기·상태 확인 도구는 제외)
   max_tool_error_streak: 3      # 도구가 모두 실패한 차례가 이만큼 이어지면 멈춤
-  max_tool_result_chars: 30000  # tool 결과가 길면 잘라서 LLM 에 전달
+  max_tool_result_chars: 16000  # tool 결과가 이보다 길면 앞·뒤만 대화에 넣고 전체는 작업폴더 tool_results/ 에 저장 (매 요청 입력 토큰 절약)
   max_history_messages: 200     # 대화 메시지가 이보다 많아지면 앞부분을 요약 (지우지 않음)
   context_window: 128000        # 배포 모델의 입력 한도(토큰). 모델에 맞게 (예: 272000, 400000)
   compact_at: 0.75              # 대화가 한도의 75% 를 넘으면 자동 압축: 오래된 도구 결과 줄이기 → 앞 대화 요약

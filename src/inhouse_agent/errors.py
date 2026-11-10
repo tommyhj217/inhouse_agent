@@ -55,6 +55,9 @@ def describe_error(e: BaseException, deployment: str = "") -> dict[str, Any]:
     def r(c: str, title: str, hint: str, retry: bool = False) -> dict[str, Any]:
         return {"code": c, "title": title, "detail": detail, "hint": hint, "retryable": retry, "type": name, "status": status}
 
+    if "max_output_tokens" in low and ("incomplete" in low or "완료" in low or "length" in low):
+        return r("output_limit", "모델이 출력 한도(max_output_tokens)에 닿아 답을 끝내지 못했습니다",
+                 "요청을 더 작게 나누거나 llm.reasoning_effort 를 낮추세요. llm.max_output_tokens_cap 을 늘릴 수도 있습니다.", True)
     if is_overflow_error(e):
         return r("context", "대화가 모델의 입력 한도를 넘었습니다 (자동 압축 후에도)",
                  "새 대화로 시작하거나, 파일을 나눠 분석하세요(하위 에이전트). 배포 모델의 한도에 맞게 agent.context_window 를 확인하세요.")

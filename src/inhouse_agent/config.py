@@ -79,7 +79,11 @@ class LLMConfig:
     auth: str = "api_key"  # api_key | entra_id
     api_key: str | None = None
     entra_scope: str = "https://cognitiveservices.azure.com/.default"
-    max_output_tokens: int | None = 4096
+    max_output_tokens: int | None = 25000
+    """출력 한도. 추론 모델은 보이지 않는 추론 토큰도 여기에 포함됨 (OpenAI 권장: 추론 모델은 25,000 이상).
+    정한 만큼 과금되는 것이 아니라 실제로 만든 만큼만 과금됨"""
+    max_output_tokens_cap: int | None = 64000
+    """답 없이 출력 한도에 닿으면 이 값까지 자동으로 올려 다시 요청"""
     max_tokens_param: str = "max_completion_tokens"  # 구형 api_version 이면 max_tokens
     temperature: float | None = None
     reasoning_effort: str | None = None  # low | medium | high (추론 모델용)
@@ -113,7 +117,8 @@ class LLMConfig:
             auth=str(d.get("auth") or "api_key").lower(),
             api_key=_none_if_blank(d.get("api_key")),
             entra_scope=str(d.get("entra_scope") or "https://cognitiveservices.azure.com/.default"),
-            max_output_tokens=_to_int(d.get("max_output_tokens"), 4096),
+            max_output_tokens=_to_int(d.get("max_output_tokens"), 25000),
+            max_output_tokens_cap=_to_int(d.get("max_output_tokens_cap"), 64000),
             max_tokens_param=str(d.get("max_tokens_param") or "max_completion_tokens"),
             temperature=_to_float(d.get("temperature"), None),
             reasoning_effort=_none_if_blank(d.get("reasoning_effort")),
@@ -152,7 +157,7 @@ class AgentConfig:
     max_minutes: float = 30.0  # 한 요청의 최대 실행 시간 (분)
     loop_threshold: int = 3  # 같은 도구를 같은 인자로 이만큼 부르면 되풀이로 보고 멈춤
     max_tool_error_streak: int = 3  # 도구가 모두 실패한 차례가 이만큼 이어지면 멈춤
-    max_tool_result_chars: int = 30000
+    max_tool_result_chars: int = 16000  # 넘으면 앞·뒤만 대화에 넣고 전체는 작업폴더 tool_results/ 에 저장
     max_history_messages: int = 200  # 넘으면 앞부분을 요약 (토큰 기준 자동 압축과 함께 동작)
     context_window: int = 128000  # 배포 모델의 입력 한도(토큰). 자동 압축 기준
     compact_at: float = 0.75  # 한도의 이 비율을 넘으면 자동 압축
@@ -176,7 +181,7 @@ class AgentConfig:
             max_minutes=_to_float(d.get("max_minutes"), 30.0) or 30.0,
             loop_threshold=max(2, _to_int(d.get("loop_threshold"), 3) or 3),
             max_tool_error_streak=max(1, _to_int(d.get("max_tool_error_streak"), 3) or 3),
-            max_tool_result_chars=_to_int(d.get("max_tool_result_chars"), 30000) or 30000,
+            max_tool_result_chars=_to_int(d.get("max_tool_result_chars"), 16000) or 16000,
             max_history_messages=_to_int(d.get("max_history_messages"), 200) or 200,
             context_window=_to_int(d.get("context_window"), 128000) or 128000,
             compact_at=min(0.95, max(0.3, _to_float(d.get("compact_at"), 0.75) or 0.75)),

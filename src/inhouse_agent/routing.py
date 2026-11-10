@@ -42,7 +42,7 @@ CORRECTION = ("틀렸", "틀린", "잘못", "아니야", "아니라", "다시 �
 CONTINUE = ("계속", "이어서", "continue")
 
 # 모델마다 따로 줄 수 있는 연결 설정 (예: luna 는 api: chat, sol 은 api: responses)
-OVERRIDE_KEYS = ("endpoint", "base_url", "api_key", "api_version", "max_output_tokens", "reasoning_effort", "temperature",
+OVERRIDE_KEYS = ("endpoint", "base_url", "api_key", "api_version", "max_output_tokens", "max_output_tokens_cap", "reasoning_effort", "temperature",
                  "max_tokens_param", "extra_headers", "api", "responses_api_version", "responses_base_url", "reasoning_replay")
 
 AVAILABILITY_CODES = {"rate_limit", "deployment", "server", "timeout", "network", "permission"}

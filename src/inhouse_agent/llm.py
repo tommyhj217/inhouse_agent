@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -38,6 +39,7 @@ class LLMResponse:
     # 다음 요청에 그대로 다시 보내 추론을 이어 받음 (같은 배포일 때만 - pi 방식)
     raw_items: list[dict[str, Any]] | None = None
     raw_source: str | None = None
+    budget_notes: list[str] = field(default_factory=list)  # 출력 한도 자동 조정 기록 (화면·로그용)
 
     def to_message(self) -> dict[str, Any]:
         """대화 이력에 넣을 assistant 메시지(dict)."""
@@ -120,8 +122,108 @@ def _rejects_cache_key(e: BaseException) -> bool:
     return status == 400 and "prompt_cache_key" in str(e)
 
 
-class AzureChatModel:
-    """AsyncAzureOpenAI 기반 ChatModel 구현."""
+EFFORT_DOWN = {"xhigh": "high", "high": "medium", "medium": "low", "low": "minimal"}
+_TOO_LARGE = re.compile(r"(max_output_tokens|max_completion_tokens|max_tokens).{0,80}(too large|exceed|greater than|maximum|at most|less than)|"
+                        r"(too large|exceed|greater than|maximum|at most|less than).{0,80}(max_output_tokens|max_completion_tokens|max_tokens)", re.I | re.S)
+
+
+def _args_ok(arguments: str) -> bool:
+    try:
+        return isinstance(json.loads(arguments or "{}"), dict)
+    except ValueError:
+        return False
+
+
+def truncated_without_answer(r: LLMResponse) -> bool:
+    """출력 한도에서 잘렸는데 쓸 만한 결과가 없음: 답 글이 비었거나(추론만 하다 끝남) 도구 인자 JSON 이 중간에 잘림."""
+    if r.finish_reason != "length":
+        return False
+    if r.tool_calls:
+        return not all(_args_ok(tc.arguments) for tc in r.tool_calls)
+    return not (r.content or "").strip()
+
+
+def _merge_usage(total: dict[str, int], u: dict[str, int]) -> None:
+    for k, v in (u or {}).items():
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            total[k] = total.get(k, 0) + int(v)
+
+
+class OutputBudget:
+    """출력 한도(max_output_tokens) 자동 조정. 추론 모델은 '보이지 않는 추론 토큰'도 이 한도를 씀 →
+    입력이 길거나 어려운 요청이면 추론만 하다 한도에 닿아 답이 비는(incomplete) 일이 생김. 그때:
+      1) 한도를 바로 상한(max_output_tokens_cap)까지 올려 다시 요청 - 출력은 쓴 만큼만 과금되므로 조금씩 올리며
+         실패한 호출(추론만 하고 버려지는 토큰)을 늘리는 것보다 낭비가 적음. 올린 값은 기억해 다음 요청부터 바로 씀
+      2) 상한에서도 잘리면 추론 강도(reasoning_effort)를 한 단계 낮춰 한 번 더 (그래도 안 되면 잘린 그대로 → 에이전트가 원인·조치 안내)
+      3) 배포가 '한도가 너무 크다'고 거절하면 반으로 줄여 다시 (그 값을 상한으로 기억)
+    다시 시도한 호출의 토큰도 모두 사용량에 합산하고, usage.output_retries 로 몇 번 했는지 남김."""
+
+    cfg: LLMConfig
+
+    def _init_budget(self) -> None:
+        self._budget: int | None = self.cfg.max_output_tokens or None
+        self._budget_max: int | None = None  # 배포가 거절한 크기보다 작은 값
+
+    async def _request(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None, **kw: Any) -> LLMResponse:
+        raise NotImplementedError
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        *,
+        tool_choice: str | None = None,
+        parallel_tool_calls: bool | None = None,
+        model: str | None = None,
+        cache_key: str | None = None,
+    ) -> LLMResponse:
+        cfg = self.cfg
+        cap = max(cfg.max_output_tokens_cap or 0, cfg.max_output_tokens or 0)
+        budget, effort = self._budget, cfg.reasoning_effort
+        total: dict[str, int] = {}
+        retries = shrinks = 0
+        notes: list[str] = []
+        while True:
+            try:
+                r = await self._request(messages, tools, tool_choice=tool_choice, parallel_tool_calls=parallel_tool_calls,
+                                        model=model, cache_key=cache_key, budget=budget, effort=effort)
+            except Exception as e:
+                if budget and getattr(e, "status_code", None) == 400 and _TOO_LARGE.search(str(e)) and budget > 1024 and shrinks < 5:
+                    shrinks += 1
+                    budget = max(1024, budget // 2)
+                    self._budget = self._budget_max = budget
+                    notes.append(f"배포가 출력 한도를 거절해 {budget:,} 로 줄임")
+                    log.warning("배포 %s 가 출력 한도를 거절해 %s 로 줄여 다시 보냅니다: %s", cfg.deployment, budget, str(e)[:200])
+                    continue
+                raise
+            _merge_usage(total, r.usage)
+            if not truncated_without_answer(r) or retries >= 2:
+                break
+            retries += 1
+            if budget and budget < (self._budget_max or cap) and cap:
+                new = min(self._budget_max or cap, cap)
+                log.warning("배포 %s: 출력 한도 %s 에서 답 없이 잘림(추론 토큰 %s) → %s 로 올려 다시 요청",
+                            cfg.deployment, budget, r.usage.get("reasoning_tokens"), new)
+                notes.append(f"출력 한도 {budget:,} → {new:,}")
+                budget = self._budget = new
+                continue
+            if effort in EFFORT_DOWN:
+                log.warning("배포 %s: 출력 한도 상한(%s)에서도 잘림 → 추론 강도 %s → %s 로 다시 요청", cfg.deployment, budget, effort, EFFORT_DOWN[effort])
+                notes.append(f"추론 강도 {effort} → {EFFORT_DOWN[effort]}")
+                effort = EFFORT_DOWN[effort]
+                continue
+            break
+        r.usage = total
+        if retries:
+            r.usage["output_retries"] = retries
+            r.budget_notes = notes
+        if truncated_without_answer(r):
+            r.tool_calls = [tc for tc in r.tool_calls if _args_ok(tc.arguments)]  # 잘린 도구 호출은 실행하지 않음
+        return r
+
+
+class AzureChatModel(OutputBudget):
+    """AsyncAzureOpenAI 기반 ChatModel 구현 (Chat Completions)."""
 
     def __init__(self, cfg: LLMConfig):
         cfg.validate()
@@ -143,8 +245,9 @@ class AzureChatModel:
         kwargs.update(_auth_kwargs(cfg))
         self._client = AsyncAzureOpenAI(**kwargs)
         self._cache_key_ok = True
+        self._init_budget()
 
-    async def chat(
+    async def _request(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
@@ -153,8 +256,11 @@ class AzureChatModel:
         parallel_tool_calls: bool | None = None,
         model: str | None = None,  # 하나의 배포만 쓰므로 무시 (여러 모델은 routing.ModelPool)
         cache_key: str | None = None,
+        budget: int | None = None,
+        effort: str | None = None,
     ) -> LLMResponse:
-        """cache_key: 대화마다 같은 값 → Azure/OpenAI 가 같은 캐시 서버로 보내 앞부분(시스템 프롬프트·도구·이전 대화)을
+        """한 번 호출 (출력 한도 자동 조정은 OutputBudget.chat).
+        cache_key: 대화마다 같은 값 → Azure/OpenAI 가 같은 캐시 서버로 보내 앞부분(시스템 프롬프트·도구·이전 대화)을
         캐시 입력(일반 입력의 약 10% 가격)으로 처리할 가능성이 커짐. 배포·api_version 이 모르는 인자라고 거절하면 끄고 다시 보냄."""
         cfg = self.cfg
         params: dict[str, Any] = {"model": cfg.deployment, "messages": _api_messages(messages, cfg.vision)}
@@ -164,12 +270,12 @@ class AzureChatModel:
                 params["tool_choice"] = tool_choice
             if parallel_tool_calls is not None:
                 params["parallel_tool_calls"] = parallel_tool_calls
-        if cfg.max_output_tokens:
-            params[cfg.max_tokens_param] = cfg.max_output_tokens
+        if budget:
+            params[cfg.max_tokens_param] = budget
         if cfg.temperature is not None:
             params["temperature"] = cfg.temperature
-        if cfg.reasoning_effort:
-            params["reasoning_effort"] = cfg.reasoning_effort
+        if effort:
+            params["reasoning_effort"] = effort
         body = dict(cfg.extra_body or {})
         if cache_key and cfg.prompt_cache_key and self._cache_key_ok:
             # extra_body 로 보냄: 오래된 openai SDK(1.54 등)는 prompt_cache_key 인자를 모르기 때문
@@ -207,6 +313,8 @@ class AzureChatModel:
                 "total_tokens": resp.usage.total_tokens or 0,
                 # 입력 중 캐시에서 읽은 토큰 (prompt_tokens 에 포함됨, 더 싼 단가) - 1,024 토큰 이상 같은 앞부분일 때 생김
                 "cached_tokens": cached_tokens(resp.usage),
+                # 출력 중 보이지 않는 추론 토큰 (completion_tokens 에 포함, 출력 한도도 함께 씀)
+                "reasoning_tokens": int(getattr(getattr(resp.usage, "completion_tokens_details", None), "reasoning_tokens", 0) or 0),
             }
         return LLMResponse(content=msg.content, tool_calls=tool_calls, finish_reason=choice.finish_reason, usage=usage)
 
@@ -312,7 +420,8 @@ def _replayable(output: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def parse_response(data: dict[str, Any], source: str) -> LLMResponse:
     """Responses API 응답(dict) → LLMResponse."""
-    if data.get("error"):
+    # 'incomplete'(출력 한도·콘텐츠 필터로 잘림)는 오류가 아님 - error 칸이 함께 와도 잘린 응답으로 처리 (OutputBudget 이 다시 시도)
+    if data.get("error") and (data.get("status") == "failed" or not data.get("output")) and data.get("status") != "incomplete":
         err = data["error"]
         raise RuntimeError(f"{err.get('code') or 'error'}: {err.get('message') or err}")
     output = [i for i in data.get("output") or [] if isinstance(i, dict)]
@@ -348,7 +457,7 @@ def parse_response(data: dict[str, Any], source: str) -> LLMResponse:
                        raw_items=_replayable(output) or None, raw_source=source)
 
 
-class AzureResponsesModel:
+class AzureResponsesModel(OutputBudget):
     """Responses API 기반 ChatModel (llm.api: responses). 인터페이스·메시지 형식은 AzureChatModel 과 같음."""
 
     def __init__(self, cfg: LLMConfig, http_client: Any = None):
@@ -374,8 +483,9 @@ class AzureResponsesModel:
         self._cache_key_ok = True
         self._replay_ok = cfg.reasoning_replay
         self.stats = {"replayed": 0}
+        self._init_budget()
 
-    async def chat(
+    async def _request(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
@@ -384,6 +494,8 @@ class AzureResponsesModel:
         parallel_tool_calls: bool | None = None,
         model: str | None = None,
         cache_key: str | None = None,
+        budget: int | None = None,
+        effort: str | None = None,
     ) -> LLMResponse:
         cfg = self.cfg
         items, replayed = responses_input(messages, cfg.vision, self.source if self._replay_ok else "")
@@ -394,12 +506,12 @@ class AzureResponsesModel:
                 params["tool_choice"] = tool_choice
             if parallel_tool_calls is not None:
                 params["parallel_tool_calls"] = parallel_tool_calls
-        if cfg.max_output_tokens:
-            params["max_output_tokens"] = max(cfg.max_output_tokens, RESPONSES_MIN_OUTPUT_TOKENS)
+        if budget:
+            params["max_output_tokens"] = max(budget, RESPONSES_MIN_OUTPUT_TOKENS)
         if cfg.temperature is not None:
             params["temperature"] = cfg.temperature
-        if cfg.reasoning_effort:
-            params["reasoning"] = {"effort": cfg.reasoning_effort}
+        if effort:
+            params["reasoning"] = {"effort": effort}
         if self._replay_ok:
             params["include"] = ["reasoning.encrypted_content"]
         body = dict(cfg.extra_body or {})

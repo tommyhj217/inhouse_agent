@@ -462,7 +462,11 @@ class Agent:
                             continue
                     raise
                 record(getattr(r, "model", None) or cur, r.usage)
-                cm.calibrate(messages, tls, (r.usage or {}).get("prompt_tokens"))
+                n_calls = 1 + int((r.usage or {}).get("output_retries") or 0)  # 출력 한도로 다시 보낸 호출이 있으면 입력 토큰은 그만큼 합산됨
+                cm.calibrate(messages, tls, int((r.usage or {}).get("prompt_tokens") or 0) // n_calls or None)
+                if getattr(r, "budget_notes", None):
+                    await emit("output_budget", {"notes": r.budget_notes, "model": cur,
+                                                 "reasoning_tokens": (r.usage or {}).get("reasoning_tokens")})
                 return r
 
         # 반복 한도: 기본 예산(max_iterations)에서 시작해, 진전이 있으면 extend_iterations 씩 늘려 상한(max_iterations_cap)까지.
@@ -524,6 +528,8 @@ class Agent:
                     if not output.strip():
                         info = {"code": "empty", "title": "모델이 빈 답변을 보냈습니다", "detail": "", "retryable": True,
                                 "hint": "다시 시도하거나 요청을 조금 더 구체적으로 적어 주세요."}
+                        if resp.finish_reason == "length":  # 출력 한도를 (자동으로 늘린 뒤에도) 추론에 다 씀
+                            info = output_limit_info(resp.usage, getattr(self.llm, "cfg", None))
                         await emit("error", {"error": info["title"], **info})
                         return result(failure_text(info, events, all_files()), "error", iteration, info)
                     if resp.finish_reason == "length":
@@ -620,7 +626,7 @@ class Agent:
             t0 = time.monotonic()
             out = await self.hub.call(tc.name, args)
             ev.elapsed = time.monotonic() - t0
-            ev.result = _truncate(out.text, self.cfg.max_tool_result_chars)
+            ev.result = await asyncio.to_thread(self._fit_result, out.text, tc.name)
             ev.is_error = out.is_error
             ev.files = out.files
             ev.view = view_of(out.data)
@@ -631,6 +637,31 @@ class Agent:
 
         # 같은 서버 호출은 hub 가 직렬화하므로 여기선 동시에 실행해도 안전
         return list(await asyncio.gather(*(one(tc) for tc in calls)))
+
+    def _fit_result(self, text: str, tool: str) -> str:
+        """도구 결과가 max_tool_result_chars 를 넘으면 앞·뒤만 대화에 넣고 전체는 작업폴더 tool_results/ 에 저장 (pi 방식).
+        대화에 들어간 결과는 이후 모든 요청에 다시 실리므로(입력 토큰) 크게 넣지 않고, 필요한 부분만 read_file_text 로 다시 읽게 함."""
+        limit = self.cfg.max_tool_result_chars
+        if len(text) <= limit:
+            return text
+        ws = getattr(self.hub, "workspace", None)
+        saved = None
+        if ws is not None:
+            try:
+                d = ws.root / "tool_results"
+                d.mkdir(parents=True, exist_ok=True)
+                safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in tool)[:60]
+                f = d / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{safe}_{uuid.uuid4().hex[:6]}.txt"
+                f.write_text(text, encoding="utf-8")
+                saved = ws.display(f)
+            except OSError as e:  # 저장 실패해도 결과는 잘라서 전달
+                log.warning("도구 결과 저장 실패: %s", e)
+        head = int(limit * 0.8)
+        tail = limit - head
+        note = (f"...(중략: 전체 {len(text):,}자 중 앞 {head:,}자와 뒤 {tail:,}자만 전달."
+                + (f" 전체는 '{saved}' 에 저장 - 필요한 부분만 read_file_text(path, start, max_chars) 로 읽으세요" if saved else "")
+                + ")...")
+        return f"{text[:head]}\n\n{note}\n\n{text[-tail:]}"
 
     def _trim_history(self, messages: list[dict[str, Any]]) -> None:
         """(요약이 실패했을 때의 대비책) 오래된 대화 삭제 - system 유지, user 메시지 경계에서 잘라 tool_call 짝이 깨지지 않게."""
@@ -645,6 +676,21 @@ class Agent:
                 break
             body = body[idx:]
         messages[:] = ([system] if system else []) + body
+
+
+def output_limit_info(usage: dict[str, Any] | None, llm_cfg: Any = None) -> dict[str, Any]:
+    """출력 한도(max_output_tokens)에 닿아 답을 못 받았을 때 사용자에게 보여줄 원인·조치."""
+    u = usage or {}
+    out, rsn = int(u.get("completion_tokens") or 0), int(u.get("reasoning_tokens") or 0)
+    cap = getattr(llm_cfg, "max_output_tokens_cap", None)
+    detail = (f"출력 토큰 {out:,}개 중 {rsn:,}개를 보이지 않는 추론에 썼고 답을 쓰기 전에 한도에 닿았습니다"
+              if rsn else f"출력 토큰 {out:,}개에서 답을 끝내지 못했습니다")
+    if u.get("output_retries"):
+        detail += f" (한도를 늘려 {u['output_retries']}번 다시 요청했지만 같음)"
+    return {"code": "output_limit", "title": "모델이 출력 한도(max_output_tokens)에 닿아 답을 끝내지 못했습니다", "detail": detail,
+            "retryable": True,
+            "hint": f"요청을 더 작게 나누거나(파일·기간별), llm.reasoning_effort 를 낮추세요(medium → low)."
+                    + (f" 출력 한도 상한 llm.max_output_tokens_cap({cap:,})을 늘릴 수도 있습니다." if cap else "")}
 
 
 def _add_usage(total: dict[str, Any], u: dict[str, Any]) -> None:

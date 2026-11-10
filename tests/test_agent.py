@@ -254,7 +254,7 @@ async def test_azure_sdk_roundtrip(tmp_path: Path, fake_azure, monkeypatch) -> N
     assert first["query"]["api-version"] == cfg.llm.api_version
     assert first["headers"]["api-key"] == "dummy"
     assert first["headers"]["ocp-apim-subscription-key"] == "sub123"
-    assert first["body"]["max_completion_tokens"] == 4096
+    assert first["body"]["max_completion_tokens"] == 25000  # 추론 모델 권장 기본값
     assert "temperature" not in first["body"]
     second = seen[1]["body"]["messages"]
     assert second[-2]["tool_calls"][0]["id"] == "call_1" and second[-1]["role"] == "tool"
