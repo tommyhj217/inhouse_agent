@@ -36,7 +36,7 @@ except ImportError as e:  # pragma: no cover
 
 
 SESSION_TTL = 60 * 60 * 6
-API_VERSION = 4  # web/index.html 의 UI_API 와 같아야 함 (화면은 바로 바뀌지만 API 는 서버를 다시 켜야 바뀜)
+API_VERSION = 5  # web/index.html 의 UI_API 와 같아야 함 (화면은 바로 바뀌지만 API 는 서버를 다시 켜야 바뀜)
 ASK_TIMEOUT = 60 * 15
 
 
@@ -711,6 +711,24 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
                 "type": ext[1:], "size": len(data), "summary": summary, "state": st.get("state")}
 
     # ---------------- 사용 이력 / 모델 ----------------
+    # ---------------- 업무 지식 그래프 (실행 기록 → 온톨로지) ----------------
+    @app.get("/api/knowledge", dependencies=A)
+    async def knowledge_overview() -> dict[str, Any]:
+        text = await asyncio.to_thread(rt.knowledge.overview)
+        return {"text": text, "source": (rt.knowledge.load() or {}).get("source"), "path": str(rt.knowledge.path)}
+
+    @app.post("/api/knowledge/build", dependencies=A)
+    async def knowledge_rebuild() -> dict[str, Any]:
+        d = await asyncio.to_thread(rt.knowledge.build)
+        return {"text": await asyncio.to_thread(rt.knowledge.overview), "source": d["source"]}
+
+    @app.get("/api/knowledge/search", dependencies=A)
+    async def knowledge_find(q: str, top: int = 3) -> dict[str, Any]:
+        from .knowledge import format_results
+
+        res = await asyncio.to_thread(rt.knowledge.search, q, max(1, min(top, 10)))
+        return {"results": res, "text": format_results(res, (rt.knowledge.load() or {}).get("source"))}
+
     @app.get("/api/usage", dependencies=A)
     async def usage(days: float = 30, all_users: bool = Query(False, alias="all"), user: str | None = None) -> dict[str, Any]:
         from .usage import collect_usage, format_usage

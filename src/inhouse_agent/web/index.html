@@ -386,6 +386,10 @@ table.grid select{padding:2px 4px;font-size:12px}
   <div class="row" style="margin-bottom:6px"><select id="st-days"><option value="1">오늘</option><option value="7">최근 7일</option><option value="30" selected>최근 30일</option><option value="90">최근 90일</option></select>
     <label id="st-all-wrap" class="small hidden"><input type="checkbox" id="st-all"> 모든 사용자 (관리자)</label></div>
   <div id="st-usage" class="card answer"></div>
+  <h3>업무 지식 <span class="small muted">사람들이 실제로 한 업무 기록에서 만든 지식 그래프 (토큰 비용 없음)</span></h3>
+  <div class="row" style="margin-bottom:6px"><input id="kg-q" placeholder="하려는 업무로 찾아보기 (예: 매출 엑셀 부서별 정리)" style="flex:1">
+    <button id="kg-search">찾기</button><button id="kg-build">다시 만들기</button></div>
+  <div id="st-knowledge" class="card answer"></div>
   <h3>모델</h3>
   <div id="st-models" class="card answer"></div>
 </section>
@@ -425,7 +429,7 @@ async function api(path, opts={}) {
   }
   return data;
 }
-const UI_API = 4;  // server.py 의 API_VERSION 과 같아야 함
+const UI_API = 5;  // server.py 의 API_VERSION 과 같아야 함
 function staleBanner(serverApi) {
   if (serverApi === UI_API || document.querySelector(".stale")) return;
   document.body.insertAdjacentHTML("afterbegin", `<div class="stale">⚠ 서버가 이전 버전으로 실행 중입니다 (화면 v${UI_API} / 서버 v${serverApi ?? "?"}). 코드를 받은 뒤에는 서버를 다시 시작해야 새 기능(스킬 가져오기 등)이 동작합니다. <b>서버 창에서 Ctrl+C 후 다시 실행</b>하세요.</div>`);
@@ -508,6 +512,7 @@ class RunView {
     on("plan", d => this.plan(d));
     on("subagent", d => this.subagent(d));
     on("model", d => this.add(`<div class="small muted">${d.kind === "start" ? "🧠 모델" : d.kind === "escalate" ? "⬆️ 모델 승격" : "↪️ 모델 변경"}: ${d.from && d.kind !== "start" ? esc(d.from) + " → " : ""}<b>${esc(d.model)}</b> · ${esc(d.reason)}</div>`));
+    on("knowledge", d => this.add(`<div class="small muted" title="${esc(d.hint || "")}">🧭 비슷한 과거 업무의 검증된 순서를 참고로 붙였습니다 (업무 지식 그래프)</div>`));
     on("output_budget", d => this.add(`<div class="small muted">📏 답 없이 출력 한도에 닿아 다시 받았습니다 (${esc((d.notes || []).join(", "))}${d.reasoning_tokens ? ` · 추론 토큰 ${Number(d.reasoning_tokens).toLocaleString()}` : ""})</div>`));
     on("budget", d => this.add(`<div class="small muted">⏩ 진전이 있어 반복 한도를 늘렸습니다 (${d.from} → ${d.to}회)</div>`));
     on("compact", d => this.add(`<div class="small muted">🗜 대화가 길어져 자동으로 줄였습니다 (약 ${Number(d.before).toLocaleString()} → ${Number(d.after).toLocaleString()} 토큰${d.masked ? " · 이전 도구 결과 " + d.masked + "개 축약" : ""}${d.summarized ? " · 앞 대화 " + d.summarized + "개 " + (d.updated ? "를 이전 요약에 반영" : "요약") : ""}${d.files ? " · 파일 " + d.files + "개 기록" : ""})</div>`));
@@ -1612,6 +1617,7 @@ async function loadStatus() {
     $("#st-runs").innerHTML = runs.length ? `<table class="grid"><thead><tr><th>시각</th><th>종류</th><th>내용</th><th>상태</th></tr></thead><tbody>${runs.slice(0, 30).map(r => `<tr><td class="small">${new Date(r.created * 1000).toLocaleString()}</td><td>${r.kind === "skill" ? "스킬" : "조사"}</td><td>${esc(r.title)}</td><td>${esc(r.label || r.status)}</td></tr>`).join("")}</tbody></table>` : `<span class="muted small">아직 실행 기록이 없습니다</span>`;
   } catch (e) { $("#st-info").textContent = "오류: " + e.message; }
   loadUsage();
+  api("/api/knowledge").then(k => { $("#st-knowledge").innerHTML = md(k.text); }).catch(e => { $("#st-knowledge").textContent = e.message; });
   api("/api/models?remote=true").then(m => { $("#st-models").innerHTML = md(m.text); }).catch(e => { $("#st-models").textContent = e.message; });
 }
 async function loadUsage() {
@@ -1622,6 +1628,18 @@ async function loadUsage() {
   } catch (e) { $("#st-usage").innerHTML = `<span class="b-err">${esc(e.message)}</span>`; }
 }
 $("#st-days").onchange = loadUsage; $("#st-all").onchange = loadUsage;
+$("#kg-search").onclick = async () => {
+  const q = $("#kg-q").value.trim(); if (!q) return;
+  try { const r = await api(`/api/knowledge/search?q=${encodeURIComponent(q)}`); $("#st-knowledge").innerHTML = md(r.text); }
+  catch (e) { $("#st-knowledge").innerHTML = `<span class="b-err">${esc(e.message)}</span>`; }
+};
+$("#kg-q").onkeydown = e => { if (e.key === "Enter") $("#kg-search").click(); };
+$("#kg-build").onclick = async () => {
+  $("#kg-build").disabled = true;
+  try { const r = await api("/api/knowledge/build", {method: "POST"}); $("#st-knowledge").innerHTML = md(r.text); }
+  catch (e) { $("#st-knowledge").innerHTML = `<span class="b-err">${esc(e.message)}</span>`; }
+  $("#kg-build").disabled = false;
+};
 $("#st-refresh").onclick = loadStatus;
 
 // 시작

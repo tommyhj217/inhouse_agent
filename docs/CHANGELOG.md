@@ -4,6 +4,28 @@
 
 ---
 
+## 2026-11-10 — 업무 지식 그래프(온톨로지)
+
+**무엇**
+- `knowledge.py`: 모든 사용자의 실행 기록에서 업무 온톨로지를 만듭니다. LLM 비용은 없습니다.
+  - 업무 유형 · 검증된 작업 순서(인자 형태) · 도구 · 사이트 · 개념 · 파일 종류 · 스킬 · 자주 난 오류
+  - 관계: `hasConcept`, `solvedBy`, `uses`, `partOf`, `followedBy`(DFG), `produces`, `implementedBy`, `hasPitfall`
+  - 횟수와 처음·마지막 본 시각을 붙입니다.
+- **자동 참고**: 새 요청이 2번 이상 성공한 업무와 비슷하면 요청 끝에 검증된 순서와 주의할 오류를 붙입니다(`knowledge.auto_hint`).
+- **도구**: `knowledge_search`, `knowledge_build`, `knowledge_export`(ttl = RDF/OWL, graphml, json)
+- **CLI·API·화면**
+  - CLI: `inhouse-agent knowledge …`
+  - API: `/api/knowledge`, `/api/knowledge/build`, `/api/knowledge/search`
+  - 화면: 상태 탭 "업무 지식"
+  - API가 늘어서 `API_VERSION`/`UI_API`를 5로 올렸습니다.
+
+**왜**
+- Agent Workflow Memory(ICML 2025) 등에서 성공한 실행의 작업 순서를 기억으로 다시 쓰면 웹 에이전트 성공률이 오른다는 결과가 있습니다.
+- 사내에서는 같은 업무를 여러 사람이 반복하므로, 그 경험을 에이전트가 공유하게 했습니다.
+- 반복 한도 도달과 도구 오류의 주된 원인인 시행착오를 줄이는 목적입니다.
+
+**설정**: `knowledge:` (enabled, dir, auto_hint, hint_min_score, min_runs, rebuild_minutes) — 기본값으로 켜져 있습니다.
+
 ## 2026-11-10 — 출력 한도 장애 수정, 입력 토큰 줄이기 (`87f65a1`)
 
 **장애**: 사내 실행 중 "에이전트 실행 중 오류 … RuntimeError … max_output_tokens"로 실행이 끝남.

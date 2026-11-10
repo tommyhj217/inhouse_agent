@@ -32,6 +32,7 @@ Python 패키지(`src/inhouse_agent`), FastAPI 웹 UI(SSE), CLI, 예약작업으
 | `context.py` | 토큰 기준 자동 압축(도구 결과 축약 → 구조화 요약), 요약 양식 `SUMMARY_PROMPT`, 파일 목록 수집 |
 | `errors.py` | 예외 → 원인·조치(`describe_error`), 실행 상태 라벨 |
 | `batch.py` | `run_tool_batch` (여러 도구 호출을 LLM 왕복 한 번으로) |
+| `knowledge.py` | 업무 지식 그래프(온톨로지): 실행 기록 → 업무 유형·검증된 순서·DFG·자주 난 오류, 검색·자동 참고·RDF/GraphML 내보내기 |
 | `workflow.py` | LLM 없이 steps 실행, 템플릿 `{steps.x.data...}` (스킬 steps와 batch가 공유) |
 | `subagent.py` | `run_subagent` (깊이 1) |
 | `mcp_hub.py` | MCP 서버 연결, 도구 라우팅, 다운로드 감지, 사용자 간 순번(`UserBaton`) |
@@ -141,6 +142,17 @@ Azure는 요청 앞부분이 직전 요청과 같으면(1,024 토큰 이상) 그
 - `select/where/fields/limit`로 줄인 결과가 그 단계의 `data`이고, 다음 단계도 이 값을 받습니다. 원본은 `raw`입니다.
 - 바깥 워크플로(스킬 steps, 채팅창 `/run_tool_batch`)는 `{steps…}`, `{item}`, `{index}`, `{prev}`를 치환하지 않고 묶음 안으로 넘깁니다(`workflow.RAW_TEMPLATE_TOOLS`, `DEFERRED`).
 - 실패로 멈춘 묶음은 오류로 표시합니다(화면에 "완료"로 보이면 안 됨). 묶음 안에서 묶음을 부를 수 없습니다.
+
+### 5-9a. 업무 지식 그래프 (`knowledge.py`)
+
+- **LLM을 부르지 않고** 실행 기록만으로 만듭니다(토큰 0). LLM으로 이름 붙이기 같은 기능을 넣는다면 선택 옵션으로 두고, 가장 싼 모델을 쓰세요.
+- 자동 참고(`auto_hint`)는 **요청 끝에** 붙입니다. 시스템 프롬프트에 넣으면 캐시가 깨집니다(5-2).
+  - 성공 2번 이상, 점수 `hint_min_score` 이상일 때만 붙입니다. 틀린 참고는 오히려 해롭습니다.
+- **업무 유형은 사람이 말로 요청한 업무(대화·스킬)로만 묶습니다.**
+  - 채팅창 도구 직접 실행(`kind: tool`)은 도구 흐름·인자 형태에만 씁니다.
+  - 보조 도구(`UTILITY_TOOLS`, 예: 현재 시각, 계획, `run_tool_batch` 상자)는 순서에서 뺍니다.
+- 개념 추출은 의존성 없는 규칙 기반(조사·어미 제거, 기간 일반화)입니다. 형태소 분석기를 붙인다면 선택 의존성으로 하세요.
+- 스키마(클래스·관계)를 바꾸면 `SCHEMA`/`TYPE_KO`, Turtle·GraphML 내보내기, README 표를 함께 고치세요.
 
 ### 5-9. 보안·사용자 분리
 

@@ -661,6 +661,28 @@ async def cmd_call(cfg: AppConfig, args: argparse.Namespace) -> int:
         return 1 if out.is_error else 0
 
 
+async def cmd_knowledge(cfg: AppConfig, args: argparse.Namespace) -> int:
+    """업무 지식 그래프: build(다시 만들기) / show(개요) / search <업무 설명> / export <ttl|graphml|json>."""
+    from .knowledge import format_results
+
+    rt = AgentRuntime(cfg)
+    kg = rt.knowledge
+    sub = args.kcmd or "show"
+    if sub == "build":
+        d = await asyncio.to_thread(kg.build)
+        print(f"만들었습니다: {kg.path} (실행 {d['source']['runs']}건, 업무 유형 {d['source']['task_types']}개)")
+        print(await asyncio.to_thread(kg.overview))
+    elif sub == "search":
+        res = await asyncio.to_thread(kg.search, " ".join(args.query), args.top)
+        print(format_results(res, (kg.load() or {}).get("source")))
+    elif sub == "export":
+        p = await asyncio.to_thread(kg.export, args.format, Path(args.out) if args.out else None)
+        print(f"내보냄: {p}")
+    else:
+        print(await asyncio.to_thread(kg.overview))
+    return 0
+
+
 async def cmd_sessions(cfg: AppConfig, args: argparse.Namespace) -> int:
     from datetime import datetime
 
@@ -874,6 +896,16 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("tool", help="도구 이름 (list: 목록)")
     x.add_argument("args", nargs="*", help="key=value")
 
+    kn = sub.add_parser("knowledge", help="업무 지식 그래프: 실행 기록 → 업무 유형·검증된 도구 순서·자주 난 오류 (LLM 비용 없음)")
+    kns = kn.add_subparsers(dest="kcmd")
+    kns.add_parser("build", help="실행 기록에서 다시 만들기")
+    kns.add_parser("show", help="개요")
+    x = kns.add_parser("search", help="비슷한 과거 업무 찾기")
+    x.add_argument("query", nargs="+")
+    x.add_argument("--top", type=int, default=3)
+    x = kns.add_parser("export", help="파일로 내보내기 (ttl: RDF/OWL, graphml, json)")
+    x.add_argument("format", choices=["ttl", "graphml", "json"])
+    x.add_argument("--out", help="저장할 폴더 (기본: knowledge.dir)")
     x = sub.add_parser("sessions", help="저장된 작업(대화) 목록")
     x.add_argument("-q", "--query")
 
@@ -918,6 +950,7 @@ def main(argv: list[str] | None = None) -> int:
         "fetch": cmd_fetch,
         "link": cmd_link,
         "sessions": cmd_sessions,
+        "knowledge": cmd_knowledge,
         "call": cmd_call,
         "scheduler": cmd_scheduler,
     }

@@ -133,6 +133,16 @@ class AgentRuntime:
 
         builtin_tools += make_pptx_tools(self.workspace, self.links, (cfg.raw.get("office") or {}).get("soffice"))  # PPT 수정·레이아웃 검사·미리보기
         builtin_tools += make_usage_tools(self)
+        # 업무 지식 그래프: 모든 사용자의 실행 기록 → 업무 유형·검증된 도구 순서·자주 난 오류 (LLM 비용 없음)
+        from .knowledge import KnowledgeGraph, make_knowledge_tools
+
+        kcfg = cfg.raw.get("knowledge") or {}
+        self.knowledge_cfg = kcfg
+        self.knowledge = KnowledgeGraph(cfg.resolve_path(str(kcfg.get("dir") or "knowledge")) / "graph.json",
+                                        rebuild_minutes=float(kcfg.get("rebuild_minutes") or 60), min_runs=int(kcfg.get("min_runs") or 2))
+        self.knowledge.sources = self._knowledge_sources
+        if kcfg.get("enabled", True) is not False:
+            builtin_tools += make_knowledge_tools(self.knowledge)
         self.hub = MCPHub(
             cfg.mcp_servers,
             log_dir=cfg.log_path,
@@ -157,6 +167,11 @@ class AgentRuntime:
             self.dynamic.register_all()  # 저장해 둔 동적 도구 등록
         self._agent: Agent | None = None
         self._job_locks: dict[str, asyncio.Lock] = {}
+
+    def _knowledge_sources(self) -> list[tuple[str, Path]]:
+        """지식 그래프 입력: 사용자별 대화 기록 폴더 + 공용 폴더."""
+        out = [(uid, self.users.root / uid / "sessions") for uid in self.users.list_users()]
+        return out + [("(공용)", Path(self.base_workspace.root) / "sessions")]
 
     def _fetch_remote_tool(self) -> Any:
         """원격 MCP 서버 PC 의 파일을 에이전트 PC 로 가져오는 tool (자동 처리가 안 됐거나 나중에 생긴 파일용)."""
@@ -228,6 +243,10 @@ class AgentRuntime:
             self._agent = Agent(self.llm, self.hub, self.cfg.agent, self.skills)
             self._agent.recent_sessions_in_prompt = self.users_cfg.recent_sessions_in_prompt
             self._agent.rules_path = self.rules_path
+            kc = self.knowledge_cfg
+            if kc.get("enabled", True) is not False and kc.get("auto_hint", True) is not False:
+                self._agent.knowledge = self.knowledge  # 새 요청에 비슷한 과거 업무의 검증된 순서를 붙임
+                self._agent.knowledge_min_score = float(kc.get("hint_min_score") or 0.45)
             self._agent.router = self.router
         return self._agent
 

@@ -133,6 +133,7 @@ DEFAULT_SYSTEM_PROMPT = """당신은 사내 업무 자료 수집·분석 에이�
 - 엑셀·CSV 는 analyze_file 한 번으로 구조를 본 뒤 query_table / sql_query 로 필요한 값만 계산하세요 (행을 여러 번 읽지 말 것).
 - 날짜·부서·사이트별로 같은 일을 여러 번 해야 하면 run_subagent 로 나눠 맡기거나, run_python 으로 한 번에 처리하세요.
 - 3단계 이상 작업은 update_plan 으로 계획을 세우고, 끝난 항목은 다시 하지 마세요.
+- 요청 끝에 '[참고: 지식 그래프 …]' 가 붙어 있으면 사람들이 실제로 성공한 순서입니다. 맞으면 따르고, 처음 하는 복잡한 업무는 knowledge_search 로 찾아보세요.
 
 스킬/대화 규칙:
 10. 요청이 아래 '등록된 스킬' 설명과 맞으면 먼저 use_skill 로 지침을 불러와 그 절차를 따르세요.
@@ -192,6 +193,8 @@ class Agent:
         self.rules_path: Any = None
         self.image_max_side = 2048
         self.router: Any = None  # routing.ModelRouter (모델이 여러 개일 때 비용 기준 선택)
+        self.knowledge: Any = None  # knowledge.KnowledgeGraph (비슷한 과거 업무의 검증된 순서를 요청에 붙임)
+        self.knowledge_min_score = 0.45
 
     # ------------------------------------------------------------------
     def now_text(self) -> str:
@@ -329,6 +332,14 @@ class Agent:
 
             note = await asyncio.to_thread(attachment_note, attachments)
             prompt = f"{prompt}\n\n{note}" if prompt.strip() else f"첨부한 파일을 분석해줘.\n\n{note}"
+        hint = ""
+        if self.knowledge is not None and role == "main" and skill is None and user_prompt.strip() and not user_prompt.startswith("/"):
+            try:  # 사람들이 실제로 성공한 순서 (실행 기록에서 만든 지식, 토큰 비용 없음). 요청 끝에 붙여 프롬프트 캐시를 깨지 않음
+                hint = await asyncio.to_thread(self.knowledge.hint, user_prompt, self.knowledge_min_score)
+            except Exception:  # noqa: BLE001 - 지식이 없어도 실행은 계속
+                log.exception("지식 그래프 참고 실패")
+            if hint:
+                prompt = f"{prompt}\n\n{hint}"
         if images:
             content, used = user_content(prompt, images, self.image_max_side)
             messages.append({"role": "user", "content": content, "_images": used, "_sent": self.now_text()})
@@ -354,6 +365,8 @@ class Agent:
                 log.exception("on_event 콜백 오류")
 
         ctx.meta["emit"] = emit  # update_plan 등 내장 tool 이 화면에 진행 상황을 보낼 수 있게
+        if hint:
+            await emit("knowledge", {"hint": hint})
 
         def all_files() -> list[dict[str, Any]]:
             files: dict[str, dict[str, Any]] = {}
