@@ -150,4 +150,4 @@ def test_web_slash_commands_offline(tmp_path: Path) -> None:
 def test_bundled_skills_have_workflows() -> None:
     skills, errors = SkillStore(ROOT / "skills").list()
     assert not errors
-    assert {s.name for s in skills if s.steps} == {"monthly_sales_report", "notice_digest", "learn_rules", "product_analysis"}
+    assert {s.name for s in skills if s.steps} == {"monthly_sales_report", "notice_digest", "learn_rules", "product_analysis", "product_rule_loop"}
