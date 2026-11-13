@@ -4,6 +4,28 @@
 
 ---
 
+## 2026-11-13 — 스킬별 파이썬 환경
+
+**무엇**
+- `skill_env.py`: 스킬 폴더를 보고 실행 환경을 정합니다.
+  - `.md`만 → 지금 서버 환경
+  - 의존성 파일 없는 스크립트 → 공유 가상환경(`shared_requirements`) 또는 지금 환경
+  - `requirements.txt`·`.python-version` → 전용 가상환경
+- **전용 가상환경**: `.python-version`의 파이썬으로 만들고, 적힌 의존성만 설치한 뒤 검증합니다.
+  - 검증 항목: `pip check`, 적힌 패키지 설치 여부와 버전 조건, 파이썬 버전
+  - 같은 지문이면 다시 쓰고, 바뀌면 새로 만듭니다. 실패하면 이전 환경을 유지하고 `failed.log`를 남깁니다.
+- **연결된 곳**
+  - `run_skill_script`가 스킬의 환경으로 실행합니다.
+  - `skills sync`가 받은 스킬의 환경을 바로 준비합니다(`prepare_env`).
+  - 테스트 러너가 사례 전에 환경부터 확인합니다.
+  - CLI `skills env`, 도구 `skill_env`
+- **버그 수정**: 스킬 설치 때 숨김 파일이라 빠지던 `.python-version`을 복사합니다.
+- **설정**: `skills.python_env, env_dir, shared_requirements, python_paths, pip_index_url, pip_extra_index_url, pip_trusted_host, pip_args, env_install_timeout, prepare_env`
+
+**왜**
+- Claude Code로 만든 스킬마다 필요한 패키지와 파이썬 버전이 다릅니다.
+- 서버 환경에 섞어 설치하면 스킬끼리, 또는 에이전트 자체와 충돌하기 때문입니다.
+
 ## 2026-11-13 — 스킬 러너 (Claude Code 스킬·스크립트를 Git에서 받아 실행·테스트)
 
 **검토 결과** (이전 구현이 러너로 충분했는가)

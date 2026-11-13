@@ -124,6 +124,12 @@ class AgentRuntime:
         from .usage import make_usage_tools
 
         self.scripts = SkillScriptRunner(self.skills, self.workspace, cfg.raw.get("skills") or {}, self.dynamic, self.links)
+        from .skill_env import SkillEnvManager
+
+        skcfg = cfg.raw.get("skills") or {}
+        # 스킬별 파이썬 환경: requirements.txt·.python-version 이 있으면 전용 가상환경, 없으면 공유/지금 환경
+        self.skill_envs = SkillEnvManager(cfg.resolve_path(str(skcfg.get("env_dir") or "skill_envs")), skcfg)
+        self.scripts.envs = self.skill_envs
         builtin_tools += self.scripts.tools()
         builtin_tools += make_compare_tools(self.workspace)
         from .bizdays import configure as configure_calendar, make_business_day_tool
@@ -164,9 +170,10 @@ class AgentRuntime:
             from .subagent import make_subagent_tool
 
             self.hub.builtins.append(make_subagent_tool(self))
-        from .skill_tests import make_test_tool
+        from .skill_tests import make_env_tool, make_test_tool
 
         self.hub.builtins.append(make_test_tool(self))  # 스킬 테스트 러너 (스킬 폴더의 사례 실행)
+        self.hub.builtins.append(make_env_tool(self))  # 스킬별 파이썬 환경 보기·만들기
         if cfg.agent.tool_batch:  # 여러 도구 호출을 LLM 왕복 한 번으로 (앞 결과 → 다음 인자, 항목마다 실행, 결과 줄이기)
             from .batch import make_batch_tool
 
@@ -317,7 +324,27 @@ class AgentRuntime:
     def sync_skills(self, sources: list[Any] | None = None, user: str | None = None) -> list[dict[str, Any]]:
         """skills.sources(또는 준 주소)의 Git 저장소에서 스킬·스크립트를 받아 설치·갱신."""
         srcs = sources if sources else list((self.cfg.raw.get("skills") or {}).get("sources") or [])
-        return self.skill_installer.sync(srcs, user)
+        report = self.skill_installer.sync(srcs, user)
+        if (self.cfg.raw.get("skills") or {}).get("prepare_env", True) is not False:
+            for row in report:  # 받은 스킬의 파이썬 환경을 바로 준비 (실행할 때 기다리지 않게, 설치 실패를 미리 알게)
+                row["env"] = self.prepare_envs(row["installed"] + row["updated"])
+        return report
+
+    def prepare_envs(self, names: list[str], rebuild: bool = False) -> dict[str, str]:
+        """스킬들의 파이썬 환경을 만들고 검증. {스킬: 결과 한 줄}"""
+        from .skill_env import SkillEnvError
+
+        out = {}
+        for n in names:
+            try:
+                sk = self.skills.get(n)
+                plan = self.skill_envs.ensure(n, sk.path, rebuild)
+                st = self.skill_envs.current(plan.env_dir) if plan.env_dir else None
+                out[n] = ("지금 서버 환경" if plan.kind == "base" else
+                          f"{'공유' if plan.kind == 'shared' else '전용'} 가상환경 준비됨 (Python {st['python'] if st else '?'}, 패키지 {len((st or {}).get('packages') or {})}개)")
+            except SkillEnvError as e:
+                out[n] = f"실패: {e}"
+        return out
 
     async def close(self) -> None:
         await self.hub.close()

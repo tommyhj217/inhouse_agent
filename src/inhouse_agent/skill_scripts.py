@@ -145,6 +145,7 @@ class SkillScriptRunner:
         self.ws = workspace
         self.dynamic = dynamic
         self.links = links
+        self.envs: Any = None  # skill_env.SkillEnvManager (스킬별 파이썬 가상환경) - runtime 이 넣음
 
     def resolve(self, name: str, rel: str) -> tuple[Path, Path]:
         sk = self.skills.get(name)
@@ -235,6 +236,7 @@ class SkillScriptRunner:
         timeout = min(float(timeout or self.timeout), max(self.timeout, 1800))
         t0 = time.monotonic()
 
+        env_note = ""
         code = script.read_text(encoding="utf-8", errors="replace") if script.suffix.lower() == ".py" else ""
         if code and _HAS_RUN.search(code) and self.dynamic is not None and not argv:
             # def run(args, ctx) 형태 → 동적 도구 실행기로 (ctx.call_tool 로 MCP 도구 호출 가능)
@@ -242,7 +244,17 @@ class SkillScriptRunner:
             text = self.dynamic.format_result(r)
             ok, rc, stdout, stderr = r["ok"], 0 if r["ok"] else 1, "", ""
         else:
-            cmd = [*RUNNERS[script.suffix.lower()], str(script), *_argv(args, argv)]
+            runner = RUNNERS[script.suffix.lower()]
+            if script.suffix.lower() == ".py" and self.envs is not None:
+                from .skill_env import SkillEnvError
+
+                try:  # requirements.txt·.python-version 이 있으면 그 스킬 전용 가상환경 (처음이면 만들고 검증)
+                    plan = await asyncio.to_thread(self.envs.ensure, name, sdir)
+                except SkillEnvError as e:
+                    return ToolOutcome(f"오류: 스킬 '{name}' 의 파이썬 환경을 준비하지 못했습니다: {e}", True)
+                runner = [plan.python]
+                env_note = "" if plan.kind == "base" else f" [{'공유' if plan.kind == 'shared' else '전용'} 가상환경]"
+            cmd = [*runner, str(script), *_argv(args, argv)]
             if shutil.which(cmd[0]) is None and not Path(cmd[0]).is_file():
                 return ToolOutcome(f"오류: '{cmd[0]}' 실행 프로그램이 없습니다 ({script.name}).", True)
             env = dict(os.environ)
@@ -291,7 +303,8 @@ class SkillScriptRunner:
                 out_dir.rmdir()
             except OSError:
                 pass
-        lines = [f"[스킬 스크립트] {name}/{script.relative_to(sdir).as_posix()} → {'성공' if ok else f'실패(종료코드 {rc})'} ({elapsed:.1f}초)"]
+        lines = [f"[스킬 스크립트] {name}/{script.relative_to(sdir).as_posix()} → {'성공' if ok else f'실패(종료코드 {rc})'} ({elapsed:.1f}초)"
+                 + env_note]
         if text:
             lines.append(text)
         data = None

@@ -33,7 +33,7 @@ Python 패키지(`src/inhouse_agent`), FastAPI 웹 UI(SSE), CLI, 예약작업으
 | `errors.py` | 예외 → 원인·조치(`describe_error`), 실행 상태 라벨 |
 | `batch.py` | `run_tool_batch` (여러 도구 호출을 LLM 왕복 한 번으로) |
 | `knowledge.py` | 업무 지식 그래프(온톨로지): 실행 기록 → 업무 유형·검증된 순서·DFG·자주 난 오류, 검색·자동 참고·스킬 초안·RDF/GraphML 내보내기 |
-| `skill_install.py` / `skill_tests.py` | 스킬 러너: Git 에서 스킬·스크립트 받기(`sync`, `.claude/commands` 변환) / 스킬 폴더의 테스트 사례 실행 |
+| `skill_install.py` / `skill_tests.py` / `skill_env.py` | 스킬 러너: Git 에서 스킬·스크립트 받기(`sync`, `.claude/commands` 변환) / 스킬 폴더의 테스트 사례 실행 / 스킬별 파이썬 가상환경 |
 | `product_rules.py` | 제품 개발 규칙 학습: 베이스→개발 모델·BOM → 규칙 후보(바뀌는 부품·개발 현황·베이스 선택) → 담당자 답 → 스킬 반영 → 채점 |
 | `file_versions.py` / `verify.py` | 덮어쓴 파일의 이전 버전 보기·되돌리기 / 결과 PPT·엑셀 자동 검증 |
 | `workflow.py` | LLM 없이 steps 실행, 템플릿 `{steps.x.data...}` (스킬 steps와 batch가 공유) |
@@ -171,6 +171,15 @@ Claude Code로 만들어 Git에 올린 스킬·스크립트를 **고치지 않�
 - 테스트 사례는 스킬 폴더(`tests/cases.yaml`, `evals/evals.json`)에 둡니다. Git으로 스킬과 함께 움직여야 하기 때문입니다.
   - 스크립트·steps 사례는 LLM 없이 돌고, prompt 사례는 `--llm`일 때만 돕니다(비용).
   - CLI `skills test`는 실패 시 종료 코드 1을 냅니다. 자동화에서 쓰므로 유지하세요.
+- **스킬별 파이썬 환경** (`skill_env.py`)
+  - 규칙: `.md`만 → 지금 환경, 의존성 파일 없음 → 공유 가상환경 또는 지금 환경, `requirements.txt`·`.python-version` → 전용 가상환경
+  - 전용 환경에는 **적힌 의존성만** 설치합니다. 서버 패키지를 섞지 않습니다.
+    - 공유 환경만 `--system-site-packages`로 만듭니다.
+  - 설치 뒤 검증(`pip check`, 패키지·버전 조건, 파이썬 버전)을 빼지 마세요. 검증 실패는 실행 실패입니다.
+  - 가상환경은 만든 뒤 옮기면 안의 경로가 깨집니다. 그래서 지문별 폴더(`<스킬>/<지문>/`)에 바로 만들고 `current.json`으로 가리킵니다.
+    - 실패하면 이전 환경을 그대로 둡니다.
+  - 스킬을 설치할 때 숨김 파일 중 `.python-version`은 복사해야 합니다(`skill_install.KEEP_DOTFILES`). 빠뜨려 서버 기본 파이썬으로 만든 버그를 테스트가 잡은 적이 있습니다.
+  - 설치는 Git에서 받는 사람(편집자)만 합니다. `requirements.txt` 설치는 패키지 코드를 실행하므로 믿을 수 있는 저장소만 `skills.sources`에 두세요.
 
 ### 5-9c. 제품 개발 규칙 학습 (`product_rules.py`) — 과제의 핵심 목표
 

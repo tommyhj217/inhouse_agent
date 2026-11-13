@@ -17,3 +17,4 @@ workspace/.link_secret
 rulebooks/*/.history/
 rulebooks/*/*.tmp
 knowledge/
+skill_envs/

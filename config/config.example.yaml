@@ -234,6 +234,20 @@ skills:
   #   - {url: "https://github.com/회사/skills-repo", ref: main}             # 저장소 전체에서 스킬을 찾음
   #   - {url: "https://github.com/회사/other", path: ".claude/skills", only: [bom-check]}   # 하위 폴더 / 특정 스킬만
   # sync_on_start: false         # true 면 서버를 켤 때마다 받아 옴
+  # --- 스킬별 파이썬 환경 (스킬 폴더를 보고 자동으로 고름) ---
+  #   .md 만 있는 스킬 → 지금 서버 환경 / 스크립트만 있고 의존성 파일 없음 → 공유 가상환경(shared_requirements 가 있을 때) 또는 지금 환경
+  #   requirements.txt 또는 .python-version 이 있음 → 그 스킬 전용 가상환경 (그 버전으로 만들고, 적힌 것만 설치, 설치 결과 검증)
+  #   보기·만들기: inhouse-agent skills env [이름] [--build|--rebuild]
+  # python_env: true             # false 면 모든 스킬을 지금 서버 환경으로 실행
+  # env_dir: skill_envs          # 가상환경을 만들 폴더
+  # shared_requirements: [openpyxl, pandas]   # 의존성 파일 없는 스크립트들이 함께 쓸 패키지 (있으면 공유 가상환경을 만듦)
+  # python_paths: {"3.11": "C:/Python311/python.exe"}   # .python-version 의 버전을 찾지 못할 때 직접 지정
+  # pip_index_url: https://pypi.company.com/simple     # 사내 PyPI 미러
+  # pip_extra_index_url:
+  # pip_trusted_host: pypi.company.com
+  # pip_args: []                 # pip install 에 더 줄 옵션 (예: ["--no-index", "--find-links", "D:/wheels"] 오프라인 설치)
+  # env_install_timeout: 900     # 의존성 설치 최대 초
+  # prepare_env: true            # skills sync 로 받을 때 바로 환경을 만들고 검증
 
 # ---------------------------------------------------------------------
 # MCP 서버 (기존에 만들어 둔 사이트별 웹컨트롤 MCP)

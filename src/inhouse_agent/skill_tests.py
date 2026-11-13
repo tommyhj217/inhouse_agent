@@ -131,6 +131,19 @@ async def run_skill_tests(rt: "AgentRuntime", name: str, use_llm: bool = False, 
     cases, source = load_cases(skill.path)
     ready, why = rt.llm_status()
     out: dict[str, Any] = {"skill": name, "source": source, "passed": 0, "failed": 0, "skipped": 0, "cases": []}
+    envs = getattr(rt, "skill_envs", None)
+    if cases and envs is not None:  # 사례보다 먼저 파이썬 환경 준비·검증 (실패하면 원인을 사례마다 보이지 않고 한 번에)
+        import asyncio
+
+        from .skill_env import SkillEnvError
+
+        try:
+            plan = await asyncio.to_thread(envs.ensure, name, skill.path)
+            out["env"] = plan.kind
+        except SkillEnvError as e:
+            out["failed"] = 1
+            out["cases"].append({"name": "(파이썬 환경 준비)", "kind": "command", "status": "failed", "problems": [str(e)], "manual": []})
+            return out
     for case in cases:
         if only and only not in case["name"]:
             continue
@@ -181,7 +194,8 @@ def format_results(results: list[dict[str, Any]]) -> str:
             lines.append(f"## {r['skill']}: 테스트 사례 없음 (스킬 폴더에 tests/cases.yaml 또는 evals/evals.json 을 넣으세요)")
             continue
         mark = "✅" if not r["failed"] else "❌"
-        lines.append(f"## {mark} {r['skill']}: 통과 {r['passed']} · 실패 {r['failed']} · 건너뜀 {r['skipped']}  ({r['source']})")
+        env = {"skill": " · 전용 가상환경", "shared": " · 공유 가상환경"}.get(r.get("env") or "", "")
+        lines.append(f"## {mark} {r['skill']}: 통과 {r['passed']} · 실패 {r['failed']} · 건너뜀 {r['skipped']}  ({r['source']}{env})")
         for c in r["cases"]:
             icon = {"passed": "✓", "failed": "✗", "skipped": "–"}[c["status"]]
             lines.append(f"- {icon} {c['name']} [{ {'command': '스크립트', 'steps': '단계 실행', 'prompt': 'LLM'}[c['kind']] }]"
@@ -223,4 +237,35 @@ def make_test_tool(rt: "AgentRuntime") -> Any:
                                           "llm": {"type": "boolean", "description": "LLM 이 필요한 prompt 사례도 실행 (토큰 사용)"},
                                           "only": {"type": "string", "description": "이 글자가 이름에 든 사례만"}}},
         test_skill,
+    )
+
+
+def make_env_tool(rt: "AgentRuntime") -> Any:
+    import asyncio
+
+    from .mcp_hub import BuiltinTool, ToolOutcome
+    from .skill_env import format_status
+
+    async def skill_env(args: dict[str, Any]) -> ToolOutcome:
+        names = [str(args["name"])] if args.get("name") else [s.name for s in rt.skills.list()[0]]
+        action = str(args.get("action") or "status")
+        if action in ("build", "rebuild"):
+            if not rt.can_edit_skills():
+                return ToolOutcome("오류: 스킬 환경 설치는 편집자(skills.editors)만 할 수 있습니다.", True)
+            res = await asyncio.to_thread(rt.prepare_envs, names, action == "rebuild")
+            bad = [n for n, v in res.items() if v.startswith("실패")]
+            return ToolOutcome("\n".join(f"- {n}: {v}" for n, v in res.items()), bool(bad), [], res)
+        texts = []
+        for n in names:
+            sk = rt.skills.get(n)
+            texts.append(format_status(n, rt.skill_envs.status(n, sk.path)))
+        return ToolOutcome("\n\n".join(texts), False)
+
+    return BuiltinTool(
+        "skill_env",
+        "스킬의 파이썬 실행 환경을 보거나 만듭니다. requirements.txt·.python-version 이 있는 스킬은 전용 가상환경(그 버전·의존성만 설치하고 검증), "
+        "없으면 공유 가상환경 또는 지금 환경을 씁니다. action: status(기본) | build | rebuild (편집자만).",
+        {"type": "object", "properties": {"name": {"type": "string", "description": "스킬 이름 (생략 시 전체)"},
+                                          "action": {"type": "string", "enum": ["status", "build", "rebuild"]}}},
+        skill_env,
     )

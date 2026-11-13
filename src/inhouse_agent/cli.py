@@ -508,14 +508,25 @@ async def cmd_skills(cfg: AppConfig, args: argparse.Namespace) -> int:
         for k, v in res["errors"].items():
             print(f"오류 {k}: {v}")
         return 0 if res["installed"] or not res["errors"] else 1
-    if sc == "sync":
-        from .skill_install import SkillInstaller
+    if sc == "env":
+        rt = AgentRuntime(cfg)
+        names = args.names or [s.name for s in rt.skills.list()[0]]
+        if args.build or args.rebuild:
+            res = rt.prepare_envs(names, args.rebuild)
+            for n, v in res.items():
+                print(f"- {n}: {v}")
+            return 1 if any(v.startswith("실패") for v in res.values()) else 0
+        from .skill_env import format_status
 
+        for n in names:
+            print(format_status(n, rt.skill_envs.status(n, rt.skills.get(n).path)) + "\n")
+        return 0
+    if sc == "sync":
         srcs = [{"url": u, "ref": args.ref} for u in args.urls] or list((cfg.raw.get("skills") or {}).get("sources") or [])
         if not srcs:
             print("받아 올 곳이 없습니다. 주소를 주거나 config.yaml 의 skills.sources 에 적으세요.")
             return 1
-        report = SkillInstaller(store, cfg.raw.get("skills") or {}).sync(srcs)
+        report = AgentRuntime(cfg).sync_skills(srcs)
         bad = 0
         for r in report:
             print(f"== {r['url']}" + (f" ({str(r.get('commit'))[:8]})" if r.get("commit") else ""))
@@ -525,6 +536,9 @@ async def cmd_skills(cfg: AppConfig, args: argparse.Namespace) -> int:
             for k, v in r["errors"].items():
                 bad += 1
                 print(f"  오류 {k}: {v}")
+            for k, v in (r.get("env") or {}).items():
+                bad += v.startswith("실패")
+                print(f"  환경 {k}: {v}")
         if args.test:
             return await _test_skills(cfg, [n for r in report for n in r["installed"] + r["updated"] + r["unchanged"]], False) or (1 if bad else 0)
         return 1 if bad else 0
@@ -892,6 +906,10 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("urls", nargs="*")
     x.add_argument("--ref", help="브랜치/태그")
     x.add_argument("--test", action="store_true", help="받은 뒤 테스트 사례까지 실행")
+    x = sks.add_parser("env", help="스킬별 파이썬 환경 보기 / 만들기 (requirements.txt·.python-version → 전용 가상환경)")
+    x.add_argument("names", nargs="*")
+    x.add_argument("--build", action="store_true", help="없거나 바뀐 환경을 만들고 검증")
+    x.add_argument("--rebuild", action="store_true", help="처음부터 다시 만들기")
     x = sks.add_parser("test", help="스킬 테스트 러너: 스킬 폴더의 tests/cases.yaml·evals/evals.json 사례 실행 (이름 생략 시 전체)")
     x.add_argument("names", nargs="*")
     x.add_argument("--llm", action="store_true", help="LLM 이 필요한 prompt 사례도 실행 (토큰 사용)")

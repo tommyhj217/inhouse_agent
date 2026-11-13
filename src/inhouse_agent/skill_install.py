@@ -29,6 +29,7 @@ from typing import Any
 
 from .skills import NAME_RE, SkillError, SkillStore, parse_skill
 
+KEEP_DOTFILES = {".python-version"}  # 숨김 파일이지만 스킬 실행에 필요 (스킬별 파이썬 버전)
 SKIP_DIRS = {".git", "node_modules", "__pycache__", "_trash", ".history", ".venv", "venv", ".staging", ".mypy_cache", ".pytest_cache"}
 KEEP_ON_UPDATE = ("data",)  # 스킬이 실행 중에 만든 상태(예: SQLite DB)는 업데이트해도 유지
 KEEP_EXT = (".db", ".sqlite", ".sqlite3")
@@ -511,7 +512,7 @@ class SkillInstaller:
         try:
             for p in folder.rglob("*"):
                 rel = p.relative_to(folder)
-                if not p.is_file() or any(x.startswith(".") or x in SKIP_DIRS for x in rel.parts):
+                if not p.is_file() or any((x.startswith(".") and x not in KEEP_DOTFILES) or x in SKIP_DIRS for x in rel.parts):
                     continue
                 out = tmp / rel
                 out.parent.mkdir(parents=True, exist_ok=True)
