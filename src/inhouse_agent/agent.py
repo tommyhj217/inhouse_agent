@@ -274,14 +274,17 @@ class Agent:
                        "_recent": recent, "_cache_key": old.get("_cache_key") or "c-" + uuid.uuid4().hex}
 
     @staticmethod
-    def skill_system(skill: "Skill", inputs: dict[str, Any], timezone: str) -> str:
+    def skill_system(skill: "Skill", inputs: dict[str, Any], timezone: str, arguments: str | None = None) -> str:
+        from .skills import CC_TOOL_NOTE, is_claude_code_skill
+
         return (
             f"# 지금 실행할 스킬: {skill.name}\n설명: {skill.description}\n"
             f"입력값: {json.dumps(inputs, ensure_ascii=False)}\n"
             + (f"스킬 참고 파일: {', '.join(skill.files)} (read_skill_file 로 읽기)\n" if skill.files else "")
             + (f"실행할 수 있는 스크립트: {', '.join(scripts)} (run_skill_script 로 실행: name={skill.name})\n" if (scripts := _skill_scripts(skill)) else "")
+            + (CC_TOOL_NOTE + "\n" if is_claude_code_skill(skill.meta, skill.body) else "")
             + "\n아래 지침을 순서대로 따르세요. use_skill 을 다시 호출할 필요는 없습니다.\n\n"
-            + skill.render(inputs, timezone)
+            + skill.render(inputs, timezone, arguments)
         )
 
     # ------------------------------------------------------------------
@@ -315,7 +318,8 @@ class Agent:
                 if skill.meta.get(k) is not None:
                     budget.setdefault(k, skill.meta[k])
             inputs = skill.resolve_inputs(skill_inputs, self.cfg.timezone)
-            sk_sys = self.skill_system(skill, inputs, self.cfg.timezone)
+            # $ARGUMENTS: 입력값 arguments 가 있으면 그것, 없으면 사용자가 함께 적은 말
+            sk_sys = self.skill_system(skill, inputs, self.cfg.timezone, str(inputs.get("arguments") or prompt or ""))
             extra_system = f"{extra_system}\n\n{sk_sys}" if extra_system else sk_sys
             if servers is None and skill.servers:
                 servers = skill.servers

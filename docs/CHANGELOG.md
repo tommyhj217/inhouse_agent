@@ -4,6 +4,33 @@
 
 ---
 
+## 2026-11-13 — 스킬 러너 (Claude Code 스킬·스크립트를 Git에서 받아 실행·테스트)
+
+**검토 결과** (이전 구현이 러너로 충분했는가)
+- 이미 되던 것: Git·zip·폴더에서 스킬 가져오기, 스킬 스크립트 실행, `${CLAUDE_SKILL_DIR}`·`.claude/skills/` 경로 치환
+- 빠져 있던 것:
+  - `$ARGUMENTS`·`$0` 치환
+  - 설명 없는 스킬 (오류로 거절됨)
+  - `.claude/commands` 가져오기
+  - Bash/Read 등 도구 이름 대응
+  - 스크립트 환경변수 `CLAUDE_SKILL_DIR`
+  - 설정한 저장소를 한 번에 받는 동기화
+  - 테스트 러너
+
+**무엇**
+- **형식 호환**: 위 빠진 것 전부를 넣었습니다.
+- **동기화**: `SkillInstaller.sync` + `skills.sources` 설정
+  - CLI `skills sync [주소] [--test]`, `POST /api/skills/sync`, `skills.sync_on_start`
+- **테스트 러너**: `skill_tests.py`
+  - 스킬 폴더의 `tests/cases.yaml`(command / inputs / prompt 사례 + expect) 또는 `evals/evals.json`(skill-creator 형식)을 실행합니다.
+  - CLI `skills test`(실패 시 종료 코드 1), 도구 `test_skill`, `POST /api/skills/{name}/test`
+- API·화면 버전은 7입니다.
+
+**아직 안 한 것**
+- 화면의 동기화·테스트 버튼 (지금은 CLI, 채팅창 `/test_skill`, API)
+- 글로 적힌 기대(`expectations`)를 LLM으로 판정하는 것
+- 스크립트의 패키지(`requirements.txt`) 자동 설치
+
 ## 2026-11-11 — 제품 개발 규칙 학습 (과제 핵심 목표의 첫 구현)
 
 **목표** (사용자 설명)

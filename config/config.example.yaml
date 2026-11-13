@@ -228,6 +228,12 @@ skills:
   #   MODEL_AGENTS_SKILL_ROOTS: "{skills_dir}"
   # git_token: ${AGENT_GIT_TOKEN:-}         # 비공개 GitHub/사내 Git 저장소에서 스킬 가져오기 (공개 저장소는 불필요)
   # git_tokens: {github.company.com: "${GHE_TOKEN:-}"}
+  # --- 스킬 러너: Git 저장소의 스킬·스크립트(Claude Code 로 만든 .claude/skills, .claude/commands 포함)를 받아 실행 ---
+  #   받기: inhouse-agent skills sync  (또는 POST /api/skills/sync)   테스트: inhouse-agent skills test
+  # sources:
+  #   - {url: "https://github.com/회사/skills-repo", ref: main}             # 저장소 전체에서 스킬을 찾음
+  #   - {url: "https://github.com/회사/other", path: ".claude/skills", only: [bom-check]}   # 하위 폴더 / 특정 스킬만
+  # sync_on_start: false         # true 면 서버를 켤 때마다 받아 옴
 
 # ---------------------------------------------------------------------
 # MCP 서버 (기존에 만들어 둔 사이트별 웹컨트롤 MCP)

@@ -446,6 +446,25 @@ async def cmd_jobs(cfg: AppConfig, args: argparse.Namespace) -> int:
     return 0 if result.success else 2
 
 
+async def _test_skills(cfg: AppConfig, names: list[str], llm: bool, only: str | None = None) -> int:
+    """스킬 테스트 러너: 사례를 실행하고 실패가 있으면 1 (CI 에서 쓸 수 있게)."""
+    from .skill_tests import SkillTestError, format_results, run_skill_tests
+    from .skills import SkillError
+
+    async with AgentRuntime(cfg) as rt:
+        names = names or [s.name for s in rt.skills.list()[0]]
+        results = []
+        for n in names:
+            try:
+                r = await run_skill_tests(rt, n, llm, only)
+            except (SkillError, SkillTestError) as e:
+                r = {"skill": n, "source": None, "passed": 0, "failed": 1, "skipped": 0,
+                     "cases": [{"name": "(사례 읽기)", "kind": "command", "status": "failed", "problems": [str(e)], "manual": []}]}
+            results.append(r)
+    print(format_results(results))
+    return 1 if any(r["failed"] for r in results) else 0
+
+
 async def cmd_skills(cfg: AppConfig, args: argparse.Namespace) -> int:
     from .skills import SkillStore
 
@@ -489,6 +508,28 @@ async def cmd_skills(cfg: AppConfig, args: argparse.Namespace) -> int:
         for k, v in res["errors"].items():
             print(f"오류 {k}: {v}")
         return 0 if res["installed"] or not res["errors"] else 1
+    if sc == "sync":
+        from .skill_install import SkillInstaller
+
+        srcs = [{"url": u, "ref": args.ref} for u in args.urls] or list((cfg.raw.get("skills") or {}).get("sources") or [])
+        if not srcs:
+            print("받아 올 곳이 없습니다. 주소를 주거나 config.yaml 의 skills.sources 에 적으세요.")
+            return 1
+        report = SkillInstaller(store, cfg.raw.get("skills") or {}).sync(srcs)
+        bad = 0
+        for r in report:
+            print(f"== {r['url']}" + (f" ({str(r.get('commit'))[:8]})" if r.get("commit") else ""))
+            for k, label in (("installed", "새로 설치"), ("updated", "갱신"), ("unchanged", "변경 없음"), ("skipped", "건너뜀")):
+                if r[k]:
+                    print(f"  {label}: {', '.join(r[k])}")
+            for k, v in r["errors"].items():
+                bad += 1
+                print(f"  오류 {k}: {v}")
+        if args.test:
+            return await _test_skills(cfg, [n for r in report for n in r["installed"] + r["updated"] + r["unchanged"]], False) or (1 if bad else 0)
+        return 1 if bad else 0
+    if sc == "test":
+        return await _test_skills(cfg, args.names, args.llm, args.only)
     if sc == "list":
         skills, errors = store.list()
         for s in skills:
@@ -847,6 +888,14 @@ def build_parser() -> argparse.ArgumentParser:
     x = sks.add_parser("update", help="Git/폴더에서 가져온 스킬을 원본에서 갱신")
     x.add_argument("names", nargs="*")
     x.add_argument("--all", action="store_true")
+    x = sks.add_parser("sync", help="Git 저장소의 스킬·스크립트를 받아 설치·갱신 (주소 생략 시 config 의 skills.sources)")
+    x.add_argument("urls", nargs="*")
+    x.add_argument("--ref", help="브랜치/태그")
+    x.add_argument("--test", action="store_true", help="받은 뒤 테스트 사례까지 실행")
+    x = sks.add_parser("test", help="스킬 테스트 러너: 스킬 폴더의 tests/cases.yaml·evals/evals.json 사례 실행 (이름 생략 시 전체)")
+    x.add_argument("names", nargs="*")
+    x.add_argument("--llm", action="store_true", help="LLM 이 필요한 prompt 사례도 실행 (토큰 사용)")
+    x.add_argument("--only", help="이 글자가 이름에 든 사례만")
     x = sks.add_parser("validate", help="형식 검사 + 치환된 지침 미리보기")
     x.add_argument("name")
     x.add_argument("-i", "--input", action="append")

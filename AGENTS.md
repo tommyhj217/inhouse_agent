@@ -33,6 +33,7 @@ Python 패키지(`src/inhouse_agent`), FastAPI 웹 UI(SSE), CLI, 예약작업으
 | `errors.py` | 예외 → 원인·조치(`describe_error`), 실행 상태 라벨 |
 | `batch.py` | `run_tool_batch` (여러 도구 호출을 LLM 왕복 한 번으로) |
 | `knowledge.py` | 업무 지식 그래프(온톨로지): 실행 기록 → 업무 유형·검증된 순서·DFG·자주 난 오류, 검색·자동 참고·스킬 초안·RDF/GraphML 내보내기 |
+| `skill_install.py` / `skill_tests.py` | 스킬 러너: Git 에서 스킬·스크립트 받기(`sync`, `.claude/commands` 변환) / 스킬 폴더의 테스트 사례 실행 |
 | `product_rules.py` | 제품 개발 규칙 학습: 베이스→개발 모델·BOM → 규칙 후보(바뀌는 부품·개발 현황·베이스 선택) → 담당자 답 → 스킬 반영 → 채점 |
 | `file_versions.py` / `verify.py` | 덮어쓴 파일의 이전 버전 보기·되돌리기 / 결과 PPT·엑셀 자동 검증 |
 | `workflow.py` | LLM 없이 steps 실행, 템플릿 `{steps.x.data...}` (스킬 steps와 batch가 공유) |
@@ -158,6 +159,18 @@ Azure는 요청 앞부분이 직전 요청과 같으면(1,024 토큰 이상) 그
 - **스킬 초안**(`suggest_skills`)은 파일만 만들고 설치하지 않습니다. 설치는 편집자가 스킬 가져오기로 합니다(5-9).
   - 스킬 이름은 영문·숫자·`_`만 됩니다(`skill_slug`).
 - 참고를 붙인 실행은 `AgentResult.hint` → 기록의 `knowledge_hint`로 남기고, `usage.knowledge_effect`가 같은 유형끼리 비교합니다. 이 연결을 끊지 마세요.
+
+### 5-9d. 스킬 러너 (`skills.py`, `skill_install.py`, `skill_scripts.py`, `skill_tests.py`) — 과제의 두 번째 핵심
+
+Claude Code로 만들어 Git에 올린 스킬·스크립트를 **고치지 않고 그대로** 받아 실행·테스트하는 것이 목표입니다.
+
+- Claude Code 형식을 깨는 요구를 스킬 쪽에 하지 마세요. 호환은 이쪽에서 맞춥니다.
+  - 대상: `$ARGUMENTS`, `${CLAUDE_SKILL_DIR}`, 설명 없는 스킬, `.claude/commands`, `allowed-tools` 무시, 도구 이름 대응 안내(`CC_TOOL_NOTE`)
+- 실행은 **스킬 폴더 안 스크립트만** 합니다(`run_skill_script`). 일반 셸 명령 실행 도구를 추가하지 마세요(5-9).
+- `sync`는 같은 저장소에서 온 스킬만 갱신합니다. 직접 만든 같은 이름의 스킬을 덮어쓰지 않습니다. `data/`·DB는 보존합니다.
+- 테스트 사례는 스킬 폴더(`tests/cases.yaml`, `evals/evals.json`)에 둡니다. Git으로 스킬과 함께 움직여야 하기 때문입니다.
+  - 스크립트·steps 사례는 LLM 없이 돌고, prompt 사례는 `--llm`일 때만 돕니다(비용).
+  - CLI `skills test`는 실패 시 종료 코드 1을 냅니다. 자동화에서 쓰므로 유지하세요.
 
 ### 5-9c. 제품 개발 규칙 학습 (`product_rules.py`) — 과제의 핵심 목표
 

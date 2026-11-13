@@ -370,6 +370,65 @@ inputs:                        # (선택) 웹 UI 입력 폼으로 표시
   웹컨트롤이 화면이 있는 브라우저를 쓰면 서비스(세션 0) 대신 **로그온한 사용자 세션**에서 실행해야 합니다.
 - **Linux**: systemd 유닛의 `ExecStart=/opt/inhouse_agent/.venv/bin/inhouse-agent serve`, `WorkingDirectory=/opt/inhouse_agent`
 
+### 스킬 러너 — Claude Code로 만든 스킬·스크립트를 Git에서 받아 실행·테스트
+
+Claude Code에서 만들어 Git에 올린 스킬과 스크립트를 이 에이전트가 받아서 그대로 실행하고, 스킬 폴더에 든 테스트 사례로 검증합니다.
+
+**1. 받기 (sync)**
+
+```bash
+inhouse-agent skills sync                                   # config 의 skills.sources 전부
+inhouse-agent skills sync https://github.com/회사/repo --ref main --test   # 주소를 직접 주고, 받은 뒤 테스트까지
+```
+
+- 저장소 안의 `SKILL.md`를 모두 찾습니다. 위치는 `.claude/skills/`, `.agents/skills/`, `skills/` 어디든 됩니다.
+- `.claude/commands/**/*.md`(슬래시 명령)도 스킬로 바꿔 설치합니다. 예: `commands/review/summary.md` → `review-summary`
+- 새 스킬은 설치하고, 같은 저장소에서 온 스킬은 커밋이 바뀌었을 때만 갱신합니다. 실행 중 만든 `data/`와 DB는 보존합니다.
+- 이름이 같지만 직접 만든 스킬은 덮어쓰지 않고 알려 줍니다.
+- 서버를 켤 때마다 받으려면 `skills.sync_on_start: true`로 둡니다. 화면·자동화에서는 `POST /api/skills/sync`(편집자만)를 씁니다.
+
+**2. Claude Code 형식 호환**
+
+| Claude Code | 이 에이전트 |
+|---|---|
+| `$ARGUMENTS`, `$ARGUMENTS[N]`, `$0`·`$1` | 입력값 `arguments`(없으면 함께 적은 말)로 채움. 입력 칸은 `argument-hint`로 표시 |
+| `${CLAUDE_SKILL_DIR}` (본문·스크립트 환경변수) | 설치된 스킬 폴더 경로. 스크립트에는 `CLAUDE_PROJECT_DIR`(작업폴더)도 넘김 |
+| `Bash`로 `python …/scripts/x.py` 실행 | `run_skill_script(command="그 명령줄")` — 스킬 지침에 대응 안내가 자동으로 붙음 |
+| `Read` / `Write` / `Glob`·`Grep` / `WebFetch` | `read_skill_file`·`read_file_text` / `save_file` / `search_files` / `web_fetch` |
+| `description` 없음 | 본문 첫 문단을 설명으로 씀 |
+| !`명령` (미리 실행) | "먼저 실행해 결과를 확인하라"는 지시로 바꿈 |
+| `allowed-tools`, `model`, `context: fork` 등 | 무시 (권한 확인 없음, 모델은 비용 기준 자동 선택) |
+
+- 실행할 수 있는 것은 **스킬 폴더 안의 스크립트**(py, js, sh 등)뿐입니다. `git`, `npm` 같은 일반 셸 명령은 실행하지 않고, 건너뛰었다고 알립니다.
+- 스크립트가 쓰는 파이썬 패키지는 서버에 설치되어 있어야 합니다.
+
+**3. 테스트 (러너)**
+
+```bash
+inhouse-agent skills test                # 사례가 있는 모든 스킬 (실패가 있으면 종료 코드 1)
+inhouse-agent skills test bom-check --llm   # LLM 이 필요한 사례까지
+```
+
+채팅창에서는 `/test_skill name=bom-check`, API는 `POST /api/skills/{name}/test`입니다. 사례는 스킬 폴더에 둡니다(Git에 함께 올림).
+
+```yaml
+# <스킬>/tests/cases.yaml
+cases:
+  - name: 정상 모델은 문제 없음
+    command: python scripts/check.py FW2409W.AKOR      # 스크립트 한 번 실행 (LLM 없음)
+    expect: {contains: ["FW2409W.AKOR"], json: {problems: []}}
+  - name: 10월 집계
+    inputs: {month: "2026-10"}                          # 스킬 steps 실행 (LLM 없음)
+    expect: {files: ["*.xlsx"]}
+  - name: 말로 시켜도 된다
+    prompt: FW2409W.AKOR 의 BOM 을 점검해줘             # LLM 으로 스킬 실행 (--llm 일 때만)
+    expect: {regex: ["문제.*없"]}
+```
+
+- `expect` 항목: `contains`, `not_contains`, `regex`, `json`(`{경로: 값}`), `files`(만든 파일 이름 패턴), `error: true`(실패해야 통과)
+- Claude의 skill-creator 형식 `evals/evals.json`도 읽습니다. 글로 적힌 기대(`expectations`)는 자동 판정하지 않고, 결과와 함께 "사람이 확인할 기대"로 보여 줍니다.
+- 마지막 테스트 결과(통과·실패 수, 커밋)는 스킬 정보에 남습니다.
+
 ### 스킬 가져오기 (GitHub · zip · 폴더 · 다른 에이전트용 스킬)
 
 스킬 탭의 **📦 가져오기**를 누르면 아래 방법 중 하나로 원본을 불러옵니다. 원본 안의 스킬 목록이 나오면 골라서 설치합니다.

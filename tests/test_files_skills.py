@@ -191,8 +191,9 @@ def test_skill_parse_render_and_store(tmp_path: Path) -> None:
         sk.resolve_inputs({"dept": "없는팀"}, "Asia/Seoul")
     with pytest.raises(SkillError):
         parse_skill("no front matter", tmp_path)
+    assert parse_skill("---\nname: x\n---\n# 제목\n\n본문 첫 문단", tmp_path).description == "본문 첫 문단"  # 설명이 없으면 본문 첫 문단 (Claude Code 방식)
     with pytest.raises(SkillError):
-        parse_skill("---\nname: x\n---\nbody", tmp_path)  # description 없음
+        parse_skill("---\nname: x\n---\n# 제목만\n", tmp_path)  # 설명도 본문도 없음
 
     store = SkillStore(tmp_path / "skills")
     store.save("t1", SKILL)

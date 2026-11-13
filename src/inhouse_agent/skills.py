@@ -115,9 +115,24 @@ class Skill:
             values.setdefault(k, v)
         return values
 
-    def render(self, inputs: dict[str, Any], timezone: str) -> str:
-        """본문의 {입력이름} 과 {today} 등 날짜 변수 치환."""
+    def render(self, inputs: dict[str, Any], timezone: str, arguments: str | None = None, session_id: str = "") -> str:
+        """본문의 {입력이름} 과 {today} 등 날짜 변수 치환.
+        Claude Code 스킬 문법도 채움: $ARGUMENTS, $ARGUMENTS[N], $N (N 번째 인자), ${CLAUDE_SESSION_ID}, !`명령`(미리 실행할 명령)."""
         text = render_dates(self.body, timezone)
+        if arguments is None:
+            arguments = str(inputs.get("arguments") or "")
+        if _CC_ARGS.search(text):
+            import shlex
+
+            try:
+                argv = shlex.split(arguments)
+            except ValueError:
+                argv = arguments.split()
+            text = re.sub(r"\$ARGUMENTS\[(\d+)\]|\$(\d)\b", lambda m: argv[int(m.group(1) or m.group(2))] if int(m.group(1) or m.group(2)) < len(argv) else "", text)
+            text = text.replace("$ARGUMENTS", arguments)
+        text = text.replace("${CLAUDE_SESSION_ID}", session_id)
+        # !`명령` : Claude Code 는 스킬을 읽기 전에 실행해 결과를 끼워 넣음 → 여기서는 먼저 실행하라는 지시로 바꿈
+        text = re.sub(r"!`([^`\n]+)`", lambda m: f"(먼저 run_skill_script 로 실행해 결과를 확인: `{m.group(1)}`)", text)
         # 다른 에이전트(Claude Code·Codex 등)용 스킬의 경로 자리표시 → 실제 경로
         here, root = self.path.resolve().as_posix(), self.path.resolve().parent.as_posix()
         subs = {"<this skill>": here, "${CLAUDE_SKILL_DIR}": here, "{baseDir}": here, "<skills dir>": root,
@@ -216,6 +231,26 @@ def _ui_inputs(folder: Path) -> list[dict[str, Any]]:
     return out
 
 
+_CC_ARGS = re.compile(r"\$ARGUMENTS|\$\d\b")
+# Claude Code 도구 이름 → 이 에이전트의 도구 (스킬 지침이 Bash·Read 등을 말할 때 붙이는 안내)
+CC_TOOL_NOTE = ("[도구 이름 대응] 이 스킬은 Claude Code 용으로 쓰였습니다. Bash 로 스킬 스크립트를 실행하라는 지시는 run_skill_script(command=\"그 명령줄\") 로, "
+                "Read 는 read_skill_file(스킬 안 파일) 또는 read_file_text, Write 는 save_file, Glob·Grep 은 search_files, WebFetch 는 web_fetch 로 하세요. "
+                "스킬 스크립트가 아닌 셸 명령(git, npm, curl 등)은 실행할 수 없으니 건너뛰고 그 사실을 결과에 적으세요.")
+
+
+def is_claude_code_skill(meta: dict[str, Any], body: str) -> bool:
+    return any(k in meta for k in ("allowed-tools", "argument-hint", "disable-model-invocation", "user-invocable", "context", "when_to_use")) or bool(
+        re.search(r"\$\{CLAUDE_|\$ARGUMENTS|\bBash\b|\bRead tool\b|`Read`|`Write`|`Bash`", body))
+
+
+def _first_paragraph(body: str) -> str:
+    for block in re.split(r"\n\s*\n", body):
+        line = " ".join(x.strip() for x in block.strip().splitlines() if x.strip() and not x.lstrip().startswith(("#", "```", "---", "|", ">")))
+        if line:
+            return line[:300]
+    return ""
+
+
 def parse_skill(text: str, folder: Path) -> Skill:
     m = _FM.match(text)
     if not m:
@@ -229,11 +264,16 @@ def parse_skill(text: str, folder: Path) -> Skill:
     name = str(meta.get("name") or folder.name)
     if not NAME_RE.match(name):
         raise SkillError(f"스킬 이름은 영문/숫자/_/- 만 사용할 수 있습니다: {name}")
-    desc = str(meta.get("description") or "").strip()
+    desc = " ".join(str(x).strip() for x in (meta.get("description"), meta.get("when_to_use")) if x and str(x).strip())
+    if not desc:  # Claude Code 처럼 설명이 없으면 본문 첫 문단을 씀
+        desc = _first_paragraph(m.group(2))
     if not desc:
         raise SkillError("description 이 필요합니다 (에이전트가 언제 이 스킬을 쓸지 판단하는 기준).")
+    raw_inputs = meta.get("inputs") or _ui_inputs(folder)
+    if not raw_inputs and _CC_ARGS.search(m.group(2)):  # $ARGUMENTS 를 쓰는 Claude Code 스킬 → 입력 칸 하나
+        raw_inputs = [{"name": "arguments", "label": str(meta.get("argument-hint") or "인자"), "description": "스킬에 넘길 인자 ($ARGUMENTS)"}]
     inputs = []
-    for i, d in enumerate(meta.get("inputs") or _ui_inputs(folder)):
+    for i, d in enumerate(raw_inputs):
         if isinstance(d, str):
             d = {"name": d}
         if not isinstance(d, dict) or not d.get("name"):

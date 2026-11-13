@@ -429,7 +429,7 @@ async function api(path, opts={}) {
   }
   return data;
 }
-const UI_API = 6;  // server.py 의 API_VERSION 과 같아야 함
+const UI_API = 7;  // server.py 의 API_VERSION 과 같아야 함
 function staleBanner(serverApi) {
   if (serverApi === UI_API || document.querySelector(".stale")) return;
   document.body.insertAdjacentHTML("afterbegin", `<div class="stale">⚠ 서버가 이전 버전으로 실행 중입니다 (화면 v${UI_API} / 서버 v${serverApi ?? "?"}). 코드를 받은 뒤에는 서버를 다시 시작해야 새 기능(스킬 가져오기 등)이 동작합니다. <b>서버 창에서 Ctrl+C 후 다시 실행</b>하세요.</div>`);

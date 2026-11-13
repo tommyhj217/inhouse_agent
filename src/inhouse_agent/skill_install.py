@@ -355,6 +355,7 @@ class SkillInstaller:
         from .skill_scripts import skill_scripts
 
         src, _ = self.stage_dir(sid)
+        self._convert_commands(src)
         dirs = []
         for root, sub, files in os.walk(src):
             sub[:] = sorted(d for d in sub if d not in SKIP_DIRS)
@@ -392,6 +393,80 @@ class SkillInstaller:
             fs.exists = (self.store.root / fs.name / "SKILL.md").is_file()
             found[fs.name] = fs
         return list(found.values())
+
+    @staticmethod
+    def _convert_commands(src: Path) -> None:
+        """Claude Code 의 .claude/commands/**/*.md (슬래시 명령) → 스킬 폴더로 바꿔 둠 (_commands/<이름>/SKILL.md).
+        머리말이 없거나 name/description 이 없어도 됨: 이름은 파일 이름, 설명은 본문 첫 문단."""
+        out = src / "_commands"
+        if out.exists():
+            return
+        for cdir in [d for d in src.rglob("commands") if d.is_dir() and d.parent.name == ".claude" and ".git" not in d.parts]:
+            for f in sorted(cdir.rglob("*.md")):
+                text = f.read_text(encoding="utf-8-sig", errors="replace")
+                name = normalize_name("-".join(f.relative_to(cdir).with_suffix("").parts), f.stem)
+                m = re.match(r"\A---\s*\n(.*?)\n---\s*\n?(.*)\Z", text, re.S)
+                head, body = (m.group(1), m.group(2)) if m else ("", text)
+                if not re.search(r"(?m)^name:", head):
+                    head = f"name: {name}\n" + head
+                d = out / name
+                d.mkdir(parents=True, exist_ok=True)
+                (d / "SKILL.md").write_text(f"---\n{head.strip()}\n---\n{body}", encoding="utf-8")
+
+    def sync(self, sources: list[dict[str, Any]], user: str | None = None) -> list[dict[str, Any]]:
+        """설정한 Git 저장소(skills.sources)의 스킬·스크립트를 받아 설치·갱신 (러너의 '가져오기' 단계).
+        - 새 스킬은 설치, 같은 저장소에서 온 스킬은 커밋이 바뀌었을 때만 갱신 (실행 중 만든 data/·DB 는 보존)
+        - 이름이 같지만 다른 곳에서 온(직접 만든) 스킬은 덮어쓰지 않고 알려줌"""
+        report = []
+        for src in sources:
+            if isinstance(src, str):
+                src = {"url": src}
+            url = str(src.get("url") or "").strip()
+            row: dict[str, Any] = {"url": url, "installed": [], "updated": [], "unchanged": [], "skipped": [], "errors": {}}
+            report.append(row)
+            if not url:
+                row["errors"]["(설정)"] = "url 이 없습니다"
+                continue
+            try:
+                sid = self.stage_git(url, src.get("ref"), src.get("path")) if re.match(r"^(https?://|git@|ssh://|file://)", url) else self.stage_folder(url)
+            except (SkillError, OSError) as e:
+                row["errors"]["(가져오기)"] = str(e)
+                continue
+            try:
+                _, meta = self.stage_dir(sid)
+                commit = (meta.get("source") or {}).get("commit")
+                row["commit"] = commit
+                only = set(src.get("only") or [])
+                todo = []
+                for f in self.scan(sid):
+                    if only and f.name not in only:
+                        continue
+                    if f.error:
+                        row["errors"][f.name] = f.error
+                    elif not f.exists:
+                        todo.append((f, "installed"))
+                    else:
+                        old = (self.store.get(f.name).info.get("source") or {})
+                        if old.get("url") != url:
+                            row["skipped"].append(f"{f.name} (다른 곳에서 만든 같은 이름의 스킬이 있어 덮어쓰지 않음)")
+                        elif commit and old.get("commit") == commit:
+                            row["unchanged"].append(f.name)
+                        else:
+                            todo.append((f, "updated"))
+                if todo:
+                    res = self.install(sid, [f.key for f, _ in todo], overwrite=True, user=user)
+                    done = {x["name"] for x in res["installed"]}
+                    for f, kind in todo:
+                        if f.name in done:
+                            row[kind].append(f.name)
+                    row["errors"].update(res["errors"])
+            except (SkillError, OSError) as e:
+                row["errors"]["(설치)"] = str(e)
+            finally:
+                self.drop(sid)
+            for k in ("installed", "updated", "unchanged", "skipped"):
+                row[k].sort()
+        return report
 
     def install(self, sid: str, names: list[str] | None = None, overwrite: bool = False, user: str | None = None) -> dict[str, Any]:
         src, meta = self.stage_dir(sid)

@@ -36,7 +36,7 @@ except ImportError as e:  # pragma: no cover
 
 
 SESSION_TTL = 60 * 60 * 6
-API_VERSION = 6  # web/index.html 의 UI_API 와 같아야 함 (화면은 바로 바뀌지만 API 는 서버를 다시 켜야 바뀜)
+API_VERSION = 7  # web/index.html 의 UI_API 와 같아야 함 (화면은 바로 바뀌지만 API 는 서버를 다시 켜야 바뀜)
 ASK_TIMEOUT = 60 * 15
 
 
@@ -1000,6 +1000,25 @@ def create_app(cfg: AppConfig, runtime: AgentRuntime | None = None, enable_sched
         except SkillError as e:
             raise HTTPException(400, str(e)) from e
         return {"ok": True}
+
+    @app.post("/api/skills/sync", dependencies=A)
+    async def skill_sync() -> dict[str, Any]:
+        """설정한 Git 저장소(skills.sources)에서 스킬·스크립트를 받아 설치·갱신 (편집자만)."""
+        need_editor()
+        if not (rt.cfg.raw.get("skills") or {}).get("sources"):
+            raise HTTPException(400, "config.yaml 의 skills.sources 에 Git 저장소 주소를 적으세요.")
+        return {"report": await asyncio.to_thread(rt.sync_skills, None, current_user.get())}
+
+    @app.post("/api/skills/{name}/test", dependencies=A)
+    async def skill_test(name: str, llm: bool = False) -> dict[str, Any]:
+        """스킬 폴더의 테스트 사례(tests/cases.yaml, evals/evals.json)를 실행."""
+        from .skill_tests import SkillTestError, format_results, run_skill_tests
+
+        try:
+            r = await run_skill_tests(rt, name, llm)
+        except (SkillError, SkillTestError) as e:
+            raise HTTPException(400, str(e)) from e
+        return {**r, "text": format_results([r])}
 
     @app.post("/api/skills/import", dependencies=A)
     async def skill_import(request: Request, overwrite: bool = False, name: str | None = None) -> dict[str, Any]:

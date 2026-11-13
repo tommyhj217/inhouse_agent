@@ -251,6 +251,8 @@ class SkillScriptRunner:
                 SKILL_ARGS=json.dumps(args or {}, ensure_ascii=False), AGENT_WORKSPACE=str(self.ws.root),
                 AGENT_DOWNLOAD_DIR=str(self.ws.downloads), AGENT_OUTPUT_DIR=str(out_dir), AGENT_USER=current_user.get() or "",
                 AGENT_SKILLS_DIR=str(self.skills.root.resolve()), AGENT_SKILL_DATA=str(sdir / "data"),
+                # Claude Code 스킬 스크립트가 읽는 환경변수
+                CLAUDE_SKILL_DIR=str(sdir), CLAUDE_PROJECT_DIR=str(self.ws.root), CLAUDE_PLUGIN_ROOT=str(sdir),
             )
             env.update(self._env_values(name, sdir, out_dir))
             env.update(extra_env or {})

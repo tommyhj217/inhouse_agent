@@ -164,6 +164,9 @@ class AgentRuntime:
             from .subagent import make_subagent_tool
 
             self.hub.builtins.append(make_subagent_tool(self))
+        from .skill_tests import make_test_tool
+
+        self.hub.builtins.append(make_test_tool(self))  # 스킬 테스트 러너 (스킬 폴더의 사례 실행)
         if cfg.agent.tool_batch:  # 여러 도구 호출을 LLM 왕복 한 번으로 (앞 결과 → 다음 인자, 항목마다 실행, 결과 줄이기)
             from .batch import make_batch_tool
 
@@ -303,7 +306,18 @@ class AgentRuntime:
 
     async def start(self) -> dict[str, str | None]:
         self.start_results = await self.hub.start()
+        sk = self.cfg.raw.get("skills") or {}
+        if sk.get("sources") and sk.get("sync_on_start", False):  # 시작할 때 Git 의 스킬·스크립트를 받아 옴
+            try:
+                self.last_sync = await asyncio.to_thread(self.sync_skills)
+            except Exception:  # noqa: BLE001 - 네트워크가 안 돼도 서버는 뜨게
+                logging.getLogger(__name__).exception("스킬 동기화 실패")
         return self.start_results
+
+    def sync_skills(self, sources: list[Any] | None = None, user: str | None = None) -> list[dict[str, Any]]:
+        """skills.sources(또는 준 주소)의 Git 저장소에서 스킬·스크립트를 받아 설치·갱신."""
+        srcs = sources if sources else list((self.cfg.raw.get("skills") or {}).get("sources") or [])
+        return self.skill_installer.sync(srcs, user)
 
     async def close(self) -> None:
         await self.hub.close()
