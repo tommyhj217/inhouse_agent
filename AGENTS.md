@@ -167,6 +167,7 @@ Claude Code로 만들어 Git에 올린 스킬·스크립트를 **고치지 않�
 - Claude Code 형식을 깨는 요구를 스킬 쪽에 하지 마세요. 호환은 이쪽에서 맞춥니다.
   - 대상: `$ARGUMENTS`, `${CLAUDE_SKILL_DIR}`, 설명 없는 스킬, `.claude/commands`, `allowed-tools` 무시, 도구 이름 대응 안내(`CC_TOOL_NOTE`)
 - 실행은 **스킬 폴더 안 스크립트만** 합니다(`run_skill_script`). 일반 셸 명령 실행 도구를 추가하지 마세요(5-9).
+- 가져오기는 스킬 폴더의 **모든 파일**을 설치합니다(`.md`만 아님). 빠지는 것은 숨김 파일(`KEEP_DOTFILES` 제외)과 `SKIP_DIRS`뿐입니다. 올린 zip 안의 **스킬 zip**은 풀고(`_expand_skill_zips`), 스킬 폴더 안의 zip 은 스킬이 쓰는 파일이라 풀지 않습니다.
 - `sync`는 같은 저장소에서 온 스킬만 갱신합니다. 직접 만든 같은 이름의 스킬을 덮어쓰지 않습니다. `data/`·DB는 보존합니다.
 - 테스트 사례는 스킬 폴더(`tests/cases.yaml`, `evals/evals.json`)에 둡니다. Git으로 스킬과 함께 움직여야 하기 때문입니다.
   - 스크립트·steps 사례는 LLM 없이 돌고, prompt 사례는 `--llm`일 때만 돕니다(비용).

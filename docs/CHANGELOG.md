@@ -4,6 +4,21 @@
 
 ---
 
+## 2026-11-13 — zip 으로 올린 스킬: 모든 파일 설치 확인 + zip 안의 스킬 zip 풀기
+
+**확인 결과**
+- zip 으로 올리면 `.md`만이 아니라 스킬 폴더의 모든 파일(스크립트·하위 모듈·자료·설정·바이너리·스킬이 쓰는 zip)이 설치되고, 설치 뒤 스크립트가 그대로 실행됩니다.
+- 빠지는 것은 숨김 파일(`.python-version` 제외), `__pycache__` 등 `SKIP_DIRS`, 스킬 폴더 밖의 파일입니다(의도한 동작).
+
+**무엇**
+- `SkillInstaller._expand_skill_zips`: 올린 zip·폴더 업로드 안에 **스킬 zip**(안에 `SKILL.md`·`.claude/commands/*.md`·다른 zip 이 있는 zip)이 있으면 `<zip 이름>/`으로 풀고 원래 zip 은 지웁니다. 3단계까지 반복합니다.
+  - 스킬 폴더 안의 zip(템플릿 등)과 스킬과 무관한 zip 은 그대로 둡니다. 스크립트가 그 파일을 쓰기 때문입니다.
+  - 모두 합쳐 `MAX_FILES`·`MAX_TOTAL`을 넘으면 거절합니다.
+- 테스트: `test_zip_installs_every_skill_file_and_script_runs`, `test_zip_of_skill_zips_is_expanded`
+
+**왜**
+- 스킬마다 zip 을 만들어 한 번에 묶어 올리면, 예전에는 안쪽 zip 이 파일로만 복사되어 스킬을 하나도 찾지 못했습니다.
+
 ## 2026-11-13 — 스킬별 파이썬 환경
 
 **무엇**

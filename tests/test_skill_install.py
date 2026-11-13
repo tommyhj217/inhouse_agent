@@ -248,3 +248,89 @@ def test_cli_skills_import_list(tmp_path: Path, capsys) -> None:
     assert asyncio.run(cli.cmd_skills(cfg, ns)) == 0
     assert "설치: agent-b" in capsys.readouterr().out and (tmp_path / "skills" / "agent-b" / "ui.json").is_file()
     assert sys.platform  # (Windows 경로는 parse_command 테스트에서 확인)
+
+
+def _zip_bytes(files: dict[str, str | bytes]) -> bytes:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as z:
+        for k, v in files.items():
+            z.writestr(k, v)
+    return out.getvalue()
+
+
+CHECK_PY = """import json, os
+from lib.util import hello
+d = os.environ["CLAUDE_SKILL_DIR"]
+print(json.dumps({"hello": hello(), "ref": open(os.path.join(d, "reference", "rules.md"), encoding="utf-8").read(),
+                  "cfg": json.load(open(os.path.join(d, "config.json"))), "bin": len(open(os.path.join(d, "data", "a.bin"), "rb").read())}))
+"""
+
+
+def _bom_skill(prefix: str) -> dict[str, str | bytes]:
+    asset = _zip_bytes({"template/a.txt": "템플릿"})  # 스킬이 쓰는 zip (풀지 않음)
+    return {
+        f"{prefix}SKILL.md": "---\nname: bom-check\ndescription: BOM 점검\n---\n`python ${CLAUDE_SKILL_DIR}/scripts/check.py`\n",
+        f"{prefix}scripts/check.py": CHECK_PY,
+        f"{prefix}scripts/lib/__init__.py": "",
+        f"{prefix}scripts/lib/util.py": "def hello():\n    return 'lib'\n",
+        f"{prefix}reference/rules.md": "규칙",
+        f"{prefix}config.json": '{"k": 1}',
+        f"{prefix}data/a.bin": b"\x00\x01\x02",
+        f"{prefix}assets/templates.zip": asset,
+        f"{prefix}scripts/__pycache__/x.pyc": b"junk",
+        f"{prefix}.env": "SECRET=1",
+    }
+
+
+def _installed(st: SkillStore, name: str) -> set[str]:
+    d = st.root / name
+    return {p.relative_to(d).as_posix() for p in d.rglob("*") if p.is_file()} - {".meta.json"}
+
+
+BOM_FILES = {"SKILL.md", "scripts/check.py", "scripts/lib/__init__.py", "scripts/lib/util.py", "reference/rules.md",
+             "config.json", "data/a.bin", "assets/templates.zip"}
+
+
+def test_zip_installs_every_skill_file_and_script_runs(tmp_path: Path) -> None:
+    """zip 으로 올리면 .md 만이 아니라 스킬 폴더의 모든 파일(스크립트·하위 모듈·자료·설정·바이너리)이 설치되고 실행됨.
+    빠지는 것: 숨김 파일(.python-version 제외, 예: .env), __pycache__ 등 SKIP_DIRS."""
+    import asyncio
+
+    st = SkillStore(tmp_path / "skills")
+    inst = SkillInstaller(st)
+    sid = inst.stage_zip(_zip_bytes({**_bom_skill("repo-main/.claude/skills/bom-check/"), "repo-main/README.md": "x"}), "repo-main.zip")
+    inst.install(sid, user="kim")
+    assert _installed(st, "bom-check") == BOM_FILES
+    assert zipfile.ZipFile(st.root / "bom-check" / "assets" / "templates.zip").namelist() == ["template/a.txt"]
+
+    from inhouse_agent.files import FileWorkspace as Workspace
+    from inhouse_agent.skill_scripts import SkillScriptRunner
+
+    runner = SkillScriptRunner(st, Workspace(tmp_path / "ws"), {"python_env": False})
+    out = asyncio.run(runner.run("bom-check", "scripts/check.py"))
+    assert not out.is_error and out.data == {"hello": "lib", "ref": "규칙", "cfg": {"k": 1}, "bin": 3}, out.text
+
+
+def test_zip_of_skill_zips_is_expanded(tmp_path: Path) -> None:
+    """스킬마다 zip 을 만들어 그 zip 들을 다시 하나로 묶어 올려도 각 zip 안의 파일까지 모두 설치됨."""
+    st = SkillStore(tmp_path / "skills")
+    inst = SkillInstaller(st)
+    bom = _zip_bytes(_bom_skill(""))  # SKILL.md 가 zip 맨 위
+    weekly = _zip_bytes({"weekly/SKILL.md": "---\nname: weekly\ndescription: 주간 보고\n---\n본문\n", "weekly/form.xlsx": b"PK"})
+    cmds = _zip_bytes({".claude/commands/hello.md": "인사를 합니다\n"})
+    inner_bundle = _zip_bytes({"weekly.zip": weekly})  # zip 안의 zip 안의 zip
+    data = _zip_bytes({"bundle/bom-check.zip": bom, "bundle/more.zip": inner_bundle, "bundle/cmds.zip": cmds,
+                       "bundle/photos.zip": _zip_bytes({"a.png": b"png"})})
+    sid = inst.stage_zip(data, "bundle.zip")
+    found = {f.name for f in inst.scan(sid)}
+    assert found == {"bom-check", "weekly", "hello"}
+    inst.install(sid, user="kim")
+    assert _installed(st, "bom-check") == BOM_FILES  # 스킬 안의 templates.zip 은 풀지 않고 그대로
+    assert _installed(st, "weekly") == {"SKILL.md", "form.xlsx"}
+    stage, _ = inst.stage_dir(sid)
+    assert (stage / "bundle" / "photos.zip").is_file()  # 스킬과 무관한 zip 은 그대로
+    # 폴더 업로드(브라우저)에 스킬 zip 이 섞여 있어도 같음
+    import base64
+
+    sid = inst.stage_files([{"path": "up/bom-check.zip", "data": base64.b64encode(bom).decode()}])
+    assert {f.name for f in inst.scan(sid)} == {"bom-check"}

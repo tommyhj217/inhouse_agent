@@ -470,6 +470,11 @@ cases:
 - **여러 스킬을 한 번에**: `.agents/skills/`, `.claude/skills/`, `skills/` 등 어디에 있든 SKILL.md가 있는 폴더를 모두 찾습니다.
   - `.claude/skills/*`처럼 같은 스킬을 가리키는 링크(또는 링크 대신 생긴 텍스트 파일)는 한 번만 셉니다.
   - 스킬 폴더 안에 중첩된 예시 SKILL.md는 무시합니다.
+- **스킬 폴더의 파일은 모두 설치됩니다** (`.md`만이 아님): 스크립트와 하위 모듈(`scripts/lib/*.py`), 참고 문서, 엑셀·이미지·설정 JSON·바이너리, 스킬이 쓰는 zip(예: `assets/templates.zip`, 풀지 않고 그대로)까지 복사해 바로 실행됩니다.
+  - 빠지는 것: 숨김 파일(`.env` 등, 단 `.python-version`은 복사), `__pycache__`·`.venv`·`node_modules`·`.git` 등, 스킬 폴더 밖의 파일(저장소 README 등)
+- **zip 안의 스킬 zip도 풉니다**: 스킬마다 zip을 만들어 다시 하나로 묶어 올리거나, 폴더 업로드에 스킬 zip이 섞여 있어도 각 zip 안의 파일까지 모두 가져옵니다(3단계까지).
+  - 안에 `SKILL.md`·`.claude/commands/*.md`·다른 zip이 있는 zip만 풉니다. 스킬 폴더 안의 zip과 스킬과 무관한 zip은 그대로 둡니다.
+  - 모두 합쳐 5,000개·200MB를 넘으면 거절합니다(압축 폭탄 방지).
 - **Claude Code / Codex / Copilot / Gemini용 스킬도 그대로 동작합니다** (Agent Skills 형식):
   - `allowed-tools`, `metadata` 같은 머리말을 그대로 둡니다.
   - `description: Create a plan: scope, …`처럼 값 안에 `: `가 있는 머리말도 읽습니다.

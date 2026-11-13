@@ -138,6 +138,7 @@ class SkillInstaller:
             raise SkillError("zip 파일이 아닙니다. (GitHub 에서는 Code → Download ZIP 으로 받은 파일을 올리세요)") from e
         sid, dest = self._new_stage({"type": "zip", "filename": filename})
         self._extract(z, dest)
+        self._expand_skill_zips(dest)
         return sid
 
     def stage_files(self, files: list[dict[str, Any]], label: str = "") -> str:
@@ -155,6 +156,7 @@ class SkillInstaller:
                 continue
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_bytes(raw)
+        self._expand_skill_zips(dest)
         return sid
 
     def stage_text(self, content: str, name: str | None = None) -> str:
@@ -334,6 +336,51 @@ class SkillInstaller:
                 continue  # 심볼릭 링크(.claude/skills/* → .agents/skills/*) 는 건너뜀 - 같은 스킬이 이미 있음
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_bytes(z.read(i))
+
+    def _expand_skill_zips(self, dest: Path, depth: int = 3) -> list[str]:
+        """올린 zip(또는 폴더) 안에 스킬 zip 이 들어 있으면 풀어 둠 (예: 스킬마다 zip 하나씩 묶어 올린 경우).
+        - 풀기 대상: 안에 SKILL.md · .claude/commands/*.md · 또 다른 zip 이 있는 zip 만 → `<zip 이름>/` 폴더로 풀고 zip 은 지움
+        - 스킬 폴더 안의 zip(템플릿·예시 등 스킬이 쓰는 파일)과 스킬과 무관한 zip 은 그대로 둠 → 스크립트가 그 zip 을 그대로 씀
+        - 압축 폭탄 방지: 모두 합쳐 MAX_FILES·MAX_TOTAL, 깊이 3단계까지"""
+        expanded: list[str] = []
+        for _ in range(depth):
+            skill_dirs = {Path(r) for r, _, fs in os.walk(dest) if "SKILL.md" in fs}
+            zips = [
+                p for p in sorted(dest.rglob("*.zip"))
+                if p.is_file() and not p.is_symlink()
+                and not (set(p.relative_to(dest).parts[:-1]) & SKIP_DIRS)
+                and not any(d == p.parent or d in p.parents for d in skill_dirs)
+            ]
+            done = False
+            for zp in zips:
+                try:
+                    z = zipfile.ZipFile(zp)
+                    entries = [i.filename for i in z.infolist() if not i.is_dir() and "__MACOSX" not in i.filename]
+                except (zipfile.BadZipFile, OSError):
+                    continue
+                if not any(
+                    n.rsplit("/", 1)[-1] == "SKILL.md" or n.lower().endswith(".zip")
+                    or ("/.claude/commands/" in "/" + n and n.endswith(".md"))
+                    for n in entries
+                ):
+                    continue  # 스킬과 무관한 zip → 그대로 둠
+                used = sum(1 for f in dest.rglob("*") if f.is_file())
+                size = sum(f.stat().st_size for f in dest.rglob("*") if f.is_file())
+                if used + len(entries) > MAX_FILES or size + sum(i.file_size for i in z.infolist()) > MAX_TOTAL:
+                    raise SkillError(f"zip 안의 zip({zp.name})까지 풀면 너무 큽니다 (200MB 또는 5000개 초과).")
+                out = zp.with_suffix("")
+                if out.exists():
+                    out = zp.with_name(zp.stem + "_zip")
+                tops = {n.split("/", 1)[0] for n in entries}
+                strip = len(tops) == 1 and all("/" in n for n in entries) and not next(iter(tops)).startswith(".")
+                with z:
+                    self._extract(z, out, strip_root=strip)
+                zp.unlink()
+                expanded.append(zp.relative_to(dest).as_posix())
+                done = True
+            if not done:
+                break
+        return expanded
 
     def _copy_tree(self, src: Path, dest: Path) -> None:
         total, count = 0, 0
